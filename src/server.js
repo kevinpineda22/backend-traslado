@@ -17,6 +17,21 @@ app.use(cors());
 app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" })); // Para firmas en base64
 
+// ─── Ruta raíz ───────────────────────────────────
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    nombre: "Backend Traslados — Merkahorro",
+    version: "1.0.0",
+    endpoints: {
+      health: "/api/health",
+      siesa: "/api/siesa",
+      despachos: "/api/despachos",
+      auditor: "/api/auditor",
+    },
+  });
+});
+
 // ─── Rutas ────────────────────────────────────────
 app.use("/api", routes);
 
