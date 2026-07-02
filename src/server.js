@@ -1,0 +1,63 @@
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
+import "dotenv/config";
+
+import routes from "./routes/index.js";
+import { errorHandler } from "./middleware/errorHandler.js";
+import { getCriterios, getSedes } from "./services/siesa.service.js";
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// ─── Middleware global ────────────────────────────
+app.use(helmet());
+app.use(cors());
+app.use(morgan("dev"));
+app.use(express.json({ limit: "10mb" })); // Para firmas en base64
+
+// ─── Rutas ────────────────────────────────────────
+app.use("/api", routes);
+
+// ─── 404 ──────────────────────────────────────────
+app.use((_req, res) => {
+  res.status(404).json({ ok: false, error: "Ruta no encontrada" });
+});
+
+// ─── Error handler ────────────────────────────────
+app.use(errorHandler);
+
+// ─── Precarga de caché ────────────────────────────
+async function precargarCache() {
+  console.log("[cache] Precargando datos SIESA...");
+  try {
+    const [criterios] = await Promise.allSettled([
+      getCriterios(),
+      getSedes(),
+    ]);
+    if (criterios.status === "fulfilled") {
+      console.log(`[cache] ✅ Criterios cacheados (${criterios.value.data?.length || 0} planes)`);
+    }
+  } catch {
+    // El cache ya registró el error internamente
+  }
+}
+
+// ─── Arranque ─────────────────────────────────────
+if (process.env.NODE_ENV !== "production") {
+  app.listen(PORT, () => {
+    console.log(`
+╔══════════════════════════════════════════╗
+║  Backend Traslados — Merkahorro         ║
+║  Puerto: ${String(PORT).padEnd(33)}║
+║  Modo:   ${(process.env.NODE_ENV || "development").padEnd(33)}║
+╚══════════════════════════════════════════╝
+    `);
+
+    // Precargar en segundo plano (no bloquea el listen)
+    precargarCache();
+  });
+}
+
+export default app;
