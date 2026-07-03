@@ -167,14 +167,32 @@ export async function refrescarSnapshot() {
 
 /* ─── Lectura (la usan los endpoints) ──────────────────────────────── */
 
-/** Devuelve las filas snapshot de las bodegas indicadas. */
+/**
+ * Devuelve TODAS las filas snapshot de las bodegas indicadas.
+ * Supabase corta los SELECT en 1000 filas por defecto; como una bodega puede
+ * tener miles de ítems, paginamos por rangos hasta traerlas todas.
+ */
 export async function leerBodegas(bodegas) {
-  const { data, error } = await supabase
-    .from(TABLE)
-    .select("*")
-    .in("bodega", bodegas);
-  if (error) throw new Error(`Error al leer snapshot: ${error.message}`);
-  return data || [];
+  const PAGE = 1000;
+  const todas = [];
+  let desde = 0;
+
+  for (;;) {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("*")
+      .in("bodega", bodegas)
+      .range(desde, desde + PAGE - 1);
+
+    if (error) throw new Error(`Error al leer snapshot: ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    todas.push(...data);
+    if (data.length < PAGE) break;
+    desde += PAGE;
+  }
+
+  return todas;
 }
 
 /** ¿Hay datos en el snapshot? (para avisar si nunca corrió el refresh) */
