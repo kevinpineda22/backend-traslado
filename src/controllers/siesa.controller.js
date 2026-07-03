@@ -29,7 +29,14 @@ export async function refrescar(req, res, next) {
     );
     res.json({ ok: true, ...resultado, duracion_s: segundos });
   } catch (error) {
-    next(error);
+    // Endpoint protegido: devolvemos el error real para poder diagnosticar
+    // (el errorHandler global lo ocultaría como "Error interno del servidor").
+    console.error("[refresh] ❌", error);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      donde: error.stack?.split("\n")[1]?.trim(),
+    });
   }
 }
 
