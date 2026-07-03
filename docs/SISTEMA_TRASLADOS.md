@@ -4,9 +4,13 @@
 > (frontend + backend). Si se pierde la sesión, el hilo, o cambia el equipo, se retoma
 > desde acá sin arqueología. Cada avance importante se refleja aquí.
 >
-> **Última actualización:** 2026-07-02
-> **Estado global:** 🟡 Frontend y backend construidos por separado — todavía NO se hablan.
-> Fase actual: **documentación + alineación de contratos (Fase 0/1)**.
+> **Última actualización:** 2026-07-03
+> **Estado global:** 🟢 **FLUJO COMPLETO VERIFICADO END-TO-END en local (2026-07-03).**
+> Despachador (recoge, marca faltantes, firma) → Auditor (recibe ciego, compara, decide, firma)
+> → todo persistido, firmas en `traslados_firmas`. Fases 2 y 3 cerradas; backend B1–B4 OK; base
+> viva al día. **Pendientes:** (1) fase de estética/UX del frontend (pospuesta a propósito),
+> (2) desplegar el backend a Vercel (hoy probado en local, puerto 3001), (3) push al ERP (Fase 4,
+> espera el conector).
 
 ---
 
@@ -248,6 +252,65 @@ Cosas del proceso de Johon que **no existen** todavía en código:
 ## 11. Bitácora / dónde retomar
 
 > Append-only. Lo más reciente arriba. Al retomar, leer esto primero.
+
+### 2026-07-03 (tarde 8) — ✅ FLUJO COMPLETO VERIFICADO END-TO-END
+- Johan probó en local: firma se guarda y **el flujo cierra completo** (despachador → auditor,
+  con firmas persistidas). Milestone: el sistema camina de punta a punta.
+- **Cerrado:** Fases 0, 1, 2, 3. Los 9 mismatches. Contratos front↔back. Firmas. Base viva.
+- **Lo que queda (nuevas fases, no bloqueantes del core):**
+  1. **Estética/UX del frontend** — próxima fase acordada (funcionalidad primero, belleza después).
+  2. **Deploy backend a Vercel** — hoy corre en local (3001); falta la URL productiva.
+  3. **Fase 4 — push al ERP** — espera el conector de Juan.
+  4. Endurecimiento: auth real (hoy `d1`/`auditor1` hardcodeados), firmas a R2.
+
+### 2026-07-03 (tarde 7) — Fix bug de firma (bloqueaba finalizar)
+- **Bug:** `SignatureModal.handleConfirm` usaba `getTrimmedCanvas()`, que arrastra el paquete
+  `trim-canvas` → rompe con Vite (`import_trim_canvas.default is not a function`). Reventaba
+  ANTES de generar el dataURL, por eso NO se guardaba ninguna firma.
+- **Fix:** usar `getCanvas().toDataURL('image/png')` (no recorta bordes, pero captura la firma).
+- **Aclaración de storage:** las firmas SÍ se guardan en `traslados_firmas` (base64, rol
+  despachador/auditor) — el despachador vía `cambiarEstado`, el auditor vía `confirmarAuditoria`.
+  No aparecían por el crash, no por falta de wiring. (Evolución futura: firmas a R2, ver §4.)
+- **Nota de alcance:** la estética/UX del frontend se pospone a una fase aparte (acordado con
+  Johan): primero funcionalidad end-to-end, después "belleza".
+
+### 2026-07-03 (tarde 6) — Backend local levantado + smoke test OK
+- Backend corriendo en **local, puerto 3001** (`/api/health` responde). CORS abierto (`cors()`).
+- Frontend apuntado con **`.env.local`** → `VITE_TRASLADOS_API_URL=http://localhost:3001/api`
+  (cubierto por `*.local` en `.gitignore`, no se commitea). **Requiere reiniciar `npm run dev`.**
+- **Smoke test OK:** `GET /api/despachos` y `GET /api/auditor/despachos` responden
+  `{ok:true,data:[]}` (200, conexión a Supabase viva). Vacíos porque aún no hay despachos creados.
+- **Para ver el flujo:** falta un despacho de prueba (lo crea el AdminPanel de Juan, o un INSERT
+  seed en Supabase).
+
+### 2026-07-03 (tarde 5) — ALTERs corridos en la base viva
+- Johan corrió los 2 `ALTER` en Supabase. Verificado por consulta a `information_schema`:
+  `traslados_despachos.auditor_id` (character varying) y `traslados_items.agotado` (boolean) ✅.
+- **Base viva al día.** Ya no hay pendientes de esquema ni de código.
+- **Único pendiente:** levantar/desplegar el backend para la prueba end-to-end. Al correr local,
+  ojo con el puerto: `trasladosApi` cae por defecto a `http://localhost:3000/api`, pero el backend
+  usa `PORT` (README menciona 3001) → alinear `VITE_TRASLADOS_API_URL` con el puerto real.
+
+### 2026-07-03 (tarde 4) — Juan Manuel implementó B4 (verificado en código)
+- **B4 ✅ (commits hasta `135f79a`):** endpoints `/auditor/despachos/:id/comparar` y `/confirmar`
+  implementados **exactamente al contrato acordado**:
+  - `compararAuditoria` → `{ match, differences:[{id, codigo_item, descripcion,
+    cantidad_despachador, cantidad_auditor, diferencia}] }`. Coincide 1:1 con lo que consume
+    nuestro `AuditorPanel`.
+  - `confirmarAuditoria` → mapea `aprobado→Auditado`, `inconsistencia→Recibido_con_inconsistencia`,
+    `rechazado→Rechazado`; persiste cantidad_auditor+diferencia, firma (rol auditor) y `auditor_id`.
+  - Validators usan `id` (no `item_id`); enum de estados incluye `Recibido_con_inconsistencia`;
+    transiciones actualizadas en `updateStatus`.
+- **Mismatch #4 RESUELTO.** Front y back del auditor ahora hablan el mismo idioma.
+- **También subió:** flujo Llano (`productosLlanoSchema`), paginación SIESA, y su propio
+  `docs/ARQUITECTURA.md` (snapshot/flujos). Todo de su carril (admin/datos).
+- **Bloqueos restantes para probar end-to-end (NO de código):**
+  1. Correr los 2 `ALTER` en la base viva: `agotado` (traslados_items) y `auditor_id`
+     (traslados_despachos). Sin ellos, recolectar/confirmar fallan contra la base. No verificable
+     desde acá.
+  2. **Backend sin desplegar** (Vercel pendiente). El front necesita una URL viva.
+- **Situación:** TODO el código (front + back) está completo y alineado. Falta solo lo operativo
+  (2 ALTER + deploy) para la prueba en vivo.
 
 ### 2026-07-03 (tarde 3) — Fase 3 Auditor (frontend) adelantada contra contrato B4
 - **`AuditorPanel` reescrito (Fase 3):** recepción **ciega por escaneo** (endpoints
