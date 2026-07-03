@@ -26,11 +26,31 @@ const trim = (v) => String(v ?? "").trim();
 
 async function traerDeConnekta() {
   const primera = await ejecutarConsulta(QUERY_TRASLADOS, 1, TAM_PAG);
-  let todos = [...primera.datos];
-  for (let p = 2; p <= primera.totalPaginas; p++) {
-    const pagina = await ejecutarConsulta(QUERY_TRASLADOS, p, TAM_PAG);
-    todos = todos.concat(pagina.datos);
+  const total = primera.totalPaginas;
+
+  // Páginas 2..total en PARALELO con límite de concurrencia. El fetch secuencial
+  // de ~77 páginas tarda minutos y hace timeout en serverless; en paralelo baja
+  // a decenas de segundos. Un worker pool respeta el límite para no saturar Connekta.
+  const paginas = [];
+  for (let p = 2; p <= total; p++) paginas.push(p);
+
+  const CONC = Number(process.env.CONNEKTA_CONCURRENCIA) || 6;
+  const bloques = [primera.datos];
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < paginas.length) {
+      const p = paginas[cursor++];
+      const pagina = await ejecutarConsulta(QUERY_TRASLADOS, p, TAM_PAG);
+      bloques.push(pagina.datos); // push es atómico entre awaits (single-thread)
+    }
   }
+
+  await Promise.all(
+    Array.from({ length: Math.min(CONC, paginas.length || 1) }, worker),
+  );
+
+  const todos = bloques.flat();
 
   // El query ya filtra por bodega (OR), pero recortamos por las dudas.
   const relevantes = new Set(bodegasInvolucradas());

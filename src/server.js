@@ -10,6 +10,11 @@ import { errorHandler } from "./middleware/errorHandler.js";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Vercel: máximo tiempo de ejecución de la función (segundos). El refresh de
+// SIESA es largo → necesita el tope del plan Pro. Se declara acá (además de
+// vercel.json) porque el export nombrado es la forma más confiable de aplicarlo.
+export const maxDuration = 300;
+
 // ─── Middleware global ────────────────────────────
 app.use(helmet());
 app.use(cors());
