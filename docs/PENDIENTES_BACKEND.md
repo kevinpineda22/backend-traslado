@@ -1,180 +1,154 @@
-# Pendientes del Backend — Traslados
+# Handoff Backend — Traslados (para Juan Manuel)
 
-> **Para:** el equipo de backend (Kevin).
-> **De:** equipo de frontend (Johan) — paneles Despachador y Auditor.
-> **Objetivo de este archivo:** que ambos apuntemos al mismo lugar. Primero te explico QUÉ
-> estamos construyendo del lado del frontend y por qué, y después la lista concreta de lo que
-> necesitamos de tu lado, con el contrato esperado. Nada acá te pide rehacer lo que ya hiciste
-> (flujos + snapshot están muy bien) — es lo que falta para que el flujo cierre punta a punta.
+> **Para:** Juan Manuel (backend).
+> **De:** Johan (frontend — paneles Despachador y Auditor).
+> **Objetivo:** que apuntemos al mismo lado. Acá tenés (1) lo que YA dejamos listo del lado del
+> frontend, y (2) lo concreto que falta de tu lado, con el contrato exacto. Nada te pide rehacer
+> lo que ya hiciste bien (flujos + snapshot + UUID + tope 422); es lo que falta para cerrar el
+> flujo de punta a punta.
 >
-> El detalle completo del sistema vive en [`SISTEMA_TRASLADOS.md`](./SISTEMA_TRASLADOS.md).
+> Detalle completo del sistema: [`SISTEMA_TRASLADOS.md`](./SISTEMA_TRASLADOS.md).
+> **Última actualización:** 2026-07-03.
 
 ---
 
-## 0. Estado (actualizado por Kevin)
+## 0. Estado de un vistazo
 
 | # | Tarea | Estado |
 |---|-------|--------|
-| B1 | Sincronizar migraciones | ✅ **Hecho** — `sql/002_uuid_snapshot.sql` espeja la base real (UUID + snapshot + `agotado`). |
-| B2 | Persistir "agotado" + tope duro | ✅ **Hecho** — endpoint `recolectar` acepta `agotado`; rechaza `cantidad > cantidad_admin` (422). **Falta 1 paso tuyo/DBA:** correr el ALTER en la base viva (abajo). |
-| B3 | `findAll` con `estado` array | ✅ **Hecho** — `Despacho.model.findAll` usa `.in` para arrays, `.eq` para string. |
-| B4 | Auditoría en dos tiempos | ⏳ **Pendiente** — de acuerdo con el rediseño. Antes de codear alineemos: (a) `item_id` vs `id` en el contrato, (b) agregar columna `auditor_id`. Hablámoslo y lo dejo listo. |
-| B5 | Normalizar `items` | ⏳ Opcional, sin urgencia. |
+| B1 | Sincronizar migraciones (drift) | ✅ Hecho — `sql/002_uuid_snapshot.sql` espeja la base (UUID + snapshot + `agotado`). |
+| B2 | Persistir `agotado` + tope duro | ✅ Código hecho (422 si `cantidad > cantidad_admin`). ⏳ **Falta correr 1 ALTER en la base viva.** |
+| B3 | `findAll` con `estado` array | ✅ Hecho — `.in` para arrays, `.eq` para string. |
+| B4 | Auditoría en dos tiempos (`comparar`/`confirmar`) | ⏳ **Pendiente — es lo que te bloquea la Fase 3 del auditor.** Contrato definido abajo. |
+| B5 | Normalizar `items` | 🟢 Opcional (ya lo manejamos en el front). |
 
-**ALTER pendiente para B2** (la base viva ya existe sin la columna; correr una vez en Supabase):
-```sql
-alter table public.traslados_items
-  add column if not exists agotado boolean not null default false;
-```
+**Camino crítico para vos ahora:** correr los 2 ALTER (§3.1) e implementar B4 (§3.2).
 
-Contrato final de `POST /api/despachos/:id/recolectar` (ya implementado):
+---
+
+## 1. Lo que YA dejamos listo nosotros (frontend)
+
+Para que sepas contra qué se va a conectar tu backend. Todo probado con Vitest (**46 tests
+verde**, `npm test`).
+
+### Despachador — LISTO (Fase 2)
+- Registra **cantidad real por ítem**, marca **agotado** (checkbox) y detecta **incompleto**.
+- **Tope duro** en el front (no deja pasar de `cantidad_admin`) — tu 422 es el segundo cerrojo.
+- **Alerta permanente** de faltantes (incompletos/agotados) siempre visible.
+- Botón **"Iniciar recolección"** → `PATCH /despachos/:id/estado` a `En_recoleccion`.
+- Finalizar → `POST /despachos/:id/recolectar` (cantidades por ítem) + `PATCH estado` a
+  `Recolectado` con firma.
+- **Payload que te manda a `/recolectar`:**
+  ```json
+  { "items": [ { "id": "<uuid item>", "cantidad": 5, "agotado": false } ] }
+  ```
+
+### Auditor — LISTO pero ESPERANDO B4 (Fase 3)
+- **Recepción ciega por escaneo**: usa `GET /auditor/despachos` y `GET /auditor/despachos/:id`
+  (los ciegos, sin `cantidad_despachador`). El auditor escanea y cuenta por ítem.
+- Botón **"Comparar"** → `POST /auditor/despachos/:id/comparar` (tu backend revela diferencias).
+- Si hay diferencias: **Recontar** / **Recibir con inconsistencia** / **Rechazar** →
+  `POST /auditor/despachos/:id/confirmar` + firma.
+- ⚠️ Estos dos endpoints (`comparar`/`confirmar`) **todavía no existen** → hoy el panel da 404.
+  Es lo que implementás en B4.
+
+### Ajustes de contrato que ya resolvimos del lado front
+- Leemos `items` aunque devuelvas `traslados_items` (normalizador propio).
+- Mandamos `firma_data` (no `firma`).
+- Leemos tus errores como `{ ok:false, error }` (antes leíamos `.message` y no se veían — ya
+  se ven, incluido tu 422).
+
+---
+
+## 2. Contratos que ya implementaste (verificados en código) ✅
+
+`POST /api/despachos/:id/recolectar`
 ```json
 { "items": [ { "id": "<uuid item>", "cantidad": 5, "agotado": false } ] }
 ```
-Si mandás `cantidad` mayor a la pedida, responde **422** con el mensaje del tope. `agotado` es opcional (default `false`).
+Si `cantidad > cantidad_admin` → **422** con el mensaje del tope. `agotado` opcional (default `false`). 👍
 
 ---
 
-## 1. Qué estamos construyendo nosotros (para que se entienda el todo)
+## 3. Lo que falta de tu lado
 
-El proceso real tiene tres actores. Vos ya cubriste el **Admin** (crear despacho con snapshot
-de inventario) y la infra de datos (snapshot SIESA + flujos). Nosotros hacemos los dos pasos
-siguientes:
+### 3.1 — Operativo: correr 2 ALTER en la base viva 🔴
 
-### Despachador (sede origen) — **en construcción ahora (Fase 2)**
-Recibe la lista de productos con `cantidad_admin`. Va a bodega y por cada producto registra:
-- **Completo** — recogió lo pedido.
-- **Incompleto** — hay stock pero no alcanza → registra **cuánto** recogió (`0 < x < admin`).
-- **Agotado** — no hay stock (recoge 0, pero es distinto de "no lo toqué").
+La base viva ya existe sin estas columnas. Corré una vez en Supabase (y dejalos también en
+`sql/002` para que la migración siga siendo el espejo de la base):
 
-Reglas: **nunca** puede exceder `cantidad_admin`, y lo incompleto/agotado se ve SIEMPRE en
-pantalla (alerta permanente). Al finalizar, firma y pasamos el estado a `Recolectado`.
-
-### Auditor (sede destino) — **Fase 3**
-Recibe la mercancía y **escanea a ciegas** (sin ver lo que envió el origen). Al final se
-compara. Si no coincide: recuenta, y si sigue mal, contacta origen y marca **recibido con
-inconsistencia**. Firma y queda almacenado. De ahí sale el push al ERP (tu conector).
-
----
-
-## 2. Lo que necesitamos de tu lado — checklist
-
-| # | Tarea | Prioridad | Bloquea |
-|---|-------|-----------|---------|
-| B1 | Sincronizar migraciones (schema drift) | 🔴 Alta | Deploy / onboarding |
-| B2 | Persistir "agotado" en `traslados_items` | 🔴 Alta | Fase 2 (despachador) |
-| B3 | `findAll` debe aceptar `estado` como array (`.in`) | 🟡 Media | Listados de paneles |
-| B4 | Rediseñar el flujo de auditoría (comparar antes de firmar) | 🟡 Media | Fase 3 (auditor) |
-| B5 | (Opcional) normalizar respuesta a `items` | 🟢 Baja | — (ya lo manejamos) |
-
----
-
-## 3. Detalle de cada pendiente
-
-### B1 — Sincronizar migraciones (schema drift) 🔴
-
-**Problema:** cambiaste la base viva pero `sql/001_create_tables.sql` no refleja la realidad:
-- Dice `id BIGINT` — la base viva es `uuid DEFAULT gen_random_uuid()`.
-- Le faltan las columnas nuevas de `traslados_items` (`flujo` en despachos; `factor`,
-  `rotacion`, `stock_origen`, `stock_destino`, `consumo_destino`, `stock_seguridad`).
-- La tabla **`traslados_snapshot` no tiene NINGUNA migración** — solo existe en la base viva.
-
-**Por qué importa:** el archivo de migración es el espejo de la base. Si alguien despliega de
-cero o entra al equipo, la base y el repo no coinciden y se rompe.
-
-**Acción:** subí un `sql/002_sync_uuid_snapshot.sql` (o corregí el `001`) con el estado real:
-`uuid`, columnas nuevas, y el `CREATE TABLE traslados_snapshot (...)` tal como está en Supabase.
-
-### B2 — Persistir "agotado" en `traslados_items` 🔴
-
-**Problema:** hoy solo existe `cantidad_despachador`. Si el despachador recoge 0 porque el
-producto está **agotado**, se guarda igual que si simplemente no lo hubiera tocado. Para el
-auditor y para el ERP, "agotado" es información distinta a "no recolectado".
-
-**Acción propuesta:** agregar a `traslados_items`:
 ```sql
+-- Para B2 (agotado del despachador)
 alter table public.traslados_items
-  add column agotado boolean not null default false;
--- (opcional, más rico) add column motivo_faltante varchar(30); -- 'agotado' | 'incompleto' | null
-```
-Y en el endpoint de recolección (ver contrato abajo) aceptar ese dato por ítem.
+  add column if not exists agotado boolean not null default false;
 
-**Contrato que vamos a mandar** a `POST /api/despachos/:id/recolectar`:
-```json
-{ "items": [
-  { "id": "<uuid item>", "cantidad": 5, "agotado": false },
-  { "id": "<uuid item>", "cantidad": 0, "agotado": true }
-]}
-```
-Regla de servidor sugerida: **rechazar** cualquier `cantidad > cantidad_admin` (tope duro).
-Hoy el `recolectarSchema` valida `cantidad >= 0`, pero no el tope superior — agregalo.
-
-### B3 — `findAll` con `estado` como array 🟡
-
-**Problema:** los paneles filtran por varios estados a la vez, ej. el despachador pide
-`['Creado','En_recoleccion']`. Axios lo serializa como `?estado=Creado&estado=En_recoleccion`,
-y `req.query.estado` llega como **array**. Hoy `Despacho.model.findAll` hace
-`.eq("estado", filters.estado)` → con un array no matchea nada.
-
-**Acción:**
-```js
-if (Array.isArray(filters.estado))      query = query.in("estado", filters.estado);
-else if (filters.estado)                query = query.eq("estado", filters.estado);
+-- Para B4 (quién auditó)
+alter table public.traslados_despachos
+  add column if not exists auditor_id varchar(100);
 ```
 
-### B4 — Rediseñar el flujo de auditoría 🟡
+> Sin el primero, el guardar `agotado` falla contra la base viva aunque el código esté OK.
 
-**Problema (choque de flujo, no de nombres):** hoy `POST /auditor/despachos/:id/auditar` exige
-la firma de una vez y **auto-decide** (cualquier diferencia ⇒ `Rechazado`). El proceso real
-del auditor es en dos tiempos: primero **comparar** (ver diferencias), después **decidir**
-(aprobar con diferencias / rechazar / recibido-con-inconsistencia) y recién ahí firmar.
+### 3.2 — B4: auditoría en dos tiempos 🟡 (lo que desbloquea la Fase 3)
 
-**Acción propuesta — separar en dos endpoints:**
+Hoy `POST /auditor/despachos/:id/auditar` exige la firma de una vez y **auto-decide**
+(cualquier diferencia ⇒ `Rechazado`). El proceso real es en dos tiempos: primero **comparar**
+(ver diferencias), después **decidir + firmar**. Separalo en dos endpoints:
 
-1. `POST /auditor/despachos/:id/comparar` — recibe cantidades del auditor, NO firma, NO cambia
-   estado. Devuelve la comparación:
-   ```json
-   { "match": false, "differences": [
-     { "item_id": "<uuid>", "codigo_item": "...", "descripcion": "...",
-       "cantidad_despachador": 10, "cantidad_auditor": 8, "diferencia": -2 }
-   ]}
-   ```
-2. `POST /auditor/despachos/:id/confirmar` — recibe la decisión + firma y finaliza:
-   ```json
-   { "decision": "aprobado" | "rechazado" | "inconsistencia",
-     "auditor_id": "...", "firma_data": "data:image/png;base64,...",
-     "items": [{ "item_id": "<uuid>", "cantidad_auditor": 8 }] }
-   ```
-   Mapea `decision` → estado. Sugerimos un estado nuevo terminal **`Recibido_con_inconsistencia`**
-   para el caso en que se recibe pese a que no cuadró (hoy no existe en la máquina de estados).
+**1) `POST /auditor/despachos/:id/comparar`** — sin firma, sin cambiar estado.
+```
+body: { "items": [ { "id": "<uuid item>", "cantidad_auditor": 8 } ] }
+resp: { "ok": true, "data": {
+          "match": false,
+          "differences": [
+            { "id": "<uuid item>", "codigo_item": "...", "descripcion": "...",
+              "cantidad_despachador": 10, "cantidad_auditor": 8, "diferencia": -2 }
+          ] } }
+```
+- `match: true` cuando ninguna `diferencia` es distinta de 0.
+- `diferencia = cantidad_auditor − cantidad_despachador`.
 
-> Cuando definas esto, avisanos y alineamos el `AuditorPanel` al contrato exacto. No adaptamos
-> el front al flujo viejo de una-sola-firma porque perderíamos "aprobar con diferencias", que
-> es un requisito del negocio.
+**2) `POST /auditor/despachos/:id/confirmar`** — decisión + firma, finaliza.
+```
+body: { "decision": "aprobado" | "inconsistencia" | "rechazado",
+        "auditor_id": "...", "firma_data": "data:image/png;base64,...",
+        "items": [ { "id": "<uuid item>", "cantidad_auditor": 8 } ] }
+resp: { "ok": true, "data": { "estado": "<estado final>" } }
+```
+Mapa `decision → estado`:
+- `aprobado` → `Auditado`
+- `inconsistencia` → **`Recibido_con_inconsistencia`** (estado nuevo, terminal)
+- `rechazado` → `Rechazado`
 
-### B5 — (Opcional) normalizar respuesta a `items` 🟢
+**Convenciones acordadas:**
+- Usar **`id`** (PK del ítem) en el body, igual que en `/recolectar`. No `item_id`.
+- Agregar `Recibido_con_inconsistencia` al enum de `cambiarEstadoSchema` y al mapa de
+  transiciones (`Recolectado`/`En_recepcion` → ese estado).
+- Guardá `cantidad_auditor` y `diferencia` por ítem, y la firma con `rol: "auditor"`.
 
-`findById` devuelve `traslados_items` / `traslados_firmas` (nombres crudos de Supabase). El
-front espera `items` / `firmas`. **Ya lo resolvimos de nuestro lado** con un normalizador, así
-que esto es opcional — pero si algún día el service mapea a `items`, borramos ese parche.
+### 3.3 — B5 (opcional, sin urgencia) 🟢
+
+Si algún día `findById` devuelve `items`/`firmas` en vez de `traslados_items`/`traslados_firmas`,
+borramos nuestro normalizador. No corre prisa.
 
 ---
 
-## 4. Contrato de estados (para que quede una sola verdad)
+## 4. Contrato de estados (una sola verdad)
 
 ```
 Creado → En_recoleccion → Recolectado → { En_recepcion, Auditado }
 En_recepcion → { Auditado, Rechazado }
-(propuesto nuevo) → Recibido_con_inconsistencia   [terminal]
+(nuevo) Recolectado/En_recepcion → Recibido_con_inconsistencia   [terminal]
 ```
-
-El **despachador** mueve `Creado → En_recoleccion` (al iniciar) y `En_recoleccion → Recolectado`
-(al firmar). El **auditor** cierra en `Auditado` / `Rechazado` / `Recibido_con_inconsistencia`.
+- **Despachador:** `Creado → En_recoleccion` (iniciar) y `En_recoleccion → Recolectado` (firmar).
+- **Auditor:** cierra en `Auditado` / `Rechazado` / `Recibido_con_inconsistencia`.
 
 ---
 
 ## 5. Resumen de una línea
 
-Vos tenés la boca del pipe (datos + creación) muy bien. Nos falta: **migraciones al día (B1)**,
-**persistir agotado (B2)**, **filtro por array (B3)** y **auditoría en dos tiempos (B4)**. Con
-eso, el flujo cierra de punta a punta y apuntamos todos al mismo objetivo.
+Ya está: B1, B2 (código), B3. Falta: **2 ALTER** (`agotado`, `auditor_id`) y **B4** (los
+endpoints `comparar` + `confirmar` con el estado `Recibido_con_inconsistencia`). Con eso, el
+Despachador y el Auditor del frontend —que ya están listos— cierran el flujo de punta a punta.
+Cuando tengas B4, avisá y lo probamos juntos en vivo.
+

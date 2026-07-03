@@ -170,7 +170,8 @@ Auditado / Rechazado = terminales
 | 4 | **Choque de FLUJO, no solo de campos.** El front quiere: auditar → ver diferencias → decidir aprobar/rechazar → firmar. El back exige `firma_data` ANTES de auditar y **auto-decide** (cualquier diferencia ⇒ `Rechazado`, sin "aprobar con diferencias"). Además: front espera `{match, differences}`, back devuelve `{estado, hayDiferencias, items}`; front manda `item_id`, back valida `id`. | `AuditorPanel.jsx` ↔ `auditor.controller/service` | **Coordinar con backend.** El flujo del front (que coincide con el proceso real de Johan: recontar, contactar origen, recibir-con-inconsistencia) es el correcto. El back debe ofrecer un paso de comparación previo a la firma y permitir aprobación manual. NO adaptar el front hacia abajo. | 🔴 (backend) |
 | 5 | **La firma nunca se guarda.** Front manda `{firma}`; back valida `{firma_data}`. Se descarta en silencio. | ambos paneles ↔ `validators/service` | **RESUELTO (lado front):** ambos paneles ahora mandan `firma_data` en `useActualizarEstado`. | ✅ |
 | 6 | **`cantidad_despachador` queda null.** El panel es binario (Set de códigos), nunca llama `/recolectar`, nunca envía cantidades. Luego `diferencia = auditor - null`. | `DespachadorPanel.jsx` | Rediseñar recolección con cantidades reales + llamar `/recolectar` antes de `Recolectado` (ver Fase 2). | 🔴 |
-| 7 | **Filtro de estado como array.** Front manda `estado:['Creado','En_recoleccion']`; back hace `.eq("estado", array)` → no matchea. | `DespachadorPanel/AuditorPanel` ↔ `Despacho.model.findAll` | Backend: soportar `.in()` cuando llega array. | 🔴 (backend) |
+| 7 | **Filtro de estado como array.** Front manda `estado:['Creado','En_recoleccion']`; back hace `.eq("estado", array)` → no matchea. | `DespachadorPanel/AuditorPanel` ↔ `Despacho.model.findAll` | **RESUELTO (backend, commit `11c5b53`):** `findAll` usa `.in` para arrays, `.eq` para string. | ✅ |
+| 9 | **Mensajes de error del backend no se mostraban.** Back responde `{ ok:false, error }`; el front leía `data.message` → caía al genérico de axios (incl. el 422 del tope). | ambos paneles | **RESUELTO (front):** helper `mensajeErrorTraslado` lee `data.error` primero; aplicado en los 8 sitios. | ✅ |
 | 8 | **El despachador nunca pasa a `En_recoleccion`.** Al finalizar salta `Creado → Recolectado`, transición inválida. | `DespachadorPanel.jsx` + `updateStatus` | **RESUELTO (front):** botón "Iniciar recolección" hace `Creado → En_recoleccion`; el finalizar hace `En_recoleccion → Recolectado`. | ✅ |
 
 ---
@@ -206,8 +207,12 @@ Cosas del proceso de Johon que **no existen** todavía en código:
   (`En_recoleccion`), finalizar = `POST /recolectar` + firma → `Recolectado`. Lógica pura en
   `utils/recoleccionDespacho.js` (+ tests). **Depende del backend B2** para persistir `agotado`
   (hoy el back descarta ese campo; la cantidad sí se guarda). Ver `PENDIENTES_BACKEND.md`.
-- **Fase 3 — Auditor real.** Escaneo ciego, conteo acumulado, recuento, contactar origen,
-  recibido-con-inconsistencia, firma → `Auditado`/`Rechazado`/estado nuevo de inconsistencia.
+- **Fase 3 — Auditor real.** 🟡 **Frontend LISTO (adelantado contra el contrato B4).** Escaneo
+  ciego (endpoints `/auditor/despachos` y `/:id`), conteo por ítem, botón "Comparar" →
+  `POST /comparar`, tabla de diferencias, decisiones **Recontar / Recibir con inconsistencia /
+  Rechazar** → `POST /confirmar` + firma. Lógica pura en `utils/auditoriaDespacho.js` (+ tests),
+  hooks en `hooks/useAuditoria.js`. **Bloqueado en runtime hasta que el backend implemente B4**
+  (`/comparar` y `/confirmar` hoy dan 404). Estado nuevo esperado: `Recibido_con_inconsistencia`.
 - **Fase 4 — Integración ERP.** Conectar el push cuando el compañero entregue el conector.
 - **Fase 5 — Endurecimiento.** Auth real, firmas a R2, CSP (ver guía del repo web), tests e2e.
 
@@ -243,6 +248,36 @@ Cosas del proceso de Johon que **no existen** todavía en código:
 ## 11. Bitácora / dónde retomar
 
 > Append-only. Lo más reciente arriba. Al retomar, leer esto primero.
+
+### 2026-07-03 (tarde 3) — Fase 3 Auditor (frontend) adelantada contra contrato B4
+- **`AuditorPanel` reescrito (Fase 3):** recepción **ciega por escaneo** (endpoints
+  `/auditor/despachos` + `/:id`), conteo por ítem (escáner físico/cámara/manual), botón
+  "Comparar" → `POST /comparar` (el backend revela diferencias), tabla comparativa Enviado vs
+  Contado, y decisiones **Recontar** (vuelve a escanear) / **Recibir con inconsistencia** /
+  **Rechazar** → `POST /confirmar` + firma.
+- **Lógica pura nueva:** `utils/auditoriaDespacho.js` (decisiones, payloads, resumen de
+  diferencias) con **9 tests**. Suite total del módulo: **46 tests verde**.
+- **Hooks nuevos:** `useCompararAuditoria`, `useConfirmarAuditoria` en `hooks/useAuditoria.js`.
+- **Bloqueo runtime:** los endpoints `/comparar` y `/confirmar` (B4) todavía no existen → 404
+  hasta que Juan Manuel los implemente con el contrato acordado. Construido a propósito por adelantado.
+- **Próximo paso:** Juan Manuel implementa B4 (y el `ALTER auditor_id` + estado
+  `Recibido_con_inconsistencia`); apenas esté, conectamos y probamos end-to-end.
+
+### 2026-07-03 (tarde 2) — Backend respondió B1/B2/B3 + fix #9
+- **Verificado en código (commits `e0ea9c3`, `11c5b53`):**
+  - **B1 ✅** `sql/002_uuid_snapshot.sql` autoritativo (UUID + snapshot + `agotado`). Drift cerrado.
+  - **B2 ✅** `recolectar` acepta `agotado`; **tope duro** en `Item.model` → `422` si
+    `cantidad > cantidad_admin`. Falta operativo: correr el `ALTER add column agotado` en la base viva.
+  - **B3 ✅** `findAll` con `.in`/`.eq`.
+  - **B4 ⏳** Juan Manuel de acuerdo; pidió definir (a) `item_id` vs `id`, (b) columna `auditor_id`.
+    **Respondido en `PENDIENTES_BACKEND.md`:** usar `id`; agregar `auditor_id varchar(100)`;
+    agregar estado `Recibido_con_inconsistencia`; contrato en 2 tiempos comparar→confirmar.
+- **Mismatch #9 (nuevo) RESUELTO (front):** el backend responde `{ ok:false, error }` pero los
+  paneles leían `data.message` → los errores del back (incl. 422) no se veían. Helper
+  `mensajeErrorTraslado` + aplicado en 8 sitios. **37 tests verde.**
+- **Pendiente operativo (DBA):** `ALTER traslados_items add column agotado` y (para B4)
+  `ALTER traslados_despachos add column auditor_id` en la base viva.
+- **Próximo paso:** que Juan Manuel implemente B4 con el contrato acordado → nosotros Fase 3.
 
 ### 2026-07-03 (tarde) — Fase 2 Despachador (frontend) + handoff al backend
 - **`DespachadorPanel` reescrito (Fase 2):** cantidad real por ítem, checkbox "agotado",
