@@ -97,6 +97,39 @@ export async function listarProductos(req, res, next) {
 }
 
 /**
+ * POST /api/siesa/productos-llano
+ * Flujo Llano: recibe las filas del Excel (item, unidad, capacidad) y devuelve
+ * los productos cruzados con SIESA + sugerido A/B/C.
+ * Body: { destino, items: [{ item, unidad, capacidad }], cadencias? }
+ */
+export async function listarProductosLlano(req, res, next) {
+  try {
+    const { destino, items, cadencias } = req.body;
+
+    const flujo = getFlujoPorDestino(destino);
+    if (!flujo) {
+      return res
+        .status(400)
+        .json({ ok: false, error: `El destino ${destino} no pertenece a ningún flujo` });
+    }
+
+    const origen = req.body.origen || flujo.origen;
+
+    const { data, error } = await SiesaService.getProductosLlano({
+      origen,
+      destino,
+      items,
+      cadencias,
+    });
+    if (error) return res.status(502).json({ ok: false, error });
+
+    res.json({ ok: true, data, flujo: flujo.id, origen, destino });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * GET /api/siesa/sedes
  * Lista de sedes destino disponibles.
  */

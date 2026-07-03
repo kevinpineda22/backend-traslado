@@ -109,6 +109,7 @@ function aRegistro(o, ts) {
     consumo_promedio: o._consumo,
     periodo_cubrimiento: o._periodo,
     rotacion: trim(o.DescMayor5),
+    referencia: trim(o.Referencia), // "A-0000571" → la letra inicial es la clase A/B/C (flujo Llano)
     criterios: {
       "001": trim(o.DescMayor1),
       "002": trim(o.DescMayor2),
@@ -190,6 +191,31 @@ export async function leerBodegas(bodegas) {
     todas.push(...data);
     if (data.length < PAGE) break;
     desde += PAGE;
+  }
+
+  return todas;
+}
+
+/**
+ * Lee del snapshot solo los ítems indicados en las bodegas dadas (flujo Llano:
+ * el Excel trae unos cientos de ítems, no queremos leer el catálogo entero).
+ * Trocea los códigos para no exceder límites de URL de Supabase.
+ */
+export async function leerBodegasItems(bodegas, codigos) {
+  const LOTE = 300;
+  const unicos = [...new Set(codigos.map((c) => String(c).trim()).filter(Boolean))];
+  const todas = [];
+
+  for (let i = 0; i < unicos.length; i += LOTE) {
+    const lote = unicos.slice(i, i + LOTE);
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("*")
+      .in("bodega", bodegas)
+      .in("codigo_item", lote);
+
+    if (error) throw new Error(`Error al leer snapshot (items): ${error.message}`);
+    if (data?.length) todas.push(...data);
   }
 
   return todas;

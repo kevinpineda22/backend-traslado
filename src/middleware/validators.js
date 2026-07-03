@@ -35,21 +35,32 @@ const cambiarEstadoSchema = z.object({
     "En_recepcion",
     "Auditado",
     "Rechazado",
+    "Recibido_con_inconsistencia",
   ]),
   firma_data: z.string().optional(),
 });
 
-// Esquema para auditoría
-const auditarSchema = z.object({
-  items: z
-    .array(
-      z.object({
-        id: z.string().uuid(),
-        cantidad_auditor: z.number().min(0, "cantidad_auditor no puede ser negativa"),
-      }),
-    )
-    .min(1),
+// Ítems que cuenta el auditor (reutilizado por comparar y confirmar)
+const itemsAuditorSchema = z
+  .array(
+    z.object({
+      id: z.string().uuid(),
+      cantidad_auditor: z.number().min(0, "cantidad_auditor no puede ser negativa"),
+    }),
+  )
+  .min(1);
+
+// Auditoría — Paso 1: comparar (solo cuentas, sin firma)
+const compararSchema = z.object({
+  items: itemsAuditorSchema,
+});
+
+// Auditoría — Paso 2: confirmar (decisión + firma)
+const confirmarSchema = z.object({
+  decision: z.enum(["aprobado", "inconsistencia", "rechazado"]),
+  auditor_id: z.string().optional(),
   firma_data: z.string().min(1, "firma_data es requerida"),
+  items: itemsAuditorSchema,
 });
 
 // Esquema para recolección
@@ -65,6 +76,27 @@ const recolectarSchema = z.object({
       }),
     )
     .min(1),
+});
+
+// Productos del flujo Llano — el frontend parsea el Excel y manda las filas.
+// item/capacidad se normalizan por si vienen como string desde el Excel.
+const productosLlanoSchema = z.object({
+  destino: z.string().min(1, "destino es requerido"),
+  origen: z.string().optional(),
+  items: z
+    .array(
+      z.object({
+        item: z.preprocess((v) => String(v ?? "").trim(), z.string().min(1)),
+        unidad: z.string().optional(),
+        descripcion: z.string().optional(),
+        capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
+      }),
+    )
+    .min(1, "El Excel no tiene ítems válidos"),
+  cadencias: z
+    .object({ A: z.number(), B: z.number(), C: z.number() })
+    .partial()
+    .optional(),
 });
 
 /**
@@ -91,6 +123,8 @@ function validate(schema) {
 export const validators = {
   crearDespacho: validate(crearDespachoSchema),
   cambiarEstado: validate(cambiarEstadoSchema),
-  auditar: validate(auditarSchema),
+  comparar: validate(compararSchema),
+  confirmar: validate(confirmarSchema),
   recolectar: validate(recolectarSchema),
+  productosLlano: validate(productosLlanoSchema),
 };

@@ -51,29 +51,39 @@ export async function obtenerDetalle(req, res, next) {
 }
 
 /**
- * POST /api/auditor/despachos/:id/auditar
- * Enviar auditoría: cantidades del auditor + firma.
- * El backend compara con cantidades del despachador y determina estado final.
- *
- * Body: {
- *   items: [{ id: uuid, cantidad_auditor: number }],
- *   firma_data: "data:image/png;base64,..."
- * }
+ * POST /api/auditor/despachos/:id/comparar
+ * Paso 1: revela la comparación despachador vs auditor. No firma, no cambia estado.
+ * Body: { items: [{ id, cantidad_auditor }] }
+ * Resp: { ok, data: { match, differences: [...] } }
  */
-export async function auditar(req, res, next) {
+export async function comparar(req, res, next) {
   try {
-    const { items, firma_data } = req.body;
+    const resultado = await DespachoService.compararAuditoria(
+      req.params.id,
+      req.body.items,
+    );
+    res.json({ ok: true, data: resultado });
+  } catch (error) {
+    next(error);
+  }
+}
 
-    if (!items?.length) {
-      return res.status(400).json({ error: "Debe enviar al menos un item para auditar" });
-    }
-
-    const resultado = await DespachoService.auditar(req.params.id, items, firma_data);
-
-    res.json({
-      ok: true,
-      data: resultado,
+/**
+ * POST /api/auditor/despachos/:id/confirmar
+ * Paso 2: decisión + firma, finaliza el despacho.
+ * Body: { decision, auditor_id?, firma_data, items: [{ id, cantidad_auditor }] }
+ * Resp: { ok, data: { estado } }
+ */
+export async function confirmar(req, res, next) {
+  try {
+    const { decision, auditor_id, firma_data, items } = req.body;
+    const resultado = await DespachoService.confirmarAuditoria(req.params.id, {
+      decision,
+      auditorId: auditor_id,
+      firmaData: firma_data,
+      items,
     });
+    res.json({ ok: true, data: resultado });
   } catch (error) {
     next(error);
   }

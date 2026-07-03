@@ -95,10 +95,11 @@ export async function updateStatus(id, nuevoEstado) {
   const TRANSICIONES = {
     Creado: ["En_recoleccion"],
     En_recoleccion: ["Recolectado"],
-    Recolectado: ["En_recepcion", "Auditado"],
-    En_recepcion: ["Auditado", "Rechazado"],
+    Recolectado: ["En_recepcion", "Auditado", "Rechazado", "Recibido_con_inconsistencia"],
+    En_recepcion: ["Auditado", "Rechazado", "Recibido_con_inconsistencia"],
     Auditado: [],
     Rechazado: [],
+    Recibido_con_inconsistencia: [],
   };
 
   // Validar transición
@@ -126,6 +127,18 @@ export async function updateStatus(id, nuevoEstado) {
 
   if (error) throw new Error(`Error al actualizar estado: ${error.message}`);
   return data;
+}
+
+/**
+ * Registrar qué auditor cerró el despacho.
+ */
+export async function updateAuditor(id, auditorId) {
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ auditor_id: auditorId })
+    .eq("id", id);
+
+  if (error) throw new Error(`Error al asignar auditor: ${error.message}`);
 }
 
 /**

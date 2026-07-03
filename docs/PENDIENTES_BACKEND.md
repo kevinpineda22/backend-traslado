@@ -19,7 +19,7 @@
 | B1 | Sincronizar migraciones (drift) | ✅ Hecho — `sql/002_uuid_snapshot.sql` espeja la base (UUID + snapshot + `agotado`). |
 | B2 | Persistir `agotado` + tope duro | ✅ Código hecho (422 si `cantidad > cantidad_admin`). ⏳ **Falta correr 1 ALTER en la base viva.** |
 | B3 | `findAll` con `estado` array | ✅ Hecho — `.in` para arrays, `.eq` para string. |
-| B4 | Auditoría en dos tiempos (`comparar`/`confirmar`) | ⏳ **Pendiente — es lo que te bloquea la Fase 3 del auditor.** Contrato definido abajo. |
+| B4 | Auditoría en dos tiempos (`comparar`/`confirmar`) | ✅ **Hecho** — endpoints `POST /auditor/despachos/:id/comparar` y `/confirmar` implementados según tu contrato. Estado `Recibido_con_inconsistencia` en enum + transiciones. Usa `id` (no `item_id`). ⏳ Falta el ALTER `auditor_id` en la base viva. |
 | B5 | Normalizar `items` | 🟢 Opcional (ya lo manejamos en el front). |
 
 **Camino crítico para vos ahora:** correr los 2 ALTER (§3.1) e implementar B4 (§3.2).
