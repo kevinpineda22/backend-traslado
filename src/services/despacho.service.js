@@ -40,8 +40,8 @@ export async function cambiarEstado(id, estado, firmaData) {
 /**
  * Registrar cantidad recolectada por el despachador para un item.
  */
-export async function registrarRecoleccion(itemId, cantidad) {
-  return ItemModel.updateCantidadDespachador(itemId, cantidad);
+export async function registrarRecoleccion(itemId, cantidad, agotado) {
+  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado);
 }
 
 /**

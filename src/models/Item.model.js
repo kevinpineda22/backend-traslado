@@ -1,15 +1,41 @@
 import { supabase } from "../config/supabase.js";
+import { createError } from "../middleware/errorHandler.js";
 
 const TABLE = "traslados_items";
 
 /**
- * Actualizar cantidad_despachador de un item.
+ * Registrar la recolección de un item por el despachador.
+ * Persiste la cantidad real y si quedó agotado (faltante distinto de "no tocado").
+ * Tope duro: la cantidad recolectada NO puede superar la pedida por el admin.
+ *
+ * @param {string} itemId
+ * @param {number} cantidad  - Cantidad real recolectada
+ * @param {boolean} [agotado] - true si no hubo stock suficiente en bodega
  */
-export async function updateCantidadDespachador(itemId, cantidad) {
+export async function updateCantidadDespachador(itemId, cantidad, agotado = false) {
+  // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
+  const { data: item, error: errGet } = await supabase
+    .from(TABLE)
+    .select("cantidad_admin")
+    .eq("id", itemId)
+    .single();
+
+  if (errGet || !item) throw createError(404, "Item no encontrado");
+
+  const cant = Number(cantidad) || 0;
+  const pedido = Number(item.cantidad_admin) || 0;
+  if (cant > pedido) {
+    throw createError(
+      422,
+      `La cantidad recolectada (${cant}) no puede superar la pedida (${pedido})`,
+    );
+  }
+
   const { data, error } = await supabase
     .from(TABLE)
     .update({
-      cantidad_despachador: cantidad,
+      cantidad_despachador: cant,
+      agotado: !!agotado,
     })
     .eq("id", itemId)
     .select()

@@ -69,7 +69,7 @@ export async function cambiarEstado(req, res, next) {
 /**
  * POST /api/despachos/:id/recolectar
  * Registrar la recolección de un item por el despachador.
- * Body: { items: [{ id, cantidad }] }
+ * Body: { items: [{ id, cantidad, agotado? }] }
  */
 export async function recolectar(req, res, next) {
   try {
@@ -77,7 +77,11 @@ export async function recolectar(req, res, next) {
     const resultados = [];
 
     for (const item of items) {
-      const actualizado = await DespachoService.registrarRecoleccion(item.id, item.cantidad);
+      const actualizado = await DespachoService.registrarRecoleccion(
+        item.id,
+        item.cantidad,
+        item.agotado,
+      );
       resultados.push(actualizado);
     }
 

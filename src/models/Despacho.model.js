@@ -9,7 +9,11 @@ const TABLE = "traslados_despachos";
 export async function findAll(filters = {}) {
   let query = supabase.from(TABLE).select("*");
 
-  if (filters.estado) query = query.eq("estado", filters.estado);
+  // estado puede venir como string ('Creado') o array (['Creado','En_recoleccion'])
+  // — los paneles filtran por varios estados a la vez.
+  if (Array.isArray(filters.estado)) query = query.in("estado", filters.estado);
+  else if (filters.estado) query = query.eq("estado", filters.estado);
+
   if (filters.despachador_id) query = query.eq("despachador_id", filters.despachador_id);
   if (filters.admin_id) query = query.eq("admin_id", filters.admin_id);
 

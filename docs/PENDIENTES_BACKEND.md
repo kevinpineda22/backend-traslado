@@ -11,6 +11,30 @@
 
 ---
 
+## 0. Estado (actualizado por Kevin)
+
+| # | Tarea | Estado |
+|---|-------|--------|
+| B1 | Sincronizar migraciones | ✅ **Hecho** — `sql/002_uuid_snapshot.sql` espeja la base real (UUID + snapshot + `agotado`). |
+| B2 | Persistir "agotado" + tope duro | ✅ **Hecho** — endpoint `recolectar` acepta `agotado`; rechaza `cantidad > cantidad_admin` (422). **Falta 1 paso tuyo/DBA:** correr el ALTER en la base viva (abajo). |
+| B3 | `findAll` con `estado` array | ✅ **Hecho** — `Despacho.model.findAll` usa `.in` para arrays, `.eq` para string. |
+| B4 | Auditoría en dos tiempos | ⏳ **Pendiente** — de acuerdo con el rediseño. Antes de codear alineemos: (a) `item_id` vs `id` en el contrato, (b) agregar columna `auditor_id`. Hablámoslo y lo dejo listo. |
+| B5 | Normalizar `items` | ⏳ Opcional, sin urgencia. |
+
+**ALTER pendiente para B2** (la base viva ya existe sin la columna; correr una vez en Supabase):
+```sql
+alter table public.traslados_items
+  add column if not exists agotado boolean not null default false;
+```
+
+Contrato final de `POST /api/despachos/:id/recolectar` (ya implementado):
+```json
+{ "items": [ { "id": "<uuid item>", "cantidad": 5, "agotado": false } ] }
+```
+Si mandás `cantidad` mayor a la pedida, responde **422** con el mensaje del tope. `agotado` es opcional (default `false`).
+
+---
+
 ## 1. Qué estamos construyendo nosotros (para que se entienda el todo)
 
 El proceso real tiene tres actores. Vos ya cubriste el **Admin** (crear despacho con snapshot

@@ -53,12 +53,15 @@ const auditarSchema = z.object({
 });
 
 // Esquema para recolección
+// El tope superior (cantidad <= cantidad_admin) se valida en el modelo, contra
+// el valor guardado en la base — Zod no lo conoce en tiempo de request.
 const recolectarSchema = z.object({
   items: z
     .array(
       z.object({
         id: z.string().uuid(),
         cantidad: z.number().min(0, "cantidad no puede ser negativa"),
+        agotado: z.boolean().optional(),
       }),
     )
     .min(1),
