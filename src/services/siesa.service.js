@@ -1,51 +1,49 @@
-import { ejecutarConsulta } from "../config/connekta.js";
-import { getOrSet } from "../config/cache.js";
-import { calcularSugerido } from "./sugerido.service.js";
+import { calcularSugeridoGeneral } from "./sugerido.service.js";
+import { leerBodegas } from "./snapshot.service.js";
+import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
 
 /* =============================================
-   Servicio SIESA via Connekta API
+   Servicio SIESA (lectura)
+
+   Lee del snapshot en Supabase (poblado por el cron → snapshot.service.js) y
+   pivotea por par origen/destino. Nunca toca Connekta en un request de usuario.
    ============================================= */
 
-const QUERY_BODEGA = process.env.CONNEKTA_QUERY_BODEGA || "merkahorro_traslados_bodega_dev";
-const QUERY_SEDES = process.env.CONNEKTA_QUERY_SEDES || "merkahorro_sedes_dev";
-const BODEGA_ORIGEN = "00101";
+const num = (v) => Number(v) || 0;
+const trim = (v) => String(v ?? "").trim();
+
+const PLANES = [
+  { id: "001", label: "Grupo" },
+  { id: "002", label: "Subgrupo" },
+  { id: "003", label: "Proveedor" },
+  { id: "004", label: "Marca" },
+  { id: "005", label: "Rotación" },
+  { id: "007", label: "Temporada" },
+  { id: "MUA", label: "U. Medida" },
+  { id: "TLD", label: "Tipo Producto" },
+  { id: "SP", label: "Segmento" },
+];
+
+/* ─── Criterios (para los filtros facetados) ───────────────────────── */
 
 /**
- * Obtener criterios de agrupación disponibles para los filtros.
- * Los extrae directamente de los datos de Copacabana.
+ * Extrae los criterios disponibles desde el catálogo del origen.
+ * @param {string} origen - Bodega origen (default: origen del flujo general)
  */
-export async function getCriterios() {
+export async function getCriterios(origen = "PV001") {
   try {
-    // Traemos todos los productos de Copacabana
-    const todos = await traerTodosLosProductos();
+    const rows = await leerBodegas([origen]);
 
-    // Estructura fija de los 9 planes
-    const planes = [
-      { id: "001", campoMayor: "DescMayor1", label: "Grupo" },
-      { id: "002", campoMayor: "DescMayor2", label: "Subgrupo" },
-      { id: "003", campoMayor: "DescMayor3", label: "Proveedor" },
-      { id: "004", campoMayor: "DescMayor4", label: "Marca" },
-      { id: "005", campoMayor: "DescMayor5", label: "Rotación" },
-      { id: "007", campoMayor: "DescMayor7", label: "Temporada" },
-      { id: "MUA", campoMayor: "DescMayorMUA", label: "U. Medida" },
-      { id: "TLD", campoMayor: "DescMayorTLD", label: "Tipo Producto" },
-      { id: "SP", campoMayor: "DescMayorSP", label: "Segmento" },
-    ];
-
-    // Para cada plan, extraer valores únicos desde los datos
-    const criterios = planes.map((p) => {
+    const criterios = PLANES.map((p) => {
       const valores = new Set();
-      for (const item of todos) {
-        const valor = item[p.campoMayor];
-        if (valor && String(valor).trim()) {
-          valores.add(String(valor).trim());
-        }
+      for (const r of rows) {
+        const v = trim(r.criterios?.[p.id]);
+        if (v) valores.add(v);
       }
-
       return {
         id: p.id,
         descripcion: p.label,
-        opciones: Array.from(valores).sort(),
+        opciones: Array.from(valores).sort((a, b) => a.localeCompare(b, "es")),
         cantidad: valores.size,
       };
     });
@@ -56,77 +54,61 @@ export async function getCriterios() {
   }
 }
 
+/* ─── Productos pivoteados origen/destino ──────────────────────────── */
+
 /**
- * Consultar productos de Copacabana, filtrados por criterios.
+ * Productos del ORIGEN cruzados con el DESTINO + sugerido (stock de seguridad).
+ * @param {object} opts
+ * @param {string} opts.origen  - Bodega origen
+ * @param {string} opts.destino - Bodega destino
  */
-export async function getProductos(opts = {}) {
-  const { criterios = [] } = opts;
-
+export async function getProductosTraslado({ origen, destino }) {
   try {
-    const todos = await traerTodosLosProductos();
+    const rows = await leerBodegas([origen, destino]);
 
-    let resultados = todos;
-
-    // Filtrar por criterios.
-    // Semántica: AND entre tipos de criterio distintos (001 y 003),
-    //            OR entre valores del mismo tipo (001:LACTEOS o 001:CARNES).
-    if (criterios.length > 0) {
-      // Agrupar valores por plan → { "001": ["LACTEOS", "CARNES"], "003": ["ALPINA"] }
-      const valoresPorPlan = {};
-      for (const criterio of criterios) {
-        const idx = String(criterio).indexOf(":");
-        const plan = idx === -1 ? criterio : criterio.slice(0, idx);
-        const valor = idx === -1 ? null : criterio.slice(idx + 1);
-        (valoresPorPlan[plan] ||= []).push(valor);
-      }
-
-      resultados = resultados.filter((item) =>
-        Object.entries(valoresPorPlan).every(([plan, valores]) => {
-          const campoMayor = CRITERIOS_MAP[plan];
-          if (!campoMayor) return true; // plan desconocido → no restringe
-
-          const valorProducto = String(item[campoMayor] ?? "").trim();
-
-          return valores.some((valor) =>
-            valor == null
-              ? valorProducto.length > 0
-              : valorProducto.toUpperCase() === String(valor).trim().toUpperCase(),
-          );
-        }),
-      );
+    const oMap = new Map();
+    const dMap = new Map();
+    for (const r of rows) {
+      if (r.bodega === origen) oMap.set(String(r.codigo_item), r);
+      else if (r.bodega === destino) dMap.set(String(r.codigo_item), r);
     }
 
-    // Transformar al formato del frontend
-    const productos = resultados.map((p) => {
-      const cantidad_disponible = p.CantidadDisponible || 0;
-      const consumo_promedio = p.ConsumoPromedio || 0;
+    const productos = [];
+    for (const o of oMap.values()) {
+      const codigo = String(o.codigo_item);
+      const d = dMap.get(codigo);
 
-      return {
-        codigo_item: p.CodigoItem,
-        descripcion: (p.DescItem || "").trim(),
-        unidad_medida: (p.UM || "").trim(),
-        cantidad_disponible,
-        cantidad_inventario: p.CantidadInventario || 0,
-        cantidad_comprometida: p.CantidadComprometida || 0,
-        costo_promedio: p.CostoProm || 0,
-        consumo_promedio,
-        // Alias que espera el frontend
-        stock: cantidad_disponible,
-        rotacion: (p.DescMayor5 || "").trim() || "N/A",
-        sugerido: calcularSugerido(cantidad_disponible, consumo_promedio),
-        criterios: {
-          "001": (p.DescMayor1 || "").trim(),
-          "002": (p.DescMayor2 || "").trim(),
-          "003": (p.DescMayor3 || "").trim(),
-          "004": (p.DescMayor4 || "").trim(),
-          "005": (p.DescMayor5 || "").trim(),
-          "007": (p.DescMayor7 || "").trim(),
-          MUA: (p.DescMayorMUA || "").trim(),
-          TLD: (p.DescMayorTLD || "").trim(),
-          SP: (p.DescMayorSP || "").trim(),
-        },
-      };
-    });
+      const inventarioOrigen = num(o.inventario);
+      const disponibleOrigen = num(o.disponible);
+      const inventarioDestino = d ? num(d.inventario) : 0;
+      const consumoDestino = d ? num(d.consumo_promedio) : 0;
+      const periodoCubrimiento = d
+        ? num(d.periodo_cubrimiento)
+        : num(o.periodo_cubrimiento);
+
+      const { stockSeguridad, sugerido } = calcularSugeridoGeneral({
+        consumoDestino,
+        periodoCubrimiento,
+        inventarioDestino,
+        disponibleOrigen,
+      });
+
+      productos.push({
+        codigo_item: codigo,
+        descripcion: trim(o.descripcion),
+        rotacion: trim(o.rotacion) || "N/A",
+        unidad_medida: trim(o.um),
+        unidades: buildUnidades(o),
+        criterios: o.criterios || {},
+        inventario_origen: inventarioOrigen,
+        disponible_origen: disponibleOrigen,
+        inventario_destino: inventarioDestino,
+        consumo_destino: consumoDestino,
+        periodo_cubrimiento: periodoCubrimiento,
+        stock_seguridad: stockSeguridad,
+        sugerido,
+      });
+    }
 
     return { data: productos };
   } catch (error) {
@@ -135,64 +117,29 @@ export async function getProductos(opts = {}) {
 }
 
 /**
- * Obtener sedes destino.
- * Usa el query general (trae todas las bodegas) o el específico de bodega.
+ * Unidades disponibles para el switch de UM.
+ * Con los datos actuales de SIESA hay una unidad base + la de orden (si difiere).
  */
-export async function getSedes() {
-  try {
-    const datos = await getOrSet("siesa:sedes", async () => {
-      const { datos: raw } = await ejecutarConsulta(QUERY_SEDES, 1, 100);
-      return raw;
-    }, 30 * 60 * 1000); // TTL 30 minutos
+function buildUnidades(row) {
+  const base = trim(row.um);
+  const orden = trim(row.um_orden);
+  const factor = num(row.factor) || 1;
 
-    const bodegasMap = new Map();
-    for (const item of datos) {
-      if (!bodegasMap.has(item.IdBodega)) {
-        bodegasMap.set(item.IdBodega, {
-          id: item.IdBodega,
-          descripcion: (item.DescBodega || "").trim(),
-        });
-      }
-    }
-
-    const sedes = Array.from(bodegasMap.values())
-      .filter((s) => s.id !== BODEGA_ORIGEN && s.id !== "PV001" && !s.id.startsWith("BA") && !s.id.startsWith("ALM"))
-      .sort((a, b) => a.descripcion.localeCompare(b.descripcion));
-
-    return { data: sedes };
-  } catch (error) {
-    return { error: error.message };
+  const unidades = [{ unidad: base, factor: 1 }];
+  if (orden && orden !== base && factor !== 1) {
+    unidades.push({ unidad: orden, factor });
   }
+  return unidades;
 }
 
-// ─── Helpers ──────────────────────────────────────
+/* ─── Sedes y flujos ───────────────────────────────────────────────── */
 
-/**
- * Traer todos los productos de Copacabana (todas las páginas).
- */
-async function traerTodosLosProductos() {
-  return getOrSet("siesa:productos", async () => {
-    const primera = await ejecutarConsulta(QUERY_BODEGA, 1, 200);
-    let todos = [...primera.datos];
-
-    const totalPaginas = primera.totalPaginas;
-    for (let pag = 2; pag <= totalPaginas; pag++) {
-      const pagina = await ejecutarConsulta(QUERY_BODEGA, pag, 200);
-      todos = todos.concat(pagina.datos);
-    }
-
-    return todos;
-  }, 30 * 60 * 1000); // TTL 30 minutos
+/** Sedes destino disponibles (todas las de los flujos), desde config. */
+export async function getSedes() {
+  const sedes = Object.keys(SEDES)
+    .map((codigo) => ({ id: codigo, descripcion: nombreSede(codigo) }))
+    .sort((a, b) => a.descripcion.localeCompare(b.descripcion, "es"));
+  return { data: sedes };
 }
 
-const CRITERIOS_MAP = {
-  "001": "DescMayor1",
-  "002": "DescMayor2",
-  "003": "DescMayor3",
-  "004": "DescMayor4",
-  "005": "DescMayor5",
-  "007": "DescMayor7",
-  MUA: "DescMayorMUA",
-  TLD: "DescMayorTLD",
-  SP: "DescMayorSP",
-};
+export { getFlujoPorDestino };

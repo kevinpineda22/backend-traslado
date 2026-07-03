@@ -44,6 +44,7 @@ export async function create(payload) {
   const { data: despacho, error: errCab } = await supabase
     .from(TABLE)
     .insert({
+      flujo: cabecera.flujo || "general",
       origen: cabecera.origen || "PV001",
       destino: cabecera.destino,
       despachador_id: cabecera.despachador_id,
@@ -56,13 +57,19 @@ export async function create(payload) {
 
   if (errCab) throw new Error(`Error al crear despacho: ${errCab.message}`);
 
-  // 2. Insertar items
+  // 2. Insertar items (con snapshot de lo que vio el admin)
   if (items?.length > 0) {
     const itemsConDespacho = items.map((item) => ({
       despacho_id: despacho.id,
       codigo_item: item.codigo_item,
       descripcion: item.descripcion,
       unidad_medida: item.unidad_medida,
+      factor: item.factor ?? 1,
+      rotacion: item.rotacion,
+      stock_origen: item.stock_origen,
+      stock_destino: item.stock_destino,
+      consumo_destino: item.consumo_destino,
+      stock_seguridad: item.stock_seguridad,
       sugerido: item.sugerido,
       cantidad_admin: item.cantidad,
     }));

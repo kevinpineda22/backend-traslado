@@ -1,37 +1,89 @@
 /**
  * Cálculo de cantidad sugerida por producto.
  *
- * Lógica:
- *   Si el producto tiene consumo promedio → sugerido = consumo promedio * 1.5
- *   Si NO tiene consumo → sugerido = 10% del inventario actual
- *   El sugerido nunca puede ser mayor al inventario disponible.
- *
- * @param {number} disponible - Cantidad disponible en bodega
- * @param {number} consumoPromedio - Consumo promedio del producto
- * @returns {number} Cantidad sugerida (entero, mínimo 1)
+ * Dos lógicas según el flujo:
+ *   - General (stock de seguridad): consumo × periodoCubrimiento − inventario
+ *   - Llano (A/B/C): clasificación con capacidad tomada de un Excel
  */
-export function calcularSugerido(disponible, consumoPromedio) {
-  if (!disponible || disponible <= 0) return 0;
 
-  let sugerido;
+const num = (v) => Number(v) || 0;
 
-  if (consumoPromedio && consumoPromedio > 0) {
-    sugerido = Math.round(consumoPromedio * 1.5);
-  } else {
-    sugerido = Math.round(disponible * 0.1);
-  }
-
-  // No puede superar el disponible ni ser menor a 1
-  return Math.max(1, Math.min(sugerido, disponible));
-}
+/* =============================================
+   FLUJO GENERAL — Stock de seguridad
+   ============================================= */
 
 /**
- * Calcular sugerido para una lista de productos.
- * @param {Array} productos - [{ cantidad_disponible, consumo_promedio }]
+ * Sugerido del flujo general.
+ *   stock_seguridad = consumoDestino × periodoCubrimiento
+ *   sugerido        = max(0, stock_seguridad − inventarioDestino)
+ *   topeado por el disponible del origen (no se envía más de lo que hay).
+ *
+ * @returns {{ stockSeguridad: number, sugerido: number }}
  */
-export function calcularSugeridos(productos) {
-  return productos.map((p) => ({
-    ...p,
-    sugerido: calcularSugerido(p.cantidad_disponible, p.consumo_promedio),
-  }));
+export function calcularSugeridoGeneral({
+  consumoDestino = 0,
+  periodoCubrimiento = 0,
+  inventarioDestino = 0,
+  disponibleOrigen = 0,
+}) {
+  const stockSeguridad = num(consumoDestino) * num(periodoCubrimiento);
+  const bruto = Math.max(0, Math.round(stockSeguridad - num(inventarioDestino)));
+  const tope = Math.max(0, Math.floor(num(disponibleOrigen)));
+  return {
+    stockSeguridad: Math.round(stockSeguridad * 100) / 100,
+    sugerido: Math.min(bruto, tope),
+  };
+}
+
+/* =============================================
+   FLUJO LLANO — Clasificación A/B/C
+   ============================================= */
+
+/** Cadencias de reposición por clase (días). Ajustables. */
+export const CADENCIAS_DEFAULT = { A: 1, B: 3, C: 5 };
+
+/**
+ * Sugerido del flujo Llano según la clase del producto.
+ *
+ *   A: si capacidad/consumo ≤ cadenciaA → objetivo = capacidad + consumo×cadenciaA
+ *      si no                            → objetivo = capacidad
+ *   B: si capacidad/consumo <  cadenciaB → objetivo = consumo×cadenciaB
+ *      si no                            → objetivo = capacidad
+ *   C / ninguno: objetivo = capacidad
+ *
+ *   sugerido = max(0, objetivo − inventario)
+ *
+ * @param {object} opts
+ * @param {"A"|"B"|"C"|string} opts.clase
+ * @param {number} opts.capacidad     - Capacidad de góndola (desde Excel)
+ * @param {number} opts.consumoDiario - Promedio de venta diario (destino)
+ * @param {number} opts.inventario    - Inventario actual (destino)
+ * @param {object} [opts.cadencias]   - { A, B, C } en días
+ */
+export function calcularSugeridoABC({
+  clase,
+  capacidad = 0,
+  consumoDiario = 0,
+  inventario = 0,
+  cadencias = CADENCIAS_DEFAULT,
+}) {
+  const cap = num(capacidad);
+  const cons = num(consumoDiario);
+  const inv = num(inventario);
+  const dias = cons > 0 ? cap / cons : Infinity;
+  const claseNorm = String(clase || "").trim().toUpperCase();
+
+  let objetivo;
+  if (claseNorm === "A") {
+    const cad = cadencias.A ?? CADENCIAS_DEFAULT.A;
+    objetivo = dias <= cad ? cap + cons * cad : cap;
+  } else if (claseNorm === "B") {
+    const cad = cadencias.B ?? CADENCIAS_DEFAULT.B;
+    objetivo = dias < cad ? cons * cad : cap;
+  } else {
+    // C o "ninguno"
+    objetivo = cap;
+  }
+
+  return Math.max(0, Math.round(objetivo - inv));
 }

@@ -6,7 +6,6 @@ import "dotenv/config";
 
 import routes from "./routes/index.js";
 import { errorHandler } from "./middleware/errorHandler.js";
-import { getCriterios, getSedes } from "./services/siesa.service.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -43,23 +42,8 @@ app.use((_req, res) => {
 // ─── Error handler ────────────────────────────────
 app.use(errorHandler);
 
-// ─── Precarga de caché ────────────────────────────
-async function precargarCache() {
-  console.log("[cache] Precargando datos SIESA...");
-  try {
-    const [criterios] = await Promise.allSettled([
-      getCriterios(),
-      getSedes(),
-    ]);
-    if (criterios.status === "fulfilled") {
-      console.log(`[cache] ✅ Criterios cacheados (${criterios.value.data?.length || 0} planes)`);
-    }
-  } catch {
-    // El cache ya registró el error internamente
-  }
-}
-
 // ─── Arranque ─────────────────────────────────────
+// El snapshot de SIESA lo llena el cron (/api/siesa/refresh), no el arranque.
 if (process.env.NODE_ENV !== "production") {
   app.listen(PORT, () => {
     console.log(`
@@ -69,9 +53,6 @@ if (process.env.NODE_ENV !== "production") {
 ║  Modo:   ${(process.env.NODE_ENV || "development").padEnd(33)}║
 ╚══════════════════════════════════════════╝
     `);
-
-    // Precargar en segundo plano (no bloquea el listen)
-    precargarCache();
   });
 }
 

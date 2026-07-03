@@ -1,8 +1,19 @@
 {
+  "functions": {
+    "src/server.js": {
+      "maxDuration": 300
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",
       "destination": "src/server.js"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/siesa/refresh",
+      "schedule": "0 */3 * * *"
     }
   ]
 }

@@ -2,6 +2,8 @@ import { z } from "zod";
 
 // Esquema para crear un despacho
 const crearDespachoSchema = z.object({
+  flujo: z.string().optional(),
+  origen: z.string().optional(),
   destino: z.string().min(1, "destino es requerido"),
   despachador_id: z.string().min(1, "despachador_id es requerido"),
   admin_id: z.string().optional(),
@@ -12,6 +14,12 @@ const crearDespachoSchema = z.object({
         codigo_item: z.string().min(1),
         descripcion: z.string().optional(),
         unidad_medida: z.string().optional(),
+        factor: z.number().optional(),
+        rotacion: z.string().optional(),
+        stock_origen: z.number().optional(),
+        stock_destino: z.number().optional(),
+        consumo_destino: z.number().optional(),
+        stock_seguridad: z.number().optional(),
         sugerido: z.number().optional(),
         cantidad: z.number().positive("cantidad debe ser mayor a 0"),
       }),
