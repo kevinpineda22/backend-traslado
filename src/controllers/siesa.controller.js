@@ -65,8 +65,8 @@ export async function listarCriterios(req, res, next) {
 
 /**
  * GET /api/siesa/productos?destino=00201[&origen=PV001]
- * Productos del origen cruzados con el destino + sugerido.
- * El origen se deriva del flujo del destino salvo que se pase explícito.
+ * Productos del origen cruzados con el destino + sugerido. Según el flujo del
+ * destino usa la lógica de stock de seguridad (General) o A/B/C (Llano).
  */
 export async function listarProductos(req, res, next) {
   try {
@@ -84,43 +84,12 @@ export async function listarProductos(req, res, next) {
 
     const origen = req.query.origen || flujo.origen;
 
-    const { data, error } = await SiesaService.getProductosTraslado({
-      origen,
-      destino,
-    });
-    if (error) return res.status(502).json({ ok: false, error });
+    const obtener =
+      flujo.logica === "abc"
+        ? SiesaService.getProductosLlano
+        : SiesaService.getProductosTraslado;
 
-    res.json({ ok: true, data, flujo: flujo.id, origen, destino });
-  } catch (error) {
-    next(error);
-  }
-}
-
-/**
- * POST /api/siesa/productos-llano
- * Flujo Llano: recibe las filas del Excel (item, unidad, capacidad) y devuelve
- * los productos cruzados con SIESA + sugerido A/B/C.
- * Body: { destino, items: [{ item, unidad, capacidad }], cadencias? }
- */
-export async function listarProductosLlano(req, res, next) {
-  try {
-    const { destino, items, cadencias } = req.body;
-
-    const flujo = getFlujoPorDestino(destino);
-    if (!flujo) {
-      return res
-        .status(400)
-        .json({ ok: false, error: `El destino ${destino} no pertenece a ningún flujo` });
-    }
-
-    const origen = req.body.origen || flujo.origen;
-
-    const { data, error } = await SiesaService.getProductosLlano({
-      origen,
-      destino,
-      items,
-      cadencias,
-    });
+    const { data, error } = await obtener({ origen, destino });
     if (error) return res.status(502).json({ ok: false, error });
 
     res.json({ ok: true, data, flujo: flujo.id, origen, destino });

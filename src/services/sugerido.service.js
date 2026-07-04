@@ -8,6 +8,17 @@
 
 const num = (v) => Number(v) || 0;
 
+/**
+ * Redondeo de negocio de Traslados: sube al entero siguiente si el decimal es
+ * 0.2 o más; si es menor, baja (trunca). Ej: 22.45 → 23, 3.15 → 3, 3.2 → 4.
+ */
+export function redondear(x) {
+  const n = num(x);
+  if (n <= 0) return 0;
+  const entero = Math.floor(n);
+  return n - entero >= 0.2 - 1e-9 ? entero + 1 : entero;
+}
+
 /* =============================================
    FLUJO GENERAL — Stock de seguridad
    ============================================= */
@@ -27,7 +38,7 @@ export function calcularSugeridoGeneral({
   disponibleOrigen = 0,
 }) {
   const stockSeguridad = num(consumoDestino) * num(periodoCubrimiento);
-  const bruto = Math.max(0, Math.round(stockSeguridad - num(inventarioDestino)));
+  const bruto = redondear(stockSeguridad - num(inventarioDestino));
   const tope = Math.max(0, Math.floor(num(disponibleOrigen)));
   return {
     stockSeguridad: Math.round(stockSeguridad * 100) / 100,
@@ -85,5 +96,5 @@ export function calcularSugeridoABC({
     objetivo = cap;
   }
 
-  return Math.max(0, Math.round(objetivo - inv));
+  return redondear(objetivo - inv);
 }

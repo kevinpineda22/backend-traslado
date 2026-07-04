@@ -39,6 +39,15 @@ export async function cambiarEstado(id, estado, firmaData) {
 }
 
 /**
+ * Iniciar recolección reclamando el despacho (modelo pool).
+ * Atómico: solo funciona si sigue en "Creado", dos despachadores no lo toman a la vez.
+ * Si el despacho se creó sin despachador asignado, se asigna en este paso.
+ */
+export async function iniciarRecoleccion(id, despachadorId) {
+  return DespachoModel.iniciarRecoleccion(id, despachadorId);
+}
+
+/**
  * Registrar cantidad recolectada por el despachador para un item.
  */
 export async function registrarRecoleccion(itemId, cantidad, agotado) {

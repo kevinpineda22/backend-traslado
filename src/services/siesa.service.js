@@ -1,5 +1,6 @@
 import { calcularSugeridoGeneral, calcularSugeridoABC } from "./sugerido.service.js";
-import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
+import { leerBodegas } from "./snapshot.service.js";
+import { mapaCapacidades } from "../models/Capacidad.model.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
 
 /* =============================================
@@ -18,10 +19,10 @@ const PLANES = [
   { id: "003", label: "Proveedor" },
   { id: "004", label: "Marca" },
   { id: "005", label: "Rotación" },
-  { id: "007", label: "Temporada" },
+  { id: "007", label: "Negociaciones Puntuales" }, // antes: Temporada
   { id: "MUA", label: "U. Medida" },
-  { id: "TLD", label: "Tipo Producto" },
-  { id: "SP", label: "Segmento" },
+  { id: "TLD", label: "Traslados" }, // antes: Tipo Producto
+  { id: "SP", label: "Separata" }, // antes: Segmento
 ];
 
 /* ─── Criterios (para los filtros facetados) ───────────────────────── */
@@ -128,20 +129,22 @@ function claseDeReferencia(referencia) {
 }
 
 /**
- * Productos del flujo Llano. El Excel define el set de ítems (item, unidad,
- * capacidad); los cruzamos con SIESA (stock origen/destino, consumo) y con la
- * clase (referencia) para calcular el sugerido A/B/C.
+ * Productos del flujo Llano — facetado (todos los ítems del origen, como
+ * General) con sugerido A/B/C. La clase sale de `referencia` (SIESA) y la
+ * capacidad de la tabla `traslados_capacidad` (cargada desde el módulo Excel).
+ * Ítems sin capacidad cargada → capacidad 0 → sugerido 0.
  *
  * @param {object} opts
  * @param {string} opts.origen   - Bodega origen (00301)
  * @param {string} opts.destino  - Bodega destino (PV004)
- * @param {Array<{item, unidad, capacidad}>} opts.items - Filas del Excel
  * @param {object} [opts.cadencias] - { A, B, C } días (opcional)
  */
-export async function getProductosLlano({ origen, destino, items, cadencias }) {
+export async function getProductosLlano({ origen, destino, cadencias }) {
   try {
-    const codigos = items.map((i) => String(i.item).trim()).filter(Boolean);
-    const rows = await leerBodegasItems([origen, destino], codigos);
+    const [rows, capacidades] = await Promise.all([
+      leerBodegas([origen, destino]),
+      mapaCapacidades(),
+    ]);
 
     const oMap = new Map();
     const dMap = new Map();
@@ -150,15 +153,15 @@ export async function getProductosLlano({ origen, destino, items, cadencias }) {
       else if (r.bodega === destino) dMap.set(String(r.codigo_item), r);
     }
 
-    const productos = items.map((ex) => {
-      const codigo = String(ex.item).trim();
-      const o = oMap.get(codigo);
+    const productos = [];
+    for (const o of oMap.values()) {
+      const codigo = String(o.codigo_item);
       const d = dMap.get(codigo);
 
-      const clase = claseDeReferencia(o?.referencia || d?.referencia);
-      const capacidad = num(ex.capacidad);
-      const inventarioOrigen = o ? num(o.inventario) : 0;
-      const disponibleOrigen = o ? num(o.disponible) : 0;
+      const clase = claseDeReferencia(o.referencia || d?.referencia);
+      const capacidad = capacidades.get(codigo) || 0;
+      const inventarioOrigen = num(o.inventario);
+      const disponibleOrigen = num(o.disponible);
       const inventarioDestino = d ? num(d.inventario) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
@@ -169,24 +172,24 @@ export async function getProductosLlano({ origen, destino, items, cadencias }) {
         inventario: inventarioDestino,
         ...(cadencias ? { cadencias } : {}),
       });
-      // No enviar más de lo disponible en el origen
       const sugerido = Math.min(bruto, Math.max(0, Math.floor(disponibleOrigen)));
 
-      return {
+      productos.push({
         codigo_item: codigo,
-        descripcion: trim(o?.descripcion || d?.descripcion || ex.descripcion || ""),
+        descripcion: trim(o.descripcion),
         clase,
         capacidad,
-        unidad_medida: trim(ex.unidad || o?.um || ""),
-        unidades: o ? buildUnidades(o) : [{ unidad: trim(ex.unidad || "UND"), factor: 1 }],
+        rotacion: trim(o.rotacion) || "N/A",
+        unidad_medida: trim(o.um),
+        unidades: buildUnidades(o),
+        criterios: o.criterios || {},
         inventario_origen: inventarioOrigen,
         disponible_origen: disponibleOrigen,
         inventario_destino: inventarioDestino,
         consumo_destino: consumoDestino,
         sugerido,
-        encontrado: !!(o || d), // false = el ítem del Excel no existe en SIESA
-      };
-    });
+      });
+    }
 
     return { data: productos };
   } catch (error) {

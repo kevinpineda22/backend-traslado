@@ -6,8 +6,8 @@ import * as DespachoService from "../services/despacho.service.js";
  */
 export async function listar(req, res, next) {
   try {
-    const { estado, despachador_id } = req.query;
-    const data = await DespachoService.listar({ estado, despachador_id });
+    const { estado, despachador_id, sin_asignar } = req.query;
+    const data = await DespachoService.listar({ estado, despachador_id, sin_asignar });
     res.json({ ok: true, data });
   } catch (error) {
     next(error);
@@ -60,6 +60,26 @@ export async function cambiarEstado(req, res, next) {
   try {
     const { estado, firma_data } = req.body;
     const data = await DespachoService.cambiarEstado(req.params.id, estado, firma_data);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/despachos/:id/iniciar
+ * Iniciar recolección reclamando el despacho (modelo pool).
+ * Si el despacho se creó sin despachador asignado, se asigna acá atómicamente.
+ * Body: { despachador_id } (opcional si ya estaba pre-asignado)
+ * 409 si otro despachador ya lo tomó.
+ */
+export async function iniciarRecoleccion(req, res, next) {
+  try {
+    const { despachador_id } = req.body;
+    const data = await DespachoService.iniciarRecoleccion(
+      req.params.id,
+      despachador_id,
+    );
     res.json({ ok: true, data });
   } catch (error) {
     next(error);

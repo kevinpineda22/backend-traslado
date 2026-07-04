@@ -5,7 +5,7 @@ const crearDespachoSchema = z.object({
   flujo: z.string().optional(),
   origen: z.string().optional(),
   destino: z.string().min(1, "destino es requerido"),
-  despachador_id: z.string().min(1, "despachador_id es requerido"),
+  despachador_id: z.string().optional(), // opcional: sin asignar = pool
   admin_id: z.string().optional(),
   criterios: z.array(z.string()).optional(),
   items: z
@@ -38,6 +38,7 @@ const cambiarEstadoSchema = z.object({
     "Recibido_con_inconsistencia",
   ]),
   firma_data: z.string().optional(),
+  despachador_id: z.string().optional(), // se reclama al iniciar (pool)
 });
 
 // Ítems que cuenta el auditor (reutilizado por comparar y confirmar)
@@ -78,25 +79,21 @@ const recolectarSchema = z.object({
     .min(1),
 });
 
-// Productos del flujo Llano — el frontend parsea el Excel y manda las filas.
-// item/capacidad se normalizan por si vienen como string desde el Excel.
-const productosLlanoSchema = z.object({
-  destino: z.string().min(1, "destino es requerido"),
-  origen: z.string().optional(),
+// Capacidad Llano — carga masiva desde Excel (item + capacidad)
+const capacidadBulkSchema = z.object({
   items: z
     .array(
       z.object({
         item: z.preprocess((v) => String(v ?? "").trim(), z.string().min(1)),
-        unidad: z.string().optional(),
-        descripcion: z.string().optional(),
         capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
       }),
     )
     .min(1, "El Excel no tiene ítems válidos"),
-  cadencias: z
-    .object({ A: z.number(), B: z.number(), C: z.number() })
-    .partial()
-    .optional(),
+});
+
+// Capacidad Llano — edición de un ítem
+const capacidadUnoSchema = z.object({
+  capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
 });
 
 /**
@@ -126,5 +123,6 @@ export const validators = {
   comparar: validate(compararSchema),
   confirmar: validate(confirmarSchema),
   recolectar: validate(recolectarSchema),
-  productosLlano: validate(productosLlanoSchema),
+  capacidadBulk: validate(capacidadBulkSchema),
+  capacidadUno: validate(capacidadUnoSchema),
 };

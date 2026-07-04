@@ -14,7 +14,11 @@ export async function findAll(filters = {}) {
   if (Array.isArray(filters.estado)) query = query.in("estado", filters.estado);
   else if (filters.estado) query = query.eq("estado", filters.estado);
 
-  if (filters.despachador_id) query = query.eq("despachador_id", filters.despachador_id);
+  if (filters.sin_asignar) {
+    query = query.is("despachador_id", null);
+  } else if (filters.despachador_id) {
+    query = query.eq("despachador_id", filters.despachador_id);
+  }
   if (filters.admin_id) query = query.eq("admin_id", filters.admin_id);
 
   const { data, error } = await query.order("created_at", { ascending: false });
@@ -126,6 +130,35 @@ export async function updateStatus(id, nuevoEstado) {
     .single();
 
   if (error) throw new Error(`Error al actualizar estado: ${error.message}`);
+  return data;
+}
+
+/**
+ * Iniciar recolección reclamando el despacho (modelo pool).
+ * Atómico: solo avanza a "En_recoleccion" si SIGUE en "Creado" (`.eq("estado","Creado")`),
+ * así dos despachadores no lo toman a la vez. Setea el despachador que lo reclama.
+ */
+export async function iniciarRecoleccion(id, despachadorId) {
+  const patch = {
+    estado: "En_recoleccion",
+    updated_at: new Date().toISOString(),
+  };
+  if (despachadorId) patch.despachador_id = despachadorId;
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update(patch)
+    .eq("id", id)
+    .eq("estado", "Creado")
+    .select()
+    .single();
+
+  if (error || !data) {
+    const err = new Error("El despacho ya fue tomado o cambió de estado");
+    err.statusCode = 409;
+    err.expose = true;
+    return Promise.reject(err);
+  }
   return data;
 }
 
