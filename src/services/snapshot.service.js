@@ -34,7 +34,7 @@ async function traerDeConnekta() {
   const paginas = [];
   for (let p = 2; p <= total; p++) paginas.push(p);
 
-  const CONC = Number(process.env.CONNEKTA_CONCURRENCIA) || 6;
+  const CONC = Number(process.env.CONNEKTA_CONCURRENCIA) || 10;
   const bloques = [primera.datos];
   let cursor = 0;
 
@@ -164,6 +164,37 @@ export async function refrescarSnapshot() {
     origenFilas: rows.length,
     actualizado_at: inicio,
   };
+}
+
+// ─── Lock: evita dos refresh en paralelo (cron + botón manual) ──────
+let refreshEnCurso = null;
+
+/**
+ * Refresca dedupeando: si ya hay uno en curso, devuelve el mismo (no dispara
+ * otro pull caro). El primero que llega manda; los demás esperan su resultado.
+ */
+export function refrescarSnapshotUnico() {
+  if (refreshEnCurso) return refreshEnCurso;
+  refreshEnCurso = refrescarSnapshot().finally(() => {
+    refreshEnCurso = null;
+  });
+  return refreshEnCurso;
+}
+
+export function refreshEnProgreso() {
+  return refreshEnCurso != null;
+}
+
+/** Timestamp del último refresh (max actualizado_at del snapshot). */
+export async function ultimaActualizacion() {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("actualizado_at")
+    .order("actualizado_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return null;
+  return data?.actualizado_at || null;
 }
 
 /* ─── Lectura (la usan los endpoints) ──────────────────────────────── */

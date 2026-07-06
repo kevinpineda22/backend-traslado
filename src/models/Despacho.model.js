@@ -89,7 +89,10 @@ export async function create(payload) {
     if (errItems) throw new Error(`Error al insertar items: ${errItems.message}`);
   }
 
-  return findById(despacho.id);
+  // Respondemos con la cabecera (rápido). NO hacemos read-back con join de todos
+  // los items: con despachos grandes eso demora la respuesta aunque el insert ya
+  // terminó, y el front solo necesita confirmación.
+  return { ...despacho, items_creados: items?.length || 0 };
 }
 
 /**

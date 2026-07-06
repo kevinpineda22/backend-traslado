@@ -7,6 +7,8 @@ router.get("/flujos", SiesaController.listarFlujosCtrl);
 router.get("/criterios", SiesaController.listarCriterios);
 router.get("/productos", SiesaController.listarProductos);
 router.get("/sedes", SiesaController.listarSedes);
+router.get("/estado", SiesaController.estado);
 router.get("/refresh", SiesaController.refrescar);
+router.post("/refresh", SiesaController.refrescar);
 
 export default router;

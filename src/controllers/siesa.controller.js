@@ -1,27 +1,48 @@
 import * as SiesaService from "../services/siesa.service.js";
-import { refrescarSnapshot } from "../services/snapshot.service.js";
+import {
+  refrescarSnapshotUnico,
+  refreshEnProgreso,
+  ultimaActualizacion,
+} from "../services/snapshot.service.js";
 import { listarFlujos, getFlujoPorDestino } from "../config/flujos.js";
 
+// Cooldown del refresh manual (sin token): no dispara el pull caro más seguido.
+const COOLDOWN_MANUAL_MS = 60 * 1000;
+
 /**
- * GET /api/siesa/refresh
- * Refresca el snapshot desde SIESA → Supabase. Lo dispara el cron de Vercel.
- * Protegido con REFRESH_TOKEN (header Authorization: Bearer <token> o ?token=).
- * Vercel Cron envía "Authorization: Bearer $CRON_SECRET" automáticamente.
+ * GET/POST /api/siesa/refresh
+ * Refresca el snapshot desde SIESA → Supabase.
+ *   - Cron / con token válido → siempre refresca.
+ *   - Manual desde la UI (sin token) → protegido por lock + cooldown para que
+ *     el pull caro (~2 min) no se pueda abusar. Devuelve 202 si ya hay uno en
+ *     curso, 429 si se actualizó hace muy poco.
  */
 export async function refrescar(req, res, next) {
   try {
     const esperado = process.env.REFRESH_TOKEN;
-    if (esperado) {
-      const auth = req.get("authorization") || "";
-      const bearer = auth.replace(/^Bearer\s+/i, "");
-      const token = bearer || req.query.token;
-      if (token !== esperado) {
-        return res.status(401).json({ ok: false, error: "No autorizado" });
+    const auth = req.get("authorization") || "";
+    const token = auth.replace(/^Bearer\s+/i, "") || req.query.token;
+    const conToken = esperado && token === esperado;
+
+    if (!conToken) {
+      // Modo manual (UI): sin token, pero acotado para no abusar del pull.
+      if (refreshEnProgreso()) {
+        return res
+          .status(202)
+          .json({ ok: true, en_progreso: true, mensaje: "Ya hay una actualización en curso" });
+      }
+      const ultima = await ultimaActualizacion();
+      if (ultima && Date.now() - new Date(ultima).getTime() < COOLDOWN_MANUAL_MS) {
+        return res.status(429).json({
+          ok: false,
+          error: "Se actualizó hace muy poco, esperá un momento",
+          actualizado_at: ultima,
+        });
       }
     }
 
     const inicio = Date.now();
-    const resultado = await refrescarSnapshot();
+    const resultado = await refrescarSnapshotUnico();
     const segundos = Math.round((Date.now() - inicio) / 1000);
 
     console.log(
@@ -29,14 +50,25 @@ export async function refrescar(req, res, next) {
     );
     res.json({ ok: true, ...resultado, duracion_s: segundos });
   } catch (error) {
-    // Endpoint protegido: devolvemos el error real para poder diagnosticar
-    // (el errorHandler global lo ocultaría como "Error interno del servidor").
     console.error("[refresh] ❌", error);
     res.status(500).json({
       ok: false,
       error: error.message,
       donde: error.stack?.split("\n")[1]?.trim(),
     });
+  }
+}
+
+/**
+ * GET /api/siesa/estado
+ * Estado del snapshot: cuándo se actualizó por última vez y si hay uno en curso.
+ */
+export async function estado(_req, res, next) {
+  try {
+    const actualizado_at = await ultimaActualizacion();
+    res.json({ ok: true, actualizado_at, en_progreso: refreshEnProgreso() });
+  } catch (error) {
+    next(error);
   }
 }
 
