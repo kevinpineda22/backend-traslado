@@ -79,21 +79,29 @@ const recolectarSchema = z.object({
     .min(1),
 });
 
-// Capacidad Llano — carga masiva desde Excel (item + capacidad)
+// Descripción opcional: "" o ausente → undefined (el modelo no toca la existente)
+const descripcionOpcional = z.preprocess(
+  (v) => (v == null || String(v).trim() === "" ? undefined : String(v).trim()),
+  z.string().optional(),
+);
+
+// Capacidad Llano — carga masiva desde Excel (item + capacidad + descripción opcional)
 const capacidadBulkSchema = z.object({
   items: z
     .array(
       z.object({
         item: z.preprocess((v) => String(v ?? "").trim(), z.string().min(1)),
         capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
+        descripcion: descripcionOpcional,
       }),
     )
     .min(1, "El Excel no tiene ítems válidos"),
 });
 
-// Capacidad Llano — edición de un ítem
+// Capacidad Llano — edición o alta manual de un ítem
 const capacidadUnoSchema = z.object({
   capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
+  descripcion: descripcionOpcional,
 });
 
 /**

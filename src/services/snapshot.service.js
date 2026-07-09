@@ -109,7 +109,7 @@ function aRegistro(o, ts) {
     consumo_promedio: o._consumo,
     periodo_cubrimiento: o._periodo,
     rotacion: trim(o.DescMayor5),
-    referencia: trim(o.Referencia), // "A-0000571" → la letra inicial es la clase A/B/C (flujo Llano)
+    referencia: trim(o.Referencia),
     criterios: {
       "001": trim(o.DescMayor1),
       "002": trim(o.DescMayor2),
@@ -120,6 +120,9 @@ function aRegistro(o, ts) {
       MUA: trim(o.DescMayorMUA),
       TLD: trim(o.DescMayorTLD),
       SP: trim(o.DescMayorSP),
+      // Plan "CAT" = "CLASIFICACIÓN ABC LLANO". DescMayorCAT = "CATEGORIA TIPO A/B/C".
+      // De acá sale la clase A/B/C del flujo Llano (ya NO del campo Referencia).
+      CAT: trim(o.DescMayorCAT),
     },
     actualizado_at: ts,
   };

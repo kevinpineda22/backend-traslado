@@ -120,23 +120,23 @@ export async function getProductosTraslado({ origen, destino }) {
 /* ─── Flujo Llano — clasificación A/B/C con Excel ──────────────────── */
 
 /**
- * Deriva la clase de un ítem desde el campo `referencia` de SIESA.
- * Formato "A-0000571": la letra inicial es la clase. Sin match → "ninguno".
+ * Deriva la clase A/B/C del ítem desde el criterio CAT ("CLASIFICACIÓN ABC LLANO").
+ * DescMayorCAT tiene la forma "CATEGORIA TIPO A" → clase "A". Sin match → "ninguno".
  */
-function claseDeReferencia(referencia) {
-  const letra = String(referencia ?? "").trim().charAt(0).toUpperCase();
-  return ["A", "B", "C"].includes(letra) ? letra : "ninguno";
+function claseDeCategoria(cat) {
+  const m = String(cat ?? "").toUpperCase().match(/TIPO\s+([ABC])/);
+  return m ? m[1] : "ninguno";
 }
 
 /**
  * Productos del flujo Llano — facetado (todos los ítems del origen, como
- * General) con sugerido A/B/C. La clase sale de `referencia` (SIESA) y la
+ * General) con sugerido A/B/C. La clase sale del criterio CAT (SIESA) y la
  * capacidad de la tabla `traslados_capacidad` (cargada desde el módulo Excel).
  * Ítems sin capacidad cargada → capacidad 0 → sugerido 0.
  *
  * @param {object} opts
  * @param {string} opts.origen   - Bodega origen (00301)
- * @param {string} opts.destino  - Bodega destino (PV004)
+ * @param {string} opts.destino  - Bodega destino (00401)
  * @param {object} [opts.cadencias] - { A, B, C } días (opcional)
  */
 export async function getProductosLlano({ origen, destino, cadencias }) {
@@ -158,7 +158,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       const codigo = String(o.codigo_item);
       const d = dMap.get(codigo);
 
-      const clase = claseDeReferencia(o.referencia || d?.referencia);
+      const clase = claseDeCategoria(o.criterios?.CAT || d?.criterios?.CAT);
       const capacidad = capacidades.get(codigo) || 0;
       const inventarioOrigen = num(o.inventario);
       const disponibleOrigen = num(o.disponible);

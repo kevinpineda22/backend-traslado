@@ -12,10 +12,39 @@ export async function listar(filters) {
 }
 
 /**
+ * Listar despachos con resumen de items (para el monitor).
+ * Cada despacho incluye conteo de items completos/incompletos/agotados/pendientes.
+ */
+export async function listarConResumen(filters = {}) {
+  return DespachoModel.findAllWithResumen(filters);
+}
+
+/**
  * Obtener detalle completo de un despacho.
  */
 export async function obtener(id) {
   return DespachoModel.findById(id);
+}
+
+/**
+ * Eliminar un despacho (cascade borra items y firmas).
+ */
+export async function eliminar(id) {
+  return DespachoModel.eliminar(id);
+}
+
+/**
+ * Reasignar (o quitar) el despachador de un despacho.
+ */
+export async function reasignarDespachador(id, despachadorId) {
+  return DespachoModel.updateDespachador(id, despachadorId);
+}
+
+/**
+ * Editar los ítems de un despacho (solo en estado Creado).
+ */
+export async function editarItems(id, items) {
+  return DespachoModel.editarItems(id, items);
 }
 
 /**

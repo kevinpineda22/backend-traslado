@@ -18,7 +18,7 @@ export const SEDES = {
   "00701": "Barbosa",
   "00801": "San Juan",
   "00601": "Vegas",
-  PV004: "Llano",
+  "00401": "Girardota Llano",
 };
 
 export const FLUJOS = {
@@ -33,7 +33,7 @@ export const FLUJOS = {
     id: "llano",
     nombre: "Traslado Llano",
     origen: "00301",
-    destinos: ["PV004"],
+    destinos: ["00401"],
     logica: "abc", // clasificación A/B/C con capacidad desde Excel
   },
 };

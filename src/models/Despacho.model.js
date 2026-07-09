@@ -166,6 +166,75 @@ export async function iniciarRecoleccion(id, despachadorId) {
 }
 
 /**
+ * Reasignar (o quitar) el despachador de un despacho.
+ */
+export async function updateDespachador(id, despachadorId) {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({ despachador_id: despachadorId || null, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) throw new Error(`Error al reasignar despachador: ${error.message}`);
+  return data;
+}
+
+/**
+ * Editar los ítems de un despacho — SOLO en estado "Creado" (no arrancó).
+ * Actualiza cantidades y elimina los ítems que ya no vengan en la lista.
+ * @param {string} id
+ * @param {Array<{id, cantidad}>} items - ítems que quedan (con su cantidad_admin)
+ */
+export async function editarItems(id, items) {
+  const { data: cab } = await supabase.from(TABLE).select("estado").eq("id", id).single();
+  if (!cab) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (cab.estado !== "Creado") {
+    const e = new Error("Solo se pueden editar los ítems de un despacho en estado Creado");
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  const { data: actuales } = await supabase
+    .from("traslados_items")
+    .select("id")
+    .eq("despacho_id", id);
+
+  const keep = new Set(items.map((i) => i.id).filter(Boolean));
+  const removidos = (actuales || []).map((r) => r.id).filter((x) => !keep.has(x));
+
+  if (removidos.length) {
+    const { error } = await supabase.from("traslados_items").delete().in("id", removidos);
+    if (error) throw new Error(`Error al quitar ítems: ${error.message}`);
+  }
+
+  for (const it of items) {
+    if (!it.id) continue;
+    const { error } = await supabase
+      .from("traslados_items")
+      .update({ cantidad_admin: Number(it.cantidad) || 0 })
+      .eq("id", it.id);
+    if (error) throw new Error(`Error al actualizar ítem: ${error.message}`);
+  }
+
+  return { id, items: items.length };
+}
+
+/**
+ * Eliminar un despacho (los items y firmas se borran por FK ON DELETE CASCADE).
+ */
+export async function eliminar(id) {
+  const { error } = await supabase.from(TABLE).delete().eq("id", id);
+  if (error) throw new Error(`Error al eliminar despacho: ${error.message}`);
+  return { id, eliminado: true };
+}
+
+/**
  * Registrar qué auditor cerró el despacho.
  */
 export async function updateAuditor(id, auditorId) {
@@ -175,6 +244,62 @@ export async function updateAuditor(id, auditorId) {
     .eq("id", id);
 
   if (error) throw new Error(`Error al asignar auditor: ${error.message}`);
+}
+
+/**
+ * Obtener despachos con resumen de items para el monitor.
+ * Devuelve los despachos con conteo de completos/incompletos/agotados/pendientes.
+ * Acepta los mismos filtros que findAll.
+ */
+export async function findAllWithResumen(filters = {}) {
+  // 1. Obtener cabeceras (reusa lógica de findAll)
+  let query = supabase.from(TABLE).select("*");
+
+  if (Array.isArray(filters.estado)) query = query.in("estado", filters.estado);
+  else if (filters.estado) query = query.eq("estado", filters.estado);
+
+  if (filters.sin_asignar) {
+    query = query.is("despachador_id", null);
+  } else if (filters.despachador_id) {
+    query = query.eq("despachador_id", filters.despachador_id);
+  }
+  if (filters.admin_id) query = query.eq("admin_id", filters.admin_id);
+
+  const { data: despachos, error } = await query.order("created_at", { ascending: false });
+  if (error) throw new Error(`Error al listar despachos: ${error.message}`);
+  if (!despachos?.length) return [];
+
+  // 2. Obtener agregación de items
+  const ids = despachos.map((d) => d.id);
+  const { data: items, error: errItems } = await supabase
+    .from("traslados_items")
+    .select("despacho_id, cantidad_despachador, agotado, cantidad_admin")
+    .in("despacho_id", ids);
+
+  if (errItems) throw new Error(`Error al obtener resumen de items: ${errItems.message}`);
+
+  // 3. Armar resumen por despacho
+  const agg = {};
+  for (const item of items || []) {
+    if (!agg[item.despacho_id]) {
+      agg[item.despacho_id] = { total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0 };
+    }
+    agg[item.despacho_id].total++;
+    if (item.agotado) {
+      agg[item.despacho_id].agotados++;
+    } else if (item.cantidad_despachador == null) {
+      agg[item.despacho_id].pendientes++;
+    } else if (Number(item.cantidad_despachador) >= Number(item.cantidad_admin)) {
+      agg[item.despacho_id].completos++;
+    } else {
+      agg[item.despacho_id].incompletos++;
+    }
+  }
+
+  return despachos.map((d) => ({
+    ...d,
+    resumen: agg[d.id] || { total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0 },
+  }));
 }
 
 /**

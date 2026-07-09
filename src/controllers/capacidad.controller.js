@@ -32,7 +32,11 @@ export async function subir(req, res, next) {
  */
 export async function actualizarUno(req, res, next) {
   try {
-    const data = await CapacidadModel.actualizar(req.params.codigo, req.body.capacidad);
+    const data = await CapacidadModel.actualizar(
+      req.params.codigo,
+      req.body.capacidad,
+      req.body.descripcion,
+    );
     res.json({ ok: true, data });
   } catch (error) {
     next(error);

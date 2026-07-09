@@ -2,12 +2,20 @@ import * as DespachoService from "../services/despacho.service.js";
 
 /**
  * GET /api/despachos
- * Listar despachos. Query params opcionales: estado, despachador_id
+ * Listar despachos. Query params opcionales:
+ *   estado, despachador_id, sin_asignar, resumen=true (incluye agregación de items)
  */
 export async function listar(req, res, next) {
   try {
-    const { estado, despachador_id, sin_asignar } = req.query;
-    const data = await DespachoService.listar({ estado, despachador_id, sin_asignar });
+    const { estado, despachador_id, sin_asignar, resumen } = req.query;
+    const filters = { estado, despachador_id, sin_asignar };
+
+    if (resumen === "true") {
+      const data = await DespachoService.listarConResumen(filters);
+      return res.json({ ok: true, data });
+    }
+
+    const data = await DespachoService.listar(filters);
     res.json({ ok: true, data });
   } catch (error) {
     next(error);
@@ -31,6 +39,52 @@ export async function obtener(req, res, next) {
       });
     }
 
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/despachos/:id
+ * Eliminar un despacho (borra items y firmas por cascade).
+ */
+export async function eliminar(req, res, next) {
+  try {
+    const data = await DespachoService.eliminar(req.params.id);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * PATCH /api/despachos/:id/despachador
+ * Reasignar (o quitar) el despachador. Body: { despachador_id }
+ */
+export async function reasignarDespachador(req, res, next) {
+  try {
+    const data = await DespachoService.reasignarDespachador(
+      req.params.id,
+      req.body?.despachador_id ?? null,
+    );
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * PUT /api/despachos/:id/items
+ * Editar los ítems de un despacho (solo Creado). Body: { items: [{ id, cantidad }] }
+ */
+export async function editarItems(req, res, next) {
+  try {
+    const items = req.body?.items;
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: "Se esperaba un arreglo de items" });
+    }
+    const data = await DespachoService.editarItems(req.params.id, items);
     res.json({ ok: true, data });
   } catch (error) {
     next(error);
