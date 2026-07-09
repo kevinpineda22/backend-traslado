@@ -56,15 +56,13 @@ export const CADENCIAS_DEFAULT = { A: 1, B: 3, C: 5 };
 /**
  * Sugerido del flujo Llano según la clase del producto.
  *
- *   A: si la capacidad es MENOR a un día de demanda (capacidad < consumo)
- *        → sugerido = piso(capacidad + consumo)   ← llena góndola + 1 día,
- *          SIN descontar el inventario del destino.
- *      si no (capacidad ≥ consumo) → objetivo = capacidad; sugerido = redondear(objetivo − inventario)
+ *   A: si capacidad/consumo ≤ cadenciaA → objetivo = capacidad + consumo×cadenciaA
+ *      si no                            → objetivo = capacidad
  *   B: si capacidad/consumo <  cadenciaB → objetivo = consumo×cadenciaB
  *      si no                            → objetivo = capacidad
  *   C / ninguno: objetivo = capacidad
  *
- *   sugerido (salvo el caso A de arriba) = max(0, objetivo − inventario)
+ *   sugerido = max(0, objetivo − inventario)
  *
  * @param {object} opts
  * @param {"A"|"B"|"C"|string} opts.clase
@@ -88,11 +86,8 @@ export function calcularSugeridoABC({
 
   let objetivo;
   if (claseNorm === "A") {
-    // Clase A con capacidad menor a un día de demanda (capacidad < consumo):
-    // reponer la góndola + un día completo (capacidad + consumo), truncado a
-    // unidades enteras y SIN restar el inventario del destino.
-    if (cap < cons) return Math.floor(cap + cons);
-    objetivo = cap;
+    const cad = cadencias.A ?? CADENCIAS_DEFAULT.A;
+    objetivo = dias <= cad ? cap + cons * cad : cap;
   } else if (claseNorm === "B") {
     const cad = cadencias.B ?? CADENCIAS_DEFAULT.B;
     objetivo = dias < cad ? cons * cad : cap;
