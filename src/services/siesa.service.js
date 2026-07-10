@@ -1,6 +1,7 @@
 import { calcularSugeridoGeneral, calcularSugeridoABC } from "./sugerido.service.js";
 import { leerBodegas } from "./snapshot.service.js";
 import { mapaCapacidades } from "../models/Capacidad.model.js";
+import { obtener as obtenerConfig } from "../models/Config.model.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
 
 /* =============================================
@@ -23,6 +24,7 @@ const PLANES = [
   { id: "MUA", label: "U. Medida" },
   { id: "TLD", label: "Traslados" }, // antes: Tipo Producto
   { id: "SP", label: "Separata" }, // antes: Segmento
+  { id: "TIP", label: "Tipo" }, // DescMayorTIP (ej: "ABARROTES")
 ];
 
 /* ─── Criterios (para los filtros facetados) ───────────────────────── */
@@ -65,7 +67,13 @@ export async function getCriterios(origen = "PV001") {
  */
 export async function getProductosTraslado({ origen, destino }) {
   try {
-    const rows = await leerBodegas([origen, destino]);
+    const [rows, config] = await Promise.all([
+      leerBodegas([origen, destino]),
+      obtenerConfig(),
+    ]);
+    // Override global del período de cubrimiento (si se configuró en el admin);
+    // si es null, se usa el PeriodoCubrimiento que trae cada ítem de SIESA.
+    const periodoOverride = config.general.periodoCubrimiento;
 
     const oMap = new Map();
     const dMap = new Map();
@@ -83,9 +91,12 @@ export async function getProductosTraslado({ origen, destino }) {
       const disponibleOrigen = num(o.disponible);
       const inventarioDestino = d ? num(d.inventario) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
-      const periodoCubrimiento = d
-        ? num(d.periodo_cubrimiento)
-        : num(o.periodo_cubrimiento);
+      const periodoCubrimiento =
+        periodoOverride != null
+          ? periodoOverride
+          : d
+            ? num(d.periodo_cubrimiento)
+            : num(o.periodo_cubrimiento);
 
       const { stockSeguridad, sugerido } = calcularSugeridoGeneral({
         consumoDestino,
@@ -130,21 +141,26 @@ function claseDeCategoria(cat) {
 
 /**
  * Productos del flujo Llano — facetado (todos los ítems del origen, como
- * General) con sugerido A/B/C. La clase sale del criterio CAT (SIESA) y la
- * capacidad de la tabla `traslados_capacidad` (cargada desde el módulo Excel).
+ * General) con sugerido A/B/C. La clase sale del criterio CAT del DESTINO
+ * (Girardota Llano, 00401) y la capacidad de la tabla `traslados_capacidad`.
  * Ítems sin capacidad cargada → capacidad 0 → sugerido 0.
+ *
+ * Las cadencias A/B/C salen de la config editable (tabla traslados_config);
+ * el parámetro `cadencias` las pisa si se pasa explícito.
  *
  * @param {object} opts
  * @param {string} opts.origen   - Bodega origen (00301)
  * @param {string} opts.destino  - Bodega destino (00401)
- * @param {object} [opts.cadencias] - { A, B, C } días (opcional)
+ * @param {object} [opts.cadencias] - { A, B, C } días (override opcional)
  */
 export async function getProductosLlano({ origen, destino, cadencias }) {
   try {
-    const [rows, capacidades] = await Promise.all([
+    const [rows, capacidades, config] = await Promise.all([
       leerBodegas([origen, destino]),
       mapaCapacidades(),
+      obtenerConfig(),
     ]);
+    const cadenciasEfectivas = cadencias || config.llano;
 
     const oMap = new Map();
     const dMap = new Map();
@@ -158,7 +174,9 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       const codigo = String(o.codigo_item);
       const d = dMap.get(codigo);
 
-      const clase = claseDeCategoria(o.criterios?.CAT || d?.criterios?.CAT);
+      // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
+      // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
+      const clase = claseDeCategoria(d?.criterios?.CAT);
       const capacidad = capacidades.get(codigo) || 0;
       const inventarioOrigen = num(o.inventario);
       const disponibleOrigen = num(o.disponible);
@@ -170,7 +188,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         capacidad,
         consumoDiario: consumoDestino,
         inventario: inventarioDestino,
-        ...(cadencias ? { cadencias } : {}),
+        cadencias: cadenciasEfectivas,
       });
       const sugerido = Math.min(bruto, Math.max(0, Math.floor(disponibleOrigen)));
 

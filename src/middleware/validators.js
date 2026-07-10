@@ -104,6 +104,23 @@ const capacidadUnoSchema = z.object({
   descripcion: descripcionOpcional,
 });
 
+// Config de reposición — días editables (cadencias Llano + cubrimiento General)
+const diaPos = z.preprocess((v) => Number(v), z.number().positive("debe ser mayor a 0"));
+const configSchema = z.object({
+  llano: z.object({
+    A: diaPos,
+    B: diaPos,
+    C: diaPos,
+  }),
+  general: z.object({
+    // null / "" → usar el PeriodoCubrimiento de SIESA por ítem
+    periodoCubrimiento: z.preprocess(
+      (v) => (v == null || v === "" ? null : Number(v)),
+      z.number().positive().nullable(),
+    ),
+  }),
+});
+
 /**
  * Middleware factory: valida req.body contra un esquema Zod.
  */
@@ -133,4 +150,5 @@ export const validators = {
   recolectar: validate(recolectarSchema),
   capacidadBulk: validate(capacidadBulkSchema),
   capacidadUno: validate(capacidadUnoSchema),
+  config: validate(configSchema),
 };

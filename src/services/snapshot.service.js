@@ -123,6 +123,8 @@ function aRegistro(o, ts) {
       // Plan "CAT" = "CLASIFICACIÓN ABC LLANO". DescMayorCAT = "CATEGORIA TIPO A/B/C".
       // De acá sale la clase A/B/C del flujo Llano (ya NO del campo Referencia).
       CAT: trim(o.DescMayorCAT),
+      // Plan "TIP" = "TIPO" (ej: "ABARROTES"). Facet filter de criterios.
+      TIP: trim(o.DescMayorTIP),
     },
     actualizado_at: ts,
   };

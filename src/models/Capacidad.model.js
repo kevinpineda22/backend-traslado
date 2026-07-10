@@ -105,3 +105,24 @@ export async function actualizar(codigoItem, capacidad, descripcion) {
   if (error) throw new Error(`Error al actualizar capacidad: ${error.message}`);
   return data;
 }
+
+/** Elimina la capacidad de un ítem. */
+export async function eliminar(codigoItem) {
+  const { error } = await supabase
+    .from(TABLE)
+    .delete()
+    .eq("codigo_item", String(codigoItem).trim());
+  if (error) throw new Error(`Error al eliminar capacidad: ${error.message}`);
+  return { ok: true };
+}
+
+/** Elimina TODAS las capacidades cargadas. */
+export async function eliminarTodos() {
+  // Supabase exige un filtro en delete; este matchea todas las filas.
+  const { error } = await supabase
+    .from(TABLE)
+    .delete()
+    .not("codigo_item", "is", null);
+  if (error) throw new Error(`Error al eliminar capacidades: ${error.message}`);
+  return { ok: true };
+}

@@ -42,3 +42,29 @@ export async function actualizarUno(req, res, next) {
     next(error);
   }
 }
+
+/**
+ * DELETE /api/capacidad/:codigo
+ * Elimina la capacidad de un ítem.
+ */
+export async function eliminarUno(req, res, next) {
+  try {
+    const data = await CapacidadModel.eliminar(req.params.codigo);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/capacidad
+ * Elimina TODAS las capacidades cargadas.
+ */
+export async function eliminarTodos(_req, res, next) {
+  try {
+    const data = await CapacidadModel.eliminarTodos();
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
