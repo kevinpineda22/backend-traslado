@@ -42,6 +42,7 @@ export function calcularSugeridoGeneral({
   const tope = Math.max(0, Math.floor(num(disponibleOrigen)));
   return {
     stockSeguridad: Math.round(stockSeguridad * 100) / 100,
+    necesidad: bruto, // sugerido SIN tope de origen (lo que el destino necesita)
     sugerido: Math.min(bruto, tope),
   };
 }
@@ -60,7 +61,9 @@ export const CADENCIAS_DEFAULT = { A: 1, B: 3, C: 5 };
  *      si no                            → objetivo = capacidad
  *   B: si capacidad/consumo <  cadenciaB → objetivo = consumo×cadenciaB
  *      si no                            → objetivo = capacidad
- *   C / ninguno: objetivo = capacidad
+ *   C / ninguno: misma lógica que B pero con cadenciaC (default 5 días):
+ *      si capacidad/consumo < cadenciaC → objetivo = consumo×cadenciaC
+ *      si no                            → objetivo = capacidad
  *
  *   sugerido = max(0, objetivo − inventario)
  *
@@ -92,8 +95,9 @@ export function calcularSugeridoABC({
     const cad = cadencias.B ?? CADENCIAS_DEFAULT.B;
     objetivo = dias < cad ? cons * cad : cap;
   } else {
-    // C o "ninguno"
-    objetivo = cap;
+    // C o "ninguno": misma lógica que B pero con la cadencia de C (default 5 días).
+    const cad = cadencias.C ?? CADENCIAS_DEFAULT.C;
+    objetivo = dias < cad ? cons * cad : cap;
   }
 
   return redondear(objetivo - inv);

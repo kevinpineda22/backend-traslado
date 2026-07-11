@@ -1,5 +1,5 @@
 import { calcularSugeridoGeneral, calcularSugeridoABC } from "./sugerido.service.js";
-import { leerBodegas } from "./snapshot.service.js";
+import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
 import { mapaCapacidades } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
@@ -98,12 +98,14 @@ export async function getProductosTraslado({ origen, destino }) {
             ? num(d.periodo_cubrimiento)
             : num(o.periodo_cubrimiento);
 
-      const { stockSeguridad, sugerido } = calcularSugeridoGeneral({
+      const { stockSeguridad, necesidad, sugerido } = calcularSugeridoGeneral({
         consumoDestino,
         periodoCubrimiento,
         inventarioDestino,
         disponibleOrigen,
       });
+      // Faltante: lo que el destino necesita y el origen principal NO puede cubrir.
+      const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
       productos.push({
         codigo_item: codigo,
@@ -118,6 +120,8 @@ export async function getProductosTraslado({ origen, destino }) {
         consumo_destino: consumoDestino,
         periodo_cubrimiento: periodoCubrimiento,
         stock_seguridad: stockSeguridad,
+        necesidad,
+        faltante,
         sugerido,
       });
     }
@@ -183,14 +187,16 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       const inventarioDestino = d ? num(d.inventario) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
-      const bruto = calcularSugeridoABC({
+      // `bruto` es la necesidad SIN tope de origen (el cap se aplica abajo).
+      const necesidad = calcularSugeridoABC({
         clase,
         capacidad,
         consumoDiario: consumoDestino,
         inventario: inventarioDestino,
         cadencias: cadenciasEfectivas,
       });
-      const sugerido = Math.min(bruto, Math.max(0, Math.floor(disponibleOrigen)));
+      const sugerido = Math.min(necesidad, Math.max(0, Math.floor(disponibleOrigen)));
+      const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
       productos.push({
         codigo_item: codigo,
@@ -205,11 +211,100 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         disponible_origen: disponibleOrigen,
         inventario_destino: inventarioDestino,
         consumo_destino: consumoDestino,
+        necesidad,
+        faltante,
         sugerido,
       });
     }
 
     return { data: productos };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+/**
+ * Disponibilidad de UN ítem en TODAS las sedes — para elegir un origen
+ * alternativo cuando el origen principal no cubre. Devuelve, por cada sede con
+ * stock (menos el destino), su disponible y el sugerido si el traslado saliera
+ * de ahí (misma lógica del flujo: A/B/C en Llano, stock de seguridad en General).
+ *
+ * @param {object} opts
+ * @param {string} opts.codigo  - Código del ítem
+ * @param {string} opts.destino - Bodega destino
+ */
+export async function getDisponibilidadItem({ codigo, destino }) {
+  try {
+    const flujo = getFlujoPorDestino(destino);
+    if (!flujo) return { error: `El destino ${destino} no pertenece a ningún flujo` };
+
+    const bodegas = Object.keys(SEDES);
+    const [rows, capacidades, config] = await Promise.all([
+      leerBodegasItems(bodegas, [codigo]),
+      mapaCapacidades(),
+      obtenerConfig(),
+    ]);
+
+    const porBodega = new Map();
+    for (const r of rows) porBodega.set(trim(r.bodega), r);
+
+    const d = porBodega.get(trim(destino));
+    const inventarioDestino = d ? num(d.inventario) : 0;
+    const consumoDestino = d ? num(d.consumo_promedio) : 0;
+
+    // Necesidad (sin tope de origen) según el flujo del destino.
+    let necesidad;
+    if (flujo.logica === "abc") {
+      const clase = claseDeCategoria(d?.criterios?.CAT);
+      const capacidad = capacidades.get(String(codigo)) || 0;
+      necesidad = calcularSugeridoABC({
+        clase,
+        capacidad,
+        consumoDiario: consumoDestino,
+        inventario: inventarioDestino,
+        cadencias: config.llano,
+      });
+    } else {
+      const periodo =
+        config.general.periodoCubrimiento != null
+          ? config.general.periodoCubrimiento
+          : d
+            ? num(d.periodo_cubrimiento)
+            : 0;
+      necesidad = calcularSugeridoGeneral({
+        consumoDestino,
+        periodoCubrimiento: periodo,
+        inventarioDestino,
+        disponibleOrigen: Infinity,
+      }).necesidad;
+    }
+
+    // Sedes candidatas: todas menos el destino, con disponible > 0.
+    const sedes = [];
+    for (const [bodega, r] of porBodega) {
+      if (bodega === trim(destino)) continue;
+      const disponible = Math.max(0, Math.floor(num(r.disponible)));
+      if (disponible <= 0) continue;
+      sedes.push({
+        codigo: bodega,
+        nombre: nombreSede(bodega),
+        disponible,
+        inventario: num(r.inventario),
+        sugerido: Math.min(necesidad, disponible),
+      });
+    }
+    sedes.sort((a, b) => b.disponible - a.disponible);
+
+    return {
+      data: {
+        codigo_item: String(codigo),
+        destino,
+        flujo: flujo.id,
+        necesidad,
+        inventario_destino: inventarioDestino,
+        sedes,
+      },
+    };
   } catch (error) {
     return { error: error.message };
   }

@@ -131,6 +131,27 @@ export async function listarProductos(req, res, next) {
 }
 
 /**
+ * GET /api/siesa/disponibilidad?codigo=123&destino=00401
+ * Disponibilidad de un ítem en todas las sedes (para elegir origen alternativo
+ * cuando el origen principal no cubre). Devuelve por sede: disponible + sugerido.
+ */
+export async function listarDisponibilidad(req, res, next) {
+  try {
+    const { codigo, destino } = req.query;
+    if (!codigo || !destino) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "codigo y destino son requeridos" });
+    }
+    const { data, error } = await SiesaService.getDisponibilidadItem({ codigo, destino });
+    if (error) return res.status(502).json({ ok: false, error });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * GET /api/siesa/sedes
  * Lista de sedes destino disponibles.
  */
