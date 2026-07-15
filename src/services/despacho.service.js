@@ -2,6 +2,7 @@ import * as DespachoModel from "../models/Despacho.model.js";
 import * as ItemModel from "../models/Item.model.js";
 import * as FirmaModel from "../models/Firma.model.js";
 import { createError } from "../middleware/errorHandler.js";
+import { notificarFaltantesRecoleccion } from "./notificacionesTraslado.service.js";
 import ExcelJS from "exceljs";
 
 /**
@@ -56,6 +57,8 @@ export async function crear(payload) {
 
 /**
  * Cambiar estado de un despacho.
+ * Al cerrar la recolección (→ Recolectado) dispara los correos de faltantes
+ * (best-effort: si el correo falla, el cambio de estado NO se revierte).
  */
 export async function cambiarEstado(id, estado, firmaData) {
   // Si hay firma, guardarla primero
@@ -64,7 +67,20 @@ export async function cambiarEstado(id, estado, firmaData) {
     await FirmaModel.create({ despacho_id: id, rol, firma_data: firmaData });
   }
 
-  return DespachoModel.updateStatus(id, estado);
+  const actualizado = await DespachoModel.updateStatus(id, estado);
+
+  // Notificar faltantes al cerrar la recolección. En este punto los motivos ya
+  // están persistidos (el front hace POST /recolectar antes de firmar).
+  if (estado === "Recolectado") {
+    try {
+      const despacho = await DespachoModel.findById(id);
+      await notificarFaltantesRecoleccion(despacho);
+    } catch (err) {
+      console.error("[despacho] notificación de faltantes falló:", err.message);
+    }
+  }
+
+  return actualizado;
 }
 
 /**
@@ -78,9 +94,10 @@ export async function iniciarRecoleccion(id, despachadorId) {
 
 /**
  * Registrar cantidad recolectada por el despachador para un item.
+ * `motivo` (opcional): motivo del faltante — ver ItemModel.MOTIVOS_FALTANTE.
  */
-export async function registrarRecoleccion(itemId, cantidad, agotado) {
-  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado);
+export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null) {
+  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo);
 }
 
 /**
@@ -146,9 +163,16 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
   const estadoFinal = ESTADO_POR_DECISION[decision];
   if (!estadoFinal) throw createError(400, `Decisión inválida: ${decision}`);
 
-  // Persistir cantidades del auditor + diferencia por item
+  // Persistir cantidades del auditor. Dos clases de ítem:
+  //  - Existentes (traen `id`)  → se actualiza cantidad_auditor + diferencia.
+  //  - Nuevos (traen `nuevo:true`, sin `id`) → mercancía que NO venía en la lista
+  //    original; se inserta marcada como agregado_por_auditor.
   for (const item of items) {
-    await ItemModel.updateCantidadAuditor(item.id, item.cantidad_auditor);
+    if (item?.nuevo || item?.id == null) {
+      await ItemModel.insertItemAuditor(despachoId, item);
+    } else {
+      await ItemModel.updateCantidadAuditor(item.id, item.cantidad_auditor);
+    }
   }
 
   // Firma del auditor

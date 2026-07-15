@@ -1,4 +1,5 @@
 import * as SiesaService from "../services/siesa.service.js";
+import { getStockLote } from "../services/siesaStock.service.js";
 import {
   refrescarSnapshotUnico,
   refreshEnProgreso,
@@ -159,6 +160,33 @@ export async function listarSedes(_req, res, next) {
   try {
     const { data, error } = await SiesaService.getSedes();
     if (error) return res.status(502).json({ ok: false, error });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/siesa/stock?sede=00301&items=CODE1,CODE2,...
+ * Stock EN VIVO (consulta SIESA en tiempo real) de una lista de ítems en una sede.
+ * Pensado para el despachador: pide solo los ítems visibles, no el catálogo entero.
+ * Devuelve { [codigo]: { disponible, existencia } }.
+ */
+export async function stockEnVivo(req, res, next) {
+  try {
+    const sede = String(req.query.sede || "").trim();
+    const items = String(req.query.items || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (!sede) return res.status(400).json({ ok: false, error: "sede es requerida" });
+    if (items.length === 0) return res.json({ ok: true, data: {} });
+    if (items.length > 200) {
+      return res.status(400).json({ ok: false, error: "Máximo 200 ítems por consulta" });
+    }
+
+    const data = await getStockLote({ sede, items });
     res.json({ ok: true, data });
   } catch (error) {
     next(error);

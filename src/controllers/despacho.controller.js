@@ -155,6 +155,7 @@ export async function recolectar(req, res, next) {
         item.id,
         item.cantidad,
         item.agotado,
+        item.motivo,
       );
       resultados.push(actualizado);
     }

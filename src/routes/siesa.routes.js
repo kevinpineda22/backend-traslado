@@ -7,6 +7,7 @@ router.get("/flujos", SiesaController.listarFlujosCtrl);
 router.get("/criterios", SiesaController.listarCriterios);
 router.get("/productos", SiesaController.listarProductos);
 router.get("/disponibilidad", SiesaController.listarDisponibilidad);
+router.get("/stock", SiesaController.stockEnVivo);
 router.get("/sedes", SiesaController.listarSedes);
 router.get("/estado", SiesaController.estado);
 router.get("/refresh", SiesaController.refrescar);

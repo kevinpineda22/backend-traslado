@@ -56,12 +56,29 @@ const compararSchema = z.object({
   items: itemsAuditorSchema,
 });
 
-// Auditoría — Paso 2: confirmar (decisión + firma)
+// Ítem existente que cuenta el auditor.
+const itemAuditorExistenteSchema = z.object({
+  id: z.string().uuid(),
+  cantidad_auditor: z.number().min(0, "cantidad_auditor no puede ser negativa"),
+});
+
+// Ítem NUEVO agregado por el auditor (no venía en la lista original). Sin `id`.
+const itemAuditorNuevoSchema = z.object({
+  nuevo: z.literal(true),
+  codigo_item: z.string().min(1, "codigo_item es requerido"),
+  descripcion: z.string().optional(),
+  unidad_medida: z.string().optional(),
+  cantidad_auditor: z.number().min(0, "cantidad_auditor no puede ser negativa"),
+});
+
+// Auditoría — Paso 2: confirmar (decisión + firma). Acepta existentes y nuevos.
 const confirmarSchema = z.object({
   decision: z.enum(["aprobado", "inconsistencia", "rechazado"]),
   auditor_id: z.string().optional(),
   firma_data: z.string().min(1, "firma_data es requerida"),
-  items: itemsAuditorSchema,
+  items: z
+    .array(z.union([itemAuditorExistenteSchema, itemAuditorNuevoSchema]))
+    .min(1),
 });
 
 // Esquema para recolección
@@ -74,6 +91,10 @@ const recolectarSchema = z.object({
         id: z.string().uuid(),
         cantidad: z.number().min(0, "cantidad no puede ser negativa"),
         agotado: z.boolean().optional(),
+        motivo: z
+          .enum(["sin_stock", "surtido_parcial", "inventario_inflado"])
+          .nullable()
+          .optional(),
       }),
     )
     .min(1),
