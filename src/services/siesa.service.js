@@ -3,7 +3,11 @@ import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
 import { mapaCapacidades } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
-import { unidadForzadaDe, FACTOR_UNIDAD_FORZADA } from "../config/unidadesForzadas.js";
+import {
+  unidadForzadaDe,
+  unidadesSeleccionablesDe,
+  FACTOR_UNIDAD,
+} from "../config/unidadesForzadas.js";
 
 /* =============================================
    Servicio SIESA (lectura)
@@ -332,9 +336,13 @@ function buildUnidades(row) {
   if (forzada) {
     // Usa el factor real si SIESA ya trae esa unidad; si no, el configurado.
     const existente = unidades.find((u) => u.unidad === forzada);
-    const f = existente ? existente.factor : FACTOR_UNIDAD_FORZADA[forzada] || 1;
+    const f = existente ? existente.factor : FACTOR_UNIDAD[forzada] || 1;
     return [{ unidad: forzada, factor: f }];
   }
+
+  // Set fijo de unidades seleccionables (ej. huevos: UND / P15 / P30).
+  const seleccionables = unidadesSeleccionablesDe(row.codigo_item);
+  if (seleccionables) return seleccionables;
 
   return unidades;
 }
