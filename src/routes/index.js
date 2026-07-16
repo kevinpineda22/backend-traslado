@@ -4,6 +4,7 @@ import despachoRoutes from "./despacho.routes.js";
 import auditorRoutes from "./auditor.routes.js";
 import capacidadRoutes from "./capacidad.routes.js";
 import configRoutes from "./config.routes.js";
+import { verificarEmail } from "../services/email.service.js";
 
 const router = Router();
 

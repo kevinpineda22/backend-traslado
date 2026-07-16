@@ -60,6 +60,42 @@ export function emailConfigurado() {
 }
 
 /**
+ * Diagnóstico: se conecta al SMTP y AUTENTICA, sin enviar nada.
+ *
+ * "Las variables están cargadas" y "el correo funciona" son cosas distintas, y
+ * confundirlas cuesta semanas: la cuenta puede tener la contraseña vencida, o
+ * el tenant puede tener SMTP AUTH deshabilitado (Office365 lo apaga por default
+ * hace años). Sin esto, la única forma de enterarse es cerrar un despacho real
+ * y ver si llega el correo — o sea, enterarse tarde.
+ *
+ * @returns {Promise<{ok:boolean, configurado:boolean, error?:string, remitente?:string, destinatarios?:object}>}
+ */
+export async function verificarEmail() {
+  const base = {
+    configurado: emailConfigurado(),
+    remitente: process.env.EMAIL_USER || null,
+    host: process.env.EMAIL_HOST || "smtp.office365.com",
+    puerto: Number(process.env.EMAIL_PORT) || 587,
+    destinatarios: DESTINATARIOS,
+  };
+
+  if (!base.configurado) {
+    return {
+      ...base,
+      ok: false,
+      error: "Faltan EMAIL_USER y/o EMAIL_PASS en el entorno",
+    };
+  }
+
+  try {
+    await transporter.verify();
+    return { ...base, ok: true };
+  } catch (error) {
+    return { ...base, ok: false, error: error.message };
+  }
+}
+
+/**
  * Envía un correo. Devuelve { success } y NUNCA lanza hacia arriba: el correo es
  * un efecto secundario best-effort; una falla de SMTP no debe tumbar el flujo de
  * negocio (recolección / auditoría). Se loguea para diagnóstico.
