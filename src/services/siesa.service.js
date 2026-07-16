@@ -88,12 +88,17 @@ export async function getProductosTraslado({ origen, destino }) {
     }
 
     const productos = [];
-    for (const o of oMap.values()) {
-      const codigo = String(o.codigo_item);
+    // Recorremos la UNIÓN origen ∪ destino: así también aparecen los ítems que
+    // el destino necesita aunque el origen principal no tenga stock (para poder
+    // mandarlos desde otra sede). Los ítems solo-destino se incluyen si necesidad > 0.
+    const codigos = new Set([...oMap.keys(), ...dMap.keys()]);
+    for (const codigo of codigos) {
+      const o = oMap.get(codigo);
       const d = dMap.get(codigo);
+      const fuente = o || d; // descripción/UM/criterios: preferimos el origen
 
-      const inventarioOrigen = num(o.inventario);
-      const disponibleOrigen = num(o.disponible);
+      const inventarioOrigen = o ? num(o.inventario) : 0;
+      const disponibleOrigen = o ? num(o.disponible) : 0;
       const inventarioDestino = d ? num(d.inventario) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
       const periodoCubrimiento =
@@ -101,7 +106,7 @@ export async function getProductosTraslado({ origen, destino }) {
           ? periodoOverride
           : d
             ? num(d.periodo_cubrimiento)
-            : num(o.periodo_cubrimiento);
+            : num(fuente.periodo_cubrimiento);
 
       const { stockSeguridad, necesidad, sugerido } = calcularSugeridoGeneral({
         consumoDestino,
@@ -112,13 +117,16 @@ export async function getProductosTraslado({ origen, destino }) {
       // Faltante: lo que el destino necesita y el origen principal NO puede cubrir.
       const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
+      // Ítem que no está en el origen: solo tiene sentido si el destino lo necesita.
+      if (!o && necesidad <= 0) continue;
+
       productos.push({
         codigo_item: codigo,
-        descripcion: trim(o.descripcion),
-        rotacion: trim(o.rotacion) || "N/A",
-        unidad_medida: trim(o.um),
-        unidades: buildUnidades(o),
-        criterios: o.criterios || {},
+        descripcion: trim(fuente.descripcion),
+        rotacion: trim(fuente.rotacion) || "N/A",
+        unidad_medida: trim(fuente.um),
+        unidades: buildUnidades(fuente),
+        criterios: fuente.criterios || {},
         inventario_origen: inventarioOrigen,
         disponible_origen: disponibleOrigen,
         inventario_destino: inventarioDestino,
@@ -179,20 +187,25 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     }
 
     const productos = [];
-    for (const o of oMap.values()) {
-      const codigo = String(o.codigo_item);
+    // Unión origen ∪ destino: también aparecen los ítems que Llano necesita
+    // aunque el origen (Girardota Parque) no tenga stock, para mandarlos desde
+    // otra sede. Los ítems solo-destino se incluyen si necesidad > 0.
+    const codigos = new Set([...oMap.keys(), ...dMap.keys()]);
+    for (const codigo of codigos) {
+      const o = oMap.get(codigo);
       const d = dMap.get(codigo);
+      const fuente = o || d;
 
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
       const clase = claseDeCategoria(d?.criterios?.CAT);
       const capacidad = capacidades.get(codigo) || 0;
-      const inventarioOrigen = num(o.inventario);
-      const disponibleOrigen = num(o.disponible);
+      const inventarioOrigen = o ? num(o.inventario) : 0;
+      const disponibleOrigen = o ? num(o.disponible) : 0;
       const inventarioDestino = d ? num(d.inventario) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
-      // `bruto` es la necesidad SIN tope de origen (el cap se aplica abajo).
+      // `necesidad` es el sugerido SIN tope de origen (el cap se aplica abajo).
       const necesidad = calcularSugeridoABC({
         clase,
         capacidad,
@@ -203,15 +216,18 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       const sugerido = Math.min(necesidad, Math.max(0, Math.floor(disponibleOrigen)));
       const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
+      // Ítem que no está en el origen: solo tiene sentido si Llano lo necesita.
+      if (!o && necesidad <= 0) continue;
+
       productos.push({
         codigo_item: codigo,
-        descripcion: trim(o.descripcion),
+        descripcion: trim(fuente.descripcion),
         clase,
         capacidad,
-        rotacion: trim(o.rotacion) || "N/A",
-        unidad_medida: trim(o.um),
-        unidades: buildUnidades(o),
-        criterios: o.criterios || {},
+        rotacion: trim(fuente.rotacion) || "N/A",
+        unidad_medida: trim(fuente.um),
+        unidades: buildUnidades(fuente),
+        criterios: fuente.criterios || {},
         inventario_origen: inventarioOrigen,
         disponible_origen: disponibleOrigen,
         inventario_destino: inventarioDestino,
