@@ -1,14 +1,18 @@
-import { sendEmail, DESTINATARIOS } from "./email.service.js";
+import { sendEmail, DESTINATARIOS, emailConfigurado } from "./email.service.js";
 import { nombreSede } from "../config/flujos.js";
 
 /* =============================================
    Notificaciones de traslado (correo)
 
-   Regla de negocio (pedida por el usuario):
-   - Cualquier ítem con motivo de faltante  → compras (lidercompras + compras).
-   - Ítems con motivo 'inventario_inflado'   → ADEMÁS a inventarios (solo esos).
+   Al cerrar la recolección (estado → Recolectado) salen hasta 3 correos:
 
-   Se dispara una sola vez, al finalizar la recolección (estado → Recolectado).
+   1. CIERRE       → despachos. SIEMPRE, haya o no faltantes. Es el acuse de que
+                     el despacho se cerró; su ausencia es la señal de que algo
+                     falló, no de que "todo salió bien".
+   2. FALTANTES    → compras. Solo si hay ítems con motivo.
+   3. INFLADO      → inventarios. Solo los ítems con 'inventario_inflado'.
+
+   Los tres son best-effort: una caída de SMTP no revierte el despacho.
    ============================================= */
 
 const MOTIVO_LABEL = {
@@ -41,9 +45,21 @@ function filasTabla(items) {
     .join("");
 }
 
-function armarHtml({ despacho, items, titulo, intro }) {
+const ENCABEZADOS_FALTANTES = ["Producto", "Pedido", "Recolectado", "Motivo"];
+
+/**
+ * Arma el HTML del correo. `filas` y `encabezados` se pasan desde afuera porque
+ * el correo de cierre y el de faltantes muestran columnas distintas.
+ */
+function armarHtml({ despacho, titulo, intro, filas, encabezados = ENCABEZADOS_FALTANTES }) {
   const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
   const fecha = new Date(despacho.updated_at || Date.now()).toLocaleString("es-CO");
+  const ths = encabezados
+    .map(
+      (h, i) =>
+        `<th style="padding:8px 10px;text-align:${i === 0 || i === encabezados.length - 1 ? "left" : "center"};">${esc(h)}</th>`,
+    )
+    .join("");
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:640px;">
@@ -56,19 +72,65 @@ function armarHtml({ despacho, items, titulo, intro }) {
     </table>
     <table style="border-collapse:collapse;width:100%;font-size:13px;">
       <thead>
-        <tr style="background:#2d1578;color:#fff;">
-          <th style="padding:8px 10px;text-align:left;">Producto</th>
-          <th style="padding:8px 10px;">Pedido</th>
-          <th style="padding:8px 10px;">Recolectado</th>
-          <th style="padding:8px 10px;text-align:left;">Motivo</th>
-        </tr>
+        <tr style="background:#2d1578;color:#fff;">${ths}</tr>
       </thead>
-      <tbody>${filasTabla(items)}</tbody>
+      <tbody>${filas}</tbody>
     </table>
     <p style="margin-top:16px;font-size:12px;color:#94a3b8;">
       Correo automático del sistema de Traslados — Merkahorro. No responder.
     </p>
   </div>`;
+}
+
+/** Fila de la tabla del correo de cierre (todos los ítems, no solo faltantes). */
+function filasCierre(items) {
+  return items
+    .map((it) => {
+      const pedido = Number(it.cantidad_admin) || 0;
+      const recogido = Number(it.cantidad_despachador) || 0;
+      const completo = recogido >= pedido;
+      return `
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || it.codigo_item)}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${pedido}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${recogido}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;color:${completo ? "#16a34a" : "#dc2626"};">
+          ${completo ? "Completo" : esc(MOTIVO_LABEL[it.motivo] || "Incompleto")}
+        </td>
+      </tr>`;
+    })
+    .join("");
+}
+
+/**
+ * Correo de CIERRE de recolección. Sale SIEMPRE, con faltantes o sin ellos.
+ *
+ * Antes solo existía el correo de faltantes, así que un despacho perfecto no
+ * generaba ningún correo: el sistema quedaba mudo y era imposible distinguir
+ * "salió todo bien" de "el correo está roto". El acuse tiene que ser
+ * incondicional para que su ausencia signifique algo.
+ *
+ * @param {object} despacho - cabecera + `traslados_items`
+ */
+export async function notificarCierreRecoleccion(despacho) {
+  const items = despacho?.traslados_items || [];
+  const conFaltante = items.filter((it) => it.motivo);
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const resumen = conFaltante.length
+    ? `${conFaltante.length} de ${items.length} producto(s) van con faltante.`
+    : `Los ${items.length} producto(s) se recolectaron completos.`;
+
+  return sendEmail({
+    to: DESTINATARIOS.despachos,
+    subject: `Despacho cerrado ${ruta}${conFaltante.length ? ` — ${conFaltante.length} con faltante` : ""}`,
+    html: armarHtml({
+      despacho,
+      titulo: "Recolección finalizada",
+      intro: `El despachador cerró la recolección. ${resumen}`,
+      filas: filasCierre(items),
+      encabezados: ["Producto", "Pedido", "Recolectado", "Estado"],
+    }),
+  });
 }
 
 /**
@@ -78,7 +140,7 @@ function armarHtml({ despacho, items, titulo, intro }) {
  */
 export async function notificarFaltantesRecoleccion(despacho) {
   const items = (despacho?.traslados_items || []).filter((it) => it.motivo);
-  if (items.length === 0) return { enviados: 0 };
+  if (items.length === 0) return { enviados: 0, inflados: 0, resultados: {} };
 
   const rutaResumen = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
   const resultados = {};
@@ -89,9 +151,9 @@ export async function notificarFaltantesRecoleccion(despacho) {
     subject: `Faltantes en despacho ${rutaResumen} (${items.length})`,
     html: armarHtml({
       despacho,
-      items,
       titulo: "Faltantes reportados en recolección",
       intro: `El despachador cerró la recolección con ${items.length} producto(s) marcados con faltante. Detalle:`,
+      filas: filasTabla(items),
     }),
   });
 
@@ -103,9 +165,9 @@ export async function notificarFaltantesRecoleccion(despacho) {
       subject: `Inventario inflado detectado — ${rutaResumen} (${inflados.length})`,
       html: armarHtml({
         despacho,
-        items: inflados,
         titulo: "Posible inventario inflado",
         intro: `Durante la recolección se detectaron ${inflados.length} producto(s) con inventario que no coincide con la existencia física. Revisar:`,
+        filas: filasTabla(inflados),
       }),
     });
   }
@@ -115,4 +177,33 @@ export async function notificarFaltantesRecoleccion(despacho) {
     inflados: inflados.length,
     resultados,
   };
+}
+
+/**
+ * Dispara TODOS los correos del cierre de recolección y deja en el log qué pasó
+ * con cada uno. Nunca lanza: el correo no puede tumbar el flujo de negocio.
+ * @param {object} despacho
+ */
+export async function notificarRecoleccionCerrada(despacho) {
+  if (!emailConfigurado()) {
+    console.error(
+      `[traslados] ⚠️ despacho ${despacho?.id} cerrado SIN notificar: falta configurar EMAIL_USER/EMAIL_PASS`,
+    );
+    return { cierre: false, faltantes: 0 };
+  }
+
+  const [cierre, faltantes] = await Promise.all([
+    notificarCierreRecoleccion(despacho).catch((e) => ({ success: false, error: e.message })),
+    notificarFaltantesRecoleccion(despacho).catch((e) => {
+      console.error("[traslados] correo de faltantes falló:", e.message);
+      return { enviados: 0 };
+    }),
+  ]);
+
+  console.log(
+    `[traslados] despacho ${despacho?.id}: cierre=${cierre?.success ? "enviado" : "FALLÓ"}, ` +
+      `correos de faltantes=${faltantes?.enviados ?? 0}`,
+  );
+
+  return { cierre: Boolean(cierre?.success), faltantes: faltantes?.enviados ?? 0 };
 }

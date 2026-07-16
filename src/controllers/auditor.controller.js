@@ -28,14 +28,21 @@ export async function obtenerDetalle(req, res, next) {
     // Auditoría ciega: ocultar cantidad_despachador y firma del despachador
     const { traslados_firmas, traslados_items, ...cabecera } = despacho;
 
-    const itemsCiegos = traslados_items?.map((item) => ({
-      id: item.id,
-      codigo_item: item.codigo_item,
-      descripcion: item.descripcion,
-      unidad_medida: item.unidad_medida,
-      cantidad_admin: item.cantidad_admin,
-      // NOTA: cantidad_despachador y diferencia se ocultan intencionalmente
-    }));
+    // Los no enviados se omiten ENTEROS. Esto no rompe la ceguera: el auditor
+    // nunca supo que existían, así que no puede deducir nada de su ausencia
+    // (no tiene la lista original del admin contra la cual comparar).
+    // MISMA regla que usa compararAuditoria — ver DespachoService.noSalioDeOrigen.
+    const itemsCiegos = (traslados_items || [])
+      .filter((it) => !DespachoService.noSalioDeOrigen(it))
+      .map((item) => ({
+        id: item.id,
+        codigo_item: item.codigo_item,
+        descripcion: item.descripcion,
+        unidad_medida: item.unidad_medida,
+        cantidad_admin: item.cantidad_admin,
+        categoria: item.categoria,
+        // NOTA: cantidad_despachador y diferencia se ocultan intencionalmente
+      }));
 
     res.json({
       ok: true,
@@ -52,17 +59,32 @@ export async function obtenerDetalle(req, res, next) {
 
 /**
  * POST /api/auditor/despachos/:id/comparar
- * Paso 1: revela la comparación despachador vs auditor. No firma, no cambia estado.
+ * Paso 1: dice SI cuadra y, si no, QUÉ hay que recontar. No firma, no cambia estado.
+ *
  * Body: { items: [{ id, cantidad_auditor }] }
- * Resp: { ok, data: { match, differences: [...] } }
+ * Resp: { ok, data: { match, recontar: [{ id, codigo_item, descripcion }] } }
+ *
+ * Devuelve la lista a recontar SIN cantidades ni diferencias, a propósito. Si
+ * mandáramos los números y solo los escondiéramos en la UI, cualquiera los ve
+ * abriendo la pestaña de red del navegador: ocultarlos en el front sería teatro.
+ * La auditoría ciega se sostiene en el backend o no se sostiene.
  */
 export async function comparar(req, res, next) {
   try {
-    const resultado = await DespachoService.compararAuditoria(
+    const { match, differences } = await DespachoService.compararAuditoria(
       req.params.id,
       req.body.items,
     );
-    res.json({ ok: true, data: resultado });
+
+    const recontar = differences
+      .filter((d) => Number(d.diferencia) !== 0)
+      .map((d) => ({
+        id: d.id,
+        codigo_item: d.codigo_item,
+        descripcion: d.descripcion,
+      }));
+
+    res.json({ ok: true, data: { match, recontar } });
   } catch (error) {
     next(error);
   }

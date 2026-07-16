@@ -74,6 +74,9 @@ export async function create(payload) {
       unidad_medida: item.unidad_medida,
       factor: item.factor ?? 1,
       rotacion: item.rotacion,
+      // Snapshot de la categoría: si SIESA reclasifica el producto mañana, el
+      // despacho ya cerrado debe seguir contando la historia que vio el admin.
+      categoria: item.categoria || null,
       stock_origen: item.stock_origen,
       stock_destino: item.stock_destino,
       consumo_destino: item.consumo_destino,
@@ -235,6 +238,23 @@ export async function eliminar(id) {
 }
 
 /**
+ * Deja la requisición de SIESA marcada como 'pendiente' de envío.
+ *
+ * El `.is("siesa_estado", null)` es el punto: solo marca si NUNCA se tocó. Si ya
+ * dice 'enviado', pisarlo con 'pendiente' haría que el cron la mande de nuevo y
+ * duplique la requisición en el ERP. Un estado terminal no se revive.
+ */
+export async function marcarSiesaPendiente(id) {
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ siesa_estado: "pendiente" })
+    .eq("id", id)
+    .is("siesa_estado", null);
+
+  if (error) console.error(`[despacho] no se pudo marcar siesa_estado: ${error.message}`);
+}
+
+/**
  * Registrar qué auditor cerró el despacho.
  */
 export async function updateAuditor(id, auditorId) {
@@ -303,17 +323,22 @@ export async function findAllWithResumen(filters = {}) {
 }
 
 /**
- * Obtener despachos para el panel del auditor (sin cantidades del despachador).
- * La auditoría ciega se logra omitiendo cantidad_despachador en la query.
+ * Obtener despachos para el panel del auditor: SOLO la cabecera.
+ *
+ * Deliberadamente NO trae ítems ni firmas. El sidebar solo pinta ruta, estado y
+ * fecha; los ítems se piden aparte por `/auditor/despachos/:id`, que es donde
+ * vive el filtro de la auditoría ciega (oculta los que no salieron de origen y
+ * la firma del despachador).
+ *
+ * Si acá devolviéramos los ítems, ese filtro no serviría de nada: bastaría con
+ * comparar ambas respuestas en la pestaña de red para deducir cuáles se
+ * ocultaron — o sea, cuáles mandó el despachador en cero. Un dato que no viaja
+ * es el único que no se puede espiar.
  */
 export async function findForAuditor() {
   const { data, error } = await supabase
     .from(TABLE)
-    .select(`
-      id, origen, destino, estado, created_at, updated_at,
-      traslados_items(id, codigo_item, descripcion, unidad_medida, cantidad_admin),
-      traslados_firmas(*)
-    `)
+    .select("id, origen, destino, estado, created_at, updated_at")
     .in("estado", ["Recolectado", "En_recepcion"]);
 
   if (error) throw new Error(`Error al listar despachos para auditoría: ${error.message}`);

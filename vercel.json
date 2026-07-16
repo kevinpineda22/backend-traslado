@@ -14,6 +14,10 @@
     {
       "path": "/api/siesa/refresh",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/siesa/requisiciones/reintentar",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

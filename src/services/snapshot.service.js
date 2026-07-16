@@ -1,6 +1,7 @@
 import { supabase } from "../config/supabase.js";
 import { ejecutarConsulta } from "../config/connekta.js";
 import { bodegasInvolucradas } from "../config/flujos.js";
+import { tomarLock, liberarLock, lockTomado } from "./lock.service.js";
 
 /* =============================================
    Snapshot de SIESA en Supabase
@@ -34,7 +35,12 @@ async function traerDeConnekta() {
   const paginas = [];
   for (let p = 2; p <= total; p++) paginas.push(p);
 
-  const CONC = Number(process.env.CONNEKTA_CONCURRENCIA) || 10;
+  // Concurrencia 3, NO 10. Con 10 empatábamos el rate limit de Connekta
+  // (`connekta-rate-limit-limit: 10`) y, peor, el SQL Server detrás se
+  // deadlockeaba solo por paralelismo sobre la misma consulta pesada. Más
+  // paralelismo no era más rápido: era el refresh entero fallando.
+  // `ejecutarConsulta` ya reintenta los transitorios (ver config/connekta.js).
+  const CONC = Number(process.env.CONNEKTA_CONCURRENCIA) || 3;
   const bloques = [primera.datos];
   let cursor = 0;
 
@@ -171,23 +177,47 @@ export async function refrescarSnapshot() {
   };
 }
 
-// ─── Lock: evita dos refresh en paralelo (cron + botón manual) ──────
-let refreshEnCurso = null;
+/* ─── Lock: evita dos refresh en paralelo (cron + botón manual) ──────
+   El lock vive en Supabase, NO en memoria: en Vercel cada invocación puede caer
+   en una instancia distinta, así que una variable de módulo no protege nada
+   entre el cron y el botón manual. Dos pulls simultáneos contra Connekta es
+   justo lo que dispara los deadlocks de SQL Server.
 
-/**
- * Refresca dedupeando: si ya hay uno en curso, devuelve el mismo (no dispara
- * otro pull caro). El primero que llega manda; los demás esperan su resultado.
- */
-export function refrescarSnapshotUnico() {
-  if (refreshEnCurso) return refreshEnCurso;
-  refreshEnCurso = refrescarSnapshot().finally(() => {
-    refreshEnCurso = null;
-  });
-  return refreshEnCurso;
+   TTL = maxDuration de la función (300s, ver vercel.json). Si la instancia
+   muere a mitad, el lock se libera solo antes del próximo cron (15 min).
+   ────────────────────────────────────────────────────────────────── */
+
+const LOCK_REFRESH = "snapshot:refresh";
+const LOCK_TTL_S = 300;
+
+/** Lo devuelve `refrescarSnapshotUnico` cuando otro refresh ya está corriendo. */
+export class RefreshEnCursoError extends Error {
+  constructor() {
+    super("Ya hay un refresh del snapshot en curso");
+    this.name = "RefreshEnCursoError";
+    this.statusCode = 409;
+    this.expose = true;
+  }
 }
 
+/**
+ * Refresca tomando el lock distribuido. Si otro ya lo tiene, NO encola otro pull
+ * caro: lanza RefreshEnCursoError (409) y el que llamó decide qué hacer.
+ */
+export async function refrescarSnapshotUnico(detalle = "") {
+  const tomado = await tomarLock(LOCK_REFRESH, LOCK_TTL_S, detalle);
+  if (!tomado) throw new RefreshEnCursoError();
+
+  try {
+    return await refrescarSnapshot();
+  } finally {
+    await liberarLock(LOCK_REFRESH);
+  }
+}
+
+/** ¿Hay un refresh corriendo ahora mismo (en cualquier instancia)? */
 export function refreshEnProgreso() {
-  return refreshEnCurso != null;
+  return lockTomado(LOCK_REFRESH);
 }
 
 /** Timestamp del último refresh (max actualizado_at del snapshot). */

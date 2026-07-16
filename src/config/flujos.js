@@ -21,6 +21,40 @@ export const SEDES = {
   "00401": "Girardota Llano",
 };
 
+/**
+ * Centro de operación (`f350_id_co`) de cada sede — 3 chars, valida en maestro.
+ *
+ * NO es la bodega: la bodega es de 5 (`PV001`) y viaja en otro campo
+ * (`f450_id_bodega_salida`). El C.O. identifica el centro de operación del
+ * documento en el ERP.
+ *
+ * Se escribe como TABLA y no se deriva de la bodega con un slice: `00201 → P02`
+ * tienta a programarlo, pero `PV001 → P01` rompe la regla. Un mapeo explícito se
+ * lee, se audita y se corrige; una derivación "casi siempre correcta" falla en
+ * silencio el día que agregan una sede — y esta requisición entra CONTABILIZADA
+ * en SIESA (`f350_ind_estado = 1`), así que un C.O. errado mueve inventario real
+ * al lugar equivocado.
+ *
+ * CONFIRMADOS por el usuario: PV001→P01, 00201→P02, 00301→P03.
+ * INFERIDOS del patrón (confirmar antes de producción): 00401, 00601, 00701, 00801.
+ * Hoy solo se usan los de las sedes ORIGEN de FLUJOS (PV001 y 00301), ambos
+ * confirmados. Override por entorno: SIESA_IMPORTAR_CO_POR_SEDE.
+ */
+export const CENTROS_OPERACION = {
+  PV001: "P01", // confirmado — Copacabana
+  "00201": "P02", // confirmado — Villahermosa
+  "00301": "P03", // confirmado — Girardota Parque
+  "00401": "P04", // inferido — Girardota Llano
+  "00601": "P06", // inferido — Vegas
+  "00701": "P07", // inferido — Barbosa
+  "00801": "P08", // inferido — San Juan
+};
+
+/** Centro de operación de una sede (o "" si no está mapeada). */
+export function centroOperacionDeSede(codigo) {
+  return CENTROS_OPERACION[String(codigo || "").trim()] || "";
+}
+
 export const FLUJOS = {
   general: {
     id: "general",
