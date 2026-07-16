@@ -24,6 +24,8 @@ router.get("/health", (_req, res) => {
   });
 });
 
+
+
 /**
  * GET /api/health/email
  * Se conecta al SMTP y autentica, SIN enviar nada. Responde 503 si no puede.
