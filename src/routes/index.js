@@ -24,4 +24,18 @@ router.get("/health", (_req, res) => {
   });
 });
 
+/**
+ * GET /api/health/email
+ * Se conecta al SMTP y autentica, SIN enviar nada. Responde 503 si no puede.
+ *
+ * Existe porque "las variables están cargadas" no es lo mismo que "el correo
+ * funciona": la contraseña puede estar vencida o el tenant puede tener SMTP AUTH
+ * apagado. Sin este endpoint, la única forma de comprobarlo es cerrar un
+ * despacho de verdad y esperar — o sea, enterarse tarde.
+ */
+router.get("/health/email", async (_req, res) => {
+  const estado = await verificarEmail();
+  res.status(estado.ok ? 200 : 503).json(estado);
+});
+
 export default router;
