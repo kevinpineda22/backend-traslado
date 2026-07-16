@@ -3,6 +3,7 @@ import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
 import { mapaCapacidades } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
+import { unidadForzadaDe, FACTOR_UNIDAD_FORZADA } from "../config/unidadesForzadas.js";
 
 /* =============================================
    Servicio SIESA (lectura)
@@ -313,6 +314,9 @@ export async function getDisponibilidadItem({ codigo, destino }) {
 /**
  * Unidades disponibles para el switch de UM.
  * Con los datos actuales de SIESA hay una unidad base + la de orden (si difiere).
+ *
+ * Override: algunos ítems se piden ESTRICTAMENTE en una unidad fija (P6/P25).
+ * Para esos, se devuelve SOLO esa unidad → el front no muestra selector.
  */
 function buildUnidades(row) {
   const base = trim(row.um);
@@ -323,6 +327,15 @@ function buildUnidades(row) {
   if (orden && orden !== base && factor !== 1) {
     unidades.push({ unidad: orden, factor });
   }
+
+  const forzada = unidadForzadaDe(row.codigo_item);
+  if (forzada) {
+    // Usa el factor real si SIESA ya trae esa unidad; si no, el configurado.
+    const existente = unidades.find((u) => u.unidad === forzada);
+    const f = existente ? existente.factor : FACTOR_UNIDAD_FORZADA[forzada] || 1;
+    return [{ unidad: forzada, factor: f }];
+  }
+
   return unidades;
 }
 
