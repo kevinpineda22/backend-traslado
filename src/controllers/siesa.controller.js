@@ -209,6 +209,20 @@ export async function listarDisponibilidad(req, res, next) {
 }
 
 /**
+ * GET /api/siesa/inventario-sedes
+ * Inventario de todos los ítems en todas las sedes (vista matriz).
+ */
+export async function listarInventarioSedes(_req, res, next) {
+  try {
+    const { data, error } = await SiesaService.getInventarioSedes();
+    if (error) return res.status(502).json({ ok: false, error });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * GET /api/siesa/sedes
  * Lista de sedes destino disponibles.
  */
