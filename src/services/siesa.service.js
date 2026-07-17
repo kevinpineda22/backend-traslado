@@ -199,7 +199,11 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
       const clase = claseDeCategoria(d?.criterios?.CAT);
-      const capacidad = capacidades.get(codigo) || 0;
+      const capInfo = capacidades.get(codigo);
+      const factorCap = capInfo?.factor || 1;
+      const capacidad = capInfo?.capacidad || 0; // en la UM asignada (o base si no hay)
+      const capacidadBase = capacidad * factorCap; // capacidad en unidades base para el cálculo
+      const umExtra = capInfo?.unidad && capInfo?.factor ? { unidad: capInfo.unidad, factor: capInfo.factor } : undefined;
       const inventarioOrigen = o ? num(o.inventario) : 0;
       const disponibleOrigen = o ? num(o.disponible) : 0;
       const inventarioDestino = d ? num(d.inventario) : 0;
@@ -208,7 +212,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // `necesidad` es el sugerido SIN tope de origen (el cap se aplica abajo).
       const necesidad = calcularSugeridoABC({
         clase,
-        capacidad,
+        capacidad: capacidadBase,
         consumoDiario: consumoDestino,
         inventario: inventarioDestino,
         cadencias: cadenciasEfectivas,
@@ -226,7 +230,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         capacidad,
         rotacion: trim(fuente.rotacion) || "N/A",
         unidad_medida: trim(fuente.um),
-        unidades: buildUnidades(fuente),
+        unidades: buildUnidades(fuente, umExtra),
         criterios: fuente.criterios || {},
         inventario_origen: inventarioOrigen,
         disponible_origen: disponibleOrigen,
@@ -277,7 +281,8 @@ export async function getDisponibilidadItem({ codigo, destino }) {
     let necesidad;
     if (flujo.logica === "abc") {
       const clase = claseDeCategoria(d?.criterios?.CAT);
-      const capacidad = capacidades.get(String(codigo)) || 0;
+      const capInfo = capacidades.get(String(codigo));
+      const capacidad = (capInfo?.capacidad || 0) * (capInfo?.factor || 1); // en base
       necesidad = calcularSugeridoABC({
         clase,
         capacidad,
@@ -397,7 +402,7 @@ export async function getInventarioSedes() {
  * Override: algunos ítems se piden ESTRICTAMENTE en una unidad fija (P6/P25).
  * Para esos, se devuelve SOLO esa unidad → el front no muestra selector.
  */
-function buildUnidades(row) {
+function buildUnidades(row, umExtra) {
   const base = trim(row.um);
   const orden = trim(row.um_orden);
   const factor = num(row.factor) || 1;
@@ -405,6 +410,15 @@ function buildUnidades(row) {
   const unidades = [{ unidad: base, factor: 1 }];
   if (orden && orden !== base && factor !== 1) {
     unidades.push({ unidad: orden, factor });
+  }
+
+  // UM asignada por ítem en Capacidad·Llano (tiene prioridad): se ofrece esa
+  // unidad como default + la base como opción, para trasladar en esa UM.
+  if (umExtra && umExtra.unidad && Number(umExtra.factor) > 0) {
+    return [
+      { unidad: String(umExtra.unidad).trim(), factor: Number(umExtra.factor) },
+      { unidad: base || "UND", factor: 1 },
+    ];
   }
 
   const forzada = unidadForzadaDe(row.codigo_item);

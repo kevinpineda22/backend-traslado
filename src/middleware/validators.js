@@ -123,6 +123,15 @@ const capacidadBulkSchema = z.object({
 const capacidadUnoSchema = z.object({
   capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
   descripcion: descripcionOpcional,
+  // UM opcional del ítem: "" limpia, valor asigna. undefined → no se toca.
+  unidad: z.preprocess(
+    (v) => (v === undefined ? undefined : String(v ?? "").trim()),
+    z.string().optional(),
+  ),
+  factor: z.preprocess(
+    (v) => (v === undefined || v === null || v === "" ? undefined : Number(v)),
+    z.number().positive().optional(),
+  ),
 });
 
 // Config de reposición — días editables (cadencias Llano + cubrimiento General)

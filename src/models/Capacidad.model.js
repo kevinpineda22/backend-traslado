@@ -38,13 +38,23 @@ export async function listar() {
   return todas;
 }
 
-/** Devuelve un Map<codigo_item normalizado, capacidad> con TODAS las capacidades. */
+/**
+ * Devuelve un Map<codigo_item normalizado, { capacidad, unidad, factor }>.
+ * `unidad`/`factor` son opcionales: si el ítem tiene una UM asignada, la
+ * `capacidad` está EN esa unidad (base = capacidad × factor).
+ */
 export async function mapaCapacidades() {
   const filas = await listar();
   const mapa = new Map();
   // Normalizamos la clave (sin ceros a la izquierda) para que matchee el
   // codigo_item del snapshot, incluso con filas viejas guardadas con ceros.
-  for (const r of filas) mapa.set(normCodigo(r.codigo_item), num(r.capacidad));
+  for (const r of filas) {
+    mapa.set(normCodigo(r.codigo_item), {
+      capacidad: num(r.capacidad),
+      unidad: r.unidad ? String(r.unidad).trim() : null,
+      factor: r.factor != null ? num(r.factor) || null : null,
+    });
+  }
   return mapa;
 }
 
@@ -99,13 +109,16 @@ export async function upsertBulk(items) {
  * CREAR un ítem nuevo a mano (el upsert lo inserta si no existe).
  * `descripcion` es opcional: si no viene, no se toca la existente.
  */
-export async function actualizar(codigoItem, capacidad, descripcion) {
+export async function actualizar(codigoItem, capacidad, descripcion, unidad, factor) {
   const fila = {
     codigo_item: normCodigo(codigoItem),
     capacidad: num(capacidad),
     updated_at: new Date().toISOString(),
   };
   if (descripcion != null) fila.descripcion = String(descripcion).trim();
+  // UM opcional: "" → limpia; undefined → no toca; valor → asigna.
+  if (unidad !== undefined) fila.unidad = String(unidad || "").trim() || null;
+  if (factor !== undefined) fila.factor = Number(factor) > 0 ? Number(factor) : null;
 
   const { data, error } = await supabase
     .from(TABLE)

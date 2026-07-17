@@ -36,6 +36,8 @@ export async function actualizarUno(req, res, next) {
       req.params.codigo,
       req.body.capacidad,
       req.body.descripcion,
+      req.body.unidad,
+      req.body.factor,
     );
     res.json({ ok: true, data });
   } catch (error) {
