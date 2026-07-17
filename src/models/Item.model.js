@@ -7,6 +7,73 @@ const TABLE = "traslados_items";
 export const MOTIVOS_FALTANTE = ["sin_stock", "surtido_parcial", "inventario_inflado"];
 
 /**
+ * Estadísticas de motivos de faltante para el dashboard: por cada motivo, cuántas
+ * veces ocurrió, cuántos ítems distintos lo tienen, y el ranking de ítems que más
+ * lo repiten. Sirve para ver qué productos fallan más y cómo está el inventario.
+ */
+export async function estadisticasMotivos() {
+  const PAGE = 1000;
+  const rows = [];
+  let desde = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select("codigo_item, descripcion, motivo")
+      .not("motivo", "is", null)
+      .range(desde, desde + PAGE - 1);
+    if (error) throw new Error(`Error al leer motivos: ${error.message}`);
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < PAGE) break;
+    desde += PAGE;
+  }
+
+  const porMotivo = {};
+  const porItemMotivo = new Map();
+  const itemsAfectados = new Set();
+  for (const m of MOTIVOS_FALTANTE) porMotivo[m] = { ocurrencias: 0, items: new Set() };
+
+  for (const it of rows) {
+    const m = it.motivo;
+    if (!porMotivo[m]) continue; // motivo desconocido → ignorar
+    const codigo = String(it.codigo_item);
+    porMotivo[m].ocurrencias++;
+    porMotivo[m].items.add(codigo);
+    itemsAfectados.add(codigo);
+
+    const key = `${codigo}|${m}`;
+    const prev = porItemMotivo.get(key);
+    if (prev) prev.count++;
+    else
+      porItemMotivo.set(key, {
+        codigo_item: codigo,
+        descripcion: (it.descripcion || "").trim(),
+        motivo: m,
+        count: 1,
+      });
+  }
+
+  const topItems = {};
+  for (const m of MOTIVOS_FALTANTE) topItems[m] = [];
+  for (const v of porItemMotivo.values()) topItems[v.motivo]?.push(v);
+  for (const m of MOTIVOS_FALTANTE) {
+    topItems[m] = topItems[m].sort((a, b) => b.count - a.count).slice(0, 20);
+  }
+
+  const porMotivoResumen = {};
+  for (const m of MOTIVOS_FALTANTE) {
+    porMotivoResumen[m] = { ocurrencias: porMotivo[m].ocurrencias, items: porMotivo[m].items.size };
+  }
+
+  return {
+    por_motivo: porMotivoResumen,
+    top_items: topItems,
+    total_ocurrencias: rows.length,
+    total_items: itemsAfectados.size,
+  };
+}
+
+/**
  * Registrar la recolección de un item por el despachador.
  * Persiste la cantidad real, si quedó agotado y el motivo del faltante (si lo hay).
  * Tope duro: la cantidad recolectada NO puede superar la pedida por el admin.

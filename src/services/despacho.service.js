@@ -25,6 +25,11 @@ export async function listarConResumen(filters = {}) {
 /**
  * Obtener detalle completo de un despacho.
  */
+/** Estadísticas de motivos de faltante (para el dashboard). */
+export function estadisticasMotivos() {
+  return ItemModel.estadisticasMotivos();
+}
+
 export async function obtener(id) {
   return DespachoModel.findById(id);
 }

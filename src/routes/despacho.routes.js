@@ -5,6 +5,7 @@ import { validators } from "../middleware/validators.js";
 const router = Router();
 
 router.get("/", DespachoController.listar);
+router.get("/estadisticas/motivos", DespachoController.estadisticasMotivos);
 router.get("/:id", DespachoController.obtener);
 router.post("/", validators.crearDespacho, DespachoController.crear);
 router.delete("/:id", DespachoController.eliminar);

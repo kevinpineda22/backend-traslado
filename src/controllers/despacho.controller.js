@@ -5,6 +5,19 @@ import * as DespachoService from "../services/despacho.service.js";
  * Listar despachos. Query params opcionales:
  *   estado, despachador_id, sin_asignar, resumen=true (incluye agregación de items)
  */
+/**
+ * GET /api/despachos/estadisticas/motivos
+ * Agregación de motivos de faltante para el dashboard.
+ */
+export async function estadisticasMotivos(_req, res, next) {
+  try {
+    const data = await DespachoService.estadisticasMotivos();
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function listar(req, res, next) {
   try {
     const { estado, despachador_id, sin_asignar, resumen } = req.query;
