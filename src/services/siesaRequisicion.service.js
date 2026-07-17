@@ -215,15 +215,43 @@ function respuestaOk(data) {
   return true;
 }
 
-/** Texto de error legible a partir de lo que sea que haya devuelto SIESA. */
+/**
+ * Serializa cualquier cosa a texto legible.
+ *
+ * El detalle: `String(unArray)` y la interpolación en template devuelven
+ * "[object Object],[object Object]" — el valor se pierde y el log no sirve para
+ * nada. Un error que no se puede leer es un error que no existe.
+ */
+const aTexto = (v) => {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+};
+
+/**
+ * Texto de error legible a partir de lo que sea que haya devuelto SIESA.
+ * El conector responde el detalle en formas distintas según el fallo: string,
+ * objeto, o un ARRAY de objetos (una entrada por campo inválido). Todas tienen
+ * que terminar siendo texto que un humano pueda leer en el log.
+ */
 function detalleError(data) {
   if (data == null) return "sin respuesta";
-  if (typeof data === "string") return data.slice(0, 500);
+  if (typeof data === "string") return data.slice(0, 800);
+
   const errores = data.Errores ?? data.errores;
-  if (Array.isArray(errores) && errores.length) return JSON.stringify(errores).slice(0, 500);
-  return (
-    data.detalle || data.mensaje || data.error || JSON.stringify(data).slice(0, 500)
-  );
+  if (Array.isArray(errores) && errores.length) return aTexto(errores).slice(0, 800);
+
+  const d = data.detalle ?? data.mensaje ?? data.error;
+  if (d != null) {
+    const texto = aTexto(d);
+    if (texto) return texto.slice(0, 800);
+  }
+
+  return aTexto(data).slice(0, 800);
 }
 
 /**

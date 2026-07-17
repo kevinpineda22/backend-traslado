@@ -28,26 +28,26 @@ export const SEDES = {
  * (`f450_id_bodega_salida`). El C.O. identifica el centro de operación del
  * documento en el ERP.
  *
- * Se escribe como TABLA y no se deriva de la bodega con un slice: `00201 → P02`
- * tienta a programarlo, pero `PV001 → P01` rompe la regla. Un mapeo explícito se
- * lee, se audita y se corrige; una derivación "casi siempre correcta" falla en
- * silencio el día que agregan una sede — y esta requisición entra CONTABILIZADA
- * en SIESA (`f350_ind_estado = 1`), así que un C.O. errado mueve inventario real
- * al lugar equivocado.
+ * Se escribe como TABLA y no se deriva de la bodega con un slice: la bodega es
+ * de 5 chars (`00201`) y el C.O. de 3 (`002`) — no hay una regla que los una sin
+ * excepciones (`PV001 → 001` la rompe). Un mapeo explícito se lee, se audita y se
+ * corrige; una derivación "casi siempre correcta" falla en silencio el día que
+ * agregan una sede — y esta requisición entra CONTABILIZADA en SIESA
+ * (`f350_ind_estado = 1`), así que un C.O. errado mueve inventario real al lugar
+ * equivocado.
  *
- * CONFIRMADOS por el usuario: PV001→P01, 00201→P02, 00301→P03.
- * INFERIDOS del patrón (confirmar antes de producción): 00401, 00601, 00701, 00801.
- * Hoy solo se usan los de las sedes ORIGEN de FLUJOS (PV001 y 00301), ambos
- * confirmados. Override por entorno: SIESA_IMPORTAR_CO_POR_SEDE.
+ * CONFIRMADOS por el usuario contra los C.O. de SIESA (001=plaza, 002=villa,
+ * 003=girardota, 004=llano, 006=vegas, 007=barbosa, 008=sanJuan).
+ * Override por entorno: SIESA_IMPORTAR_CO_POR_SEDE.
  */
 export const CENTROS_OPERACION = {
-  PV001: "P01", // confirmado — Copacabana
-  "00201": "P02", // confirmado — Villahermosa
-  "00301": "P03", // confirmado — Girardota Parque
-  "00401": "P04", // inferido — Girardota Llano
-  "00601": "P06", // inferido — Vegas
-  "00701": "P07", // inferido — Barbosa
-  "00801": "P08", // inferido — San Juan
+  PV001: "001", // plaza — Principal Copacabana
+  "00201": "002", // villa — Villahermosa
+  "00301": "003", // girardota — Girardota Parque
+  "00401": "004", // llano — Girardota Llano
+  "00601": "006", // vegas — Vegas
+  "00701": "007", // barbosa — Barbosa
+  "00801": "008", // sanJuan — San Juan
 };
 
 /** Centro de operación de una sede (o "" si no está mapeada). */
