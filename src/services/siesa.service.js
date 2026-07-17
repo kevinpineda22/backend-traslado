@@ -332,6 +332,65 @@ export async function getDisponibilidadItem({ codigo, destino }) {
 }
 
 /**
+ * Inventario de TODOS los ítems en TODAS las sedes a la vez (vista matriz).
+ * Por ítem devuelve inventario y disponible por bodega. Pensado para el panel
+ * "Inventario · Sedes": ver todo de un vistazo y armar traslados desde ahí.
+ */
+export async function getInventarioSedes() {
+  try {
+    const bodegas = Object.keys(SEDES);
+    const rows = await leerBodegas(bodegas);
+
+    const porItem = new Map();
+    for (const r of rows) {
+      const codigo = String(r.codigo_item);
+      let it = porItem.get(codigo);
+      if (!it) {
+        it = {
+          codigo_item: codigo,
+          descripcion: trim(r.descripcion),
+          rotacion: trim(r.rotacion) || "N/A",
+          um: trim(r.um),
+          um_orden: trim(r.um_orden),
+          factor: num(r.factor) || 1,
+          criterios: r.criterios || {},
+          inv: {},
+          disp: {},
+        };
+        porItem.set(codigo, it);
+      }
+      it.inv[trim(r.bodega)] = num(r.inventario);
+      it.disp[trim(r.bodega)] = num(r.disponible);
+    }
+
+    const items = Array.from(porItem.values()).map((it) => ({
+      codigo_item: it.codigo_item,
+      descripcion: it.descripcion,
+      rotacion: it.rotacion,
+      unidad_medida: it.um,
+      unidades: buildUnidades({
+        codigo_item: it.codigo_item,
+        um: it.um,
+        um_orden: it.um_orden,
+        factor: it.factor,
+      }),
+      criterios: it.criterios,
+      inv: it.inv,
+      disp: it.disp,
+    }));
+
+    return {
+      data: {
+        sedes: bodegas.map((c) => ({ codigo: c, nombre: nombreSede(c) })),
+        items,
+      },
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+/**
  * Unidades disponibles para el switch de UM.
  * Con los datos actuales de SIESA hay una unidad base + la de orden (si difiere).
  *
