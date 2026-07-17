@@ -18,6 +18,20 @@ export async function estadisticasMotivos(_req, res, next) {
   }
 }
 
+/**
+ * GET /api/despachos/activos/items
+ * Ítems que están en despachos activos (no finalizados), para avisar de
+ * traslados en curso del mismo ítem+origen.
+ */
+export async function itemsActivos(_req, res, next) {
+  try {
+    const data = await DespachoService.itemsEnDespachosActivos();
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function listar(req, res, next) {
   try {
     const { estado, despachador_id, sin_asignar, resumen } = req.query;

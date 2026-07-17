@@ -30,6 +30,11 @@ export function estadisticasMotivos() {
   return ItemModel.estadisticasMotivos();
 }
 
+/** Ítems en despachos activos (para avisar de traslados en curso). */
+export function itemsEnDespachosActivos() {
+  return DespachoModel.itemsEnDespachosActivos();
+}
+
 export async function obtener(id) {
   return DespachoModel.findById(id);
 }

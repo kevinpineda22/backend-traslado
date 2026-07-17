@@ -2,6 +2,40 @@ import { supabase } from "../config/supabase.js";
 
 const TABLE = "traslados_despachos";
 
+// Estados finales: el traslado ya se cerró (el stock se movió / no aplica).
+const ESTADOS_FINALES = ["Auditado", "Rechazado", "Recibido_con_inconsistencia"];
+
+/**
+ * Ítems que están en despachos ACTIVOS (no finalizados). Sirve para avisar al
+ * admin que un ítem+origen ya tiene un traslado en curso: el stock todavía no se
+ * descontó, así que crear otro puede sobre-asignar inventario.
+ * Devuelve una lista plana: { origen, codigo_item, created_at, destino, estado }.
+ */
+export async function itemsEnDespachosActivos() {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("id, origen, destino, created_at, estado, traslados_items(codigo_item)")
+    .not("estado", "in", `(${ESTADOS_FINALES.join(",")})`)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Error al leer despachos activos: ${error.message}`);
+
+  const out = [];
+  for (const d of data || []) {
+    for (const it of d.traslados_items || []) {
+      out.push({
+        despacho_id: d.id,
+        origen: d.origen,
+        destino: d.destino,
+        estado: d.estado,
+        created_at: d.created_at,
+        codigo_item: String(it.codigo_item),
+      });
+    }
+  }
+  return out;
+}
+
 /**
  * Obtener todos los despachos, opcionalmente filtrados por estado.
  * @param {object} filters - { estado, despachador_id, admin_id }
