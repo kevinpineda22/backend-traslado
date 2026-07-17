@@ -10,6 +10,14 @@ import { supabase } from "../config/supabase.js";
 const TABLE = "traslados_capacidad";
 const num = (v) => Number(v) || 0;
 
+// El Excel suele traer el código con ceros a la izquierda ("0000019"), pero el
+// codigo_item del snapshot es numérico sin ceros ("19"). Normalizamos sacando
+// los ceros de adelante para que la capacidad matchee con el sugerido.
+const normCodigo = (c) => {
+  const s = String(c ?? "").trim();
+  return s.replace(/^0+/, "") || s;
+};
+
 /** Lista completa de capacidades (para el módulo de gestión). */
 export async function listar() {
   const PAGE = 1000;
@@ -30,11 +38,13 @@ export async function listar() {
   return todas;
 }
 
-/** Devuelve un Map<codigo_item, capacidad> con TODAS las capacidades. */
+/** Devuelve un Map<codigo_item normalizado, capacidad> con TODAS las capacidades. */
 export async function mapaCapacidades() {
   const filas = await listar();
   const mapa = new Map();
-  for (const r of filas) mapa.set(String(r.codigo_item), num(r.capacidad));
+  // Normalizamos la clave (sin ceros a la izquierda) para que matchee el
+  // codigo_item del snapshot, incluso con filas viejas guardadas con ceros.
+  for (const r of filas) mapa.set(normCodigo(r.codigo_item), num(r.capacidad));
   return mapa;
 }
 
@@ -52,7 +62,7 @@ export async function upsertBulk(items) {
   // Gana la última aparición (la fila de más abajo en el Excel).
   const porItem = new Map();
   for (const i of items) {
-    const codigo_item = String(i.codigo_item ?? i.item ?? "").trim();
+    const codigo_item = normCodigo(i.codigo_item ?? i.item ?? "");
     if (!codigo_item) continue;
     const fila = { codigo_item, capacidad: num(i.capacidad), updated_at: ts };
     const desc = i.descripcion != null ? String(i.descripcion).trim() : "";
@@ -91,7 +101,7 @@ export async function upsertBulk(items) {
  */
 export async function actualizar(codigoItem, capacidad, descripcion) {
   const fila = {
-    codigo_item: String(codigoItem).trim(),
+    codigo_item: normCodigo(codigoItem),
     capacidad: num(capacidad),
     updated_at: new Date().toISOString(),
   };
@@ -111,7 +121,7 @@ export async function eliminar(codigoItem) {
   const { error } = await supabase
     .from(TABLE)
     .delete()
-    .eq("codigo_item", String(codigoItem).trim());
+    .eq("codigo_item", normCodigo(codigoItem));
   if (error) throw new Error(`Error al eliminar capacidad: ${error.message}`);
   return { ok: true };
 }
