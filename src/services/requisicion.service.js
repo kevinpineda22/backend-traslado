@@ -186,7 +186,7 @@ export async function reintentarPendientes(limite = 20) {
 export async function estadoRequisiciones() {
   const { data, error } = await supabase
     .from(TABLE)
-    .select("siesa_estado")
+    .select("id, origen, destino, siesa_estado, siesa_intentos, siesa_error, siesa_docto")
     .not("siesa_estado", "is", null);
 
   if (error) throw new Error(`Error al leer estado de requisiciones: ${error.message}`);
@@ -195,6 +195,19 @@ export async function estadoRequisiciones() {
   for (const r of data || []) {
     if (conteo[r.siesa_estado] != null) conteo[r.siesa_estado] += 1;
   }
+
+  // El PORQUÉ de cada una que no llegó. Sin esto hay que ir a bucear a los logs
+  // de Vercel para enterarse de algo que el sistema ya sabe — y una cola que
+  // cuesta mirar es una cola que nadie mira.
+  const problemas = (data || [])
+    .filter((r) => r.siesa_estado !== "enviado")
+    .map((r) => ({
+      id: r.id,
+      ruta: `${r.origen} → ${r.destino}`,
+      estado: r.siesa_estado,
+      intentos: r.siesa_intentos,
+      error: r.siesa_error,
+    }));
 
   const origenes = [...new Set(Object.values(FLUJOS).map((f) => f.origen))];
   const config = {};
