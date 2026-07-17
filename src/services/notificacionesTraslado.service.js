@@ -1,5 +1,6 @@
 import { sendEmail, DESTINATARIOS, emailConfigurado } from "./email.service.js";
 import { nombreSede } from "../config/flujos.js";
+import { fechaHoraLegible } from "../config/tiempo.js";
 
 /* =============================================
    Notificaciones de traslado (correo)
@@ -31,12 +32,21 @@ const esc = (v) =>
 
 const num = (v) => (v == null ? "—" : Number(v));
 
+/* El CÓDIGO DE ÍTEM sí va en el correo, a diferencia de los paneles del
+   despachador y del auditor, donde se oculta a propósito (anti-fraude: se
+   identifica el producto por nombre e imagen, no por el código). Acá el lector
+   es compras/inventarios, que necesitan el código para buscarlo en SIESA. Otro
+   público, otra regla. */
+const celdaCodigo = (it) =>
+  `<td style="padding:6px 10px;border:1px solid #e2e8f0;font-family:monospace;">${esc(it.codigo_item || "—")}</td>`;
+
 function filasTabla(items) {
   return items
     .map(
       (it) => `
       <tr>
-        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || it.codigo_item)}</td>
+        ${celdaCodigo(it)}
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || "—")}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${num(it.cantidad_admin)}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${num(it.cantidad_despachador)}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(MOTIVO_LABEL[it.motivo] || it.motivo)}</td>
@@ -45,7 +55,7 @@ function filasTabla(items) {
     .join("");
 }
 
-const ENCABEZADOS_FALTANTES = ["Producto", "Pedido", "Recolectado", "Motivo"];
+const ENCABEZADOS_FALTANTES = ["Ítem", "Producto", "Pedido", "Recolectado", "Motivo"];
 
 /**
  * Arma el HTML del correo. `filas` y `encabezados` se pasan desde afuera porque
@@ -53,7 +63,8 @@ const ENCABEZADOS_FALTANTES = ["Producto", "Pedido", "Recolectado", "Motivo"];
  */
 function armarHtml({ despacho, titulo, intro, filas, encabezados = ENCABEZADOS_FALTANTES }) {
   const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
-  const fecha = new Date(despacho.updated_at || Date.now()).toLocaleString("es-CO");
+  // Hora de Colombia, NO la del servidor (Vercel corre en UTC). Ver config/tiempo.js.
+  const fecha = fechaHoraLegible(despacho.updated_at || Date.now());
   const ths = encabezados
     .map(
       (h, i) =>
@@ -91,7 +102,8 @@ function filasCierre(items) {
       const completo = recogido >= pedido;
       return `
       <tr>
-        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || it.codigo_item)}</td>
+        ${celdaCodigo(it)}
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || "—")}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${pedido}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${recogido}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;color:${completo ? "#16a34a" : "#dc2626"};">
@@ -128,7 +140,7 @@ export async function notificarCierreRecoleccion(despacho) {
       titulo: "Recolección finalizada",
       intro: `El despachador cerró la recolección. ${resumen}`,
       filas: filasCierre(items),
-      encabezados: ["Producto", "Pedido", "Recolectado", "Estado"],
+      encabezados: ["Ítem", "Producto", "Pedido", "Recolectado", "Estado"],
     }),
   });
 }

@@ -60,6 +60,22 @@ export function emailConfigurado() {
 }
 
 /**
+ * MODO PRUEBA — `TRASLADOS_MAIL_MODO_PRUEBA=true`.
+ *
+ * Redirige TODO el correo a la lista de inventarios: compras no recibe nada.
+ * Sirve para probar el flujo sin llenarle la bandeja a nadie.
+ *
+ * Es un interruptor peligroso: si queda prendido, compras deja de enterarse de
+ * los faltantes y NADIE lo nota — el sistema sigue diciendo "correo enviado".
+ * Es exactamente la clase de falla silenciosa que nos costó semanas encontrar en
+ * este proyecto. Por eso grita en tres lados: prefijo [PRUEBA] en el asunto, un
+ * warning en cada envío, y el campo `modo_prueba` en GET /api/health/email.
+ */
+export function modoPrueba() {
+  return String(process.env.TRASLADOS_MAIL_MODO_PRUEBA || "").toLowerCase() === "true";
+}
+
+/**
  * Diagnóstico: se conecta al SMTP y AUTENTICA, sin enviar nada.
  *
  * "Las variables están cargadas" y "el correo funciona" son cosas distintas, y
@@ -71,12 +87,22 @@ export function emailConfigurado() {
  * @returns {Promise<{ok:boolean, configurado:boolean, error?:string, remitente?:string, destinatarios?:object}>}
  */
 export async function verificarEmail() {
+  const prueba = modoPrueba();
   const base = {
     configurado: emailConfigurado(),
     remitente: process.env.EMAIL_USER || null,
     host: process.env.EMAIL_HOST || "smtp.office365.com",
     puerto: Number(process.env.EMAIL_PORT) || 587,
     destinatarios: DESTINATARIOS,
+    modo_prueba: prueba,
+    // Cuando el desvío está activo lo decimos con todas las letras. Un modo de
+    // prueba que no se ve es un modo de prueba que se queda prendido.
+    ...(prueba && {
+      aviso:
+        "⚠️ MODO PRUEBA ACTIVO — TODO el correo se desvía a inventarios; compras NO recibe nada. " +
+        "Apagá TRASLADOS_MAIL_MODO_PRUEBA para volver a producción.",
+      desvio_a: DESTINATARIOS.inventarios,
+    }),
   };
 
   if (!base.configurado) {
@@ -106,7 +132,20 @@ export async function verificarEmail() {
  * @param {string} mail.html
  */
 export async function sendEmail({ to, subject, html }) {
-  const destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  let destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
+
+  // El desvío va acá, en el ÚNICO punto por el que sale todo correo. Si viviera
+  // en cada notificación, la próxima que alguien agregue se escaparía a compras.
+  if (modoPrueba()) {
+    const reales = destinatarios.join(", ");
+    destinatarios = DESTINATARIOS.inventarios;
+    subject = `[PRUEBA] ${subject}`;
+    console.warn(
+      `[email] 🧪 MODO PRUEBA — "${subject}" se desvía a ${destinatarios.join(", ")} ` +
+        `(destinatarios reales: ${reales}). Apagá TRASLADOS_MAIL_MODO_PRUEBA para producción.`,
+    );
+  }
+
   if (!emailConfigurado()) {
     console.error(
       `[email] ❌ EMAIL_USER/EMAIL_PASS no configurados — NO se envió "${subject}". ` +

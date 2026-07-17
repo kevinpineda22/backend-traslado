@@ -1,6 +1,7 @@
 import axios from "axios";
 import "dotenv/config";
 import { centroOperacionDeSede } from "../config/flujos.js";
+import { fechaCompacta } from "../config/tiempo.js";
 
 /* =============================================
    Importar requisición a SIESA (/conectoresimportar, conector 249486
@@ -129,12 +130,16 @@ export function configFaltante(sede) {
   return faltan;
 }
 
-/** Fecha en el formato que pide el conector: AAAAMMDD. */
+/**
+ * Fecha del documento en el formato que pide el conector: AAAAMMDD.
+ *
+ * En hora de COLOMBIA, no del servidor. Vercel corre en UTC: `getDate()` sobre
+ * un despacho cerrado a las 7 PM en Colombia (= 00:00 UTC del día siguiente)
+ * devolvía MAÑANA, y el documento entraba a SIESA fechado un día después del
+ * movimiento físico. Contabilizado, además. Ver config/tiempo.js.
+ */
 export function fechaSiesa(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dia = String(d.getDate()).padStart(2, "0");
-  return `${y}${m}${dia}`;
+  return fechaCompacta(d);
 }
 
 /**

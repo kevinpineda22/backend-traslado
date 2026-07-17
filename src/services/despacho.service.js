@@ -4,6 +4,7 @@ import * as FirmaModel from "../models/Firma.model.js";
 import { createError } from "../middleware/errorHandler.js";
 import { notificarRecoleccionCerrada } from "./notificacionesTraslado.service.js";
 import { enviarRequisicion } from "./requisicion.service.js";
+import { fechaHoraLegible } from "../config/tiempo.js";
 import ExcelJS from "exceljs";
 
 /**
@@ -307,7 +308,7 @@ export async function generarPlanilla(despachoId, tipo) {
   sheet.addRow([`Despacho: ${despacho.id}`]);
   sheet.addRow([`Origen: ${despacho.origen} → Destino: ${despacho.destino}`]);
   sheet.addRow([`Estado: ${despacho.estado}`]);
-  sheet.addRow([`Fecha: ${new Date(despacho.created_at).toLocaleString("es-CO")}`]);
+  sheet.addRow([`Fecha: ${fechaHoraLegible(despacho.created_at)}`]);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return buffer;
