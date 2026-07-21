@@ -46,7 +46,7 @@ import { fechaCompacta } from "../config/tiempo.js";
 const cfg = {
   url: () =>
     process.env.SIESA_IMPORTAR_URL ||
-    "https://serviciosqa.siesacloud.com/api/siesa/v3.1/conectoresimportar",
+    "https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar",
   idCompania: () => process.env.CONNEKTA_ID_COMPANIA || "7375",
   idSistema: () => process.env.SIESA_IMPORTAR_ID_SISTEMA || "1",
   idDocumento: () => process.env.SIESA_IMPORTAR_ID_DOCUMENTO || "249486",
