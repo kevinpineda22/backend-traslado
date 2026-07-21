@@ -188,7 +188,7 @@ export function armarPayload(despacho) {
     "C.O_OPERACION": co,
     NRO_DOCTO: nroDocto,
     NRO_REGISTRO_MOVIMIENTO: String(i + 1),
-    BODEGA_SALIDA: String(despacho.destino || ""),
+    BODEGA_SALIDA: String(despacho.origen || ""),
     "C.O_MOVIMIENTO": co,
     UNIDAD_MEDIDA: String(it.unidad_medida || ""),
     CANTIDAD: String(Number(it.cantidad_despachador) || 0),
