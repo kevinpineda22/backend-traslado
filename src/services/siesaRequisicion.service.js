@@ -180,8 +180,8 @@ export function armarPayload(despacho) {
       0,
       255,
     ),
-    BODEGA_SALIDA: String(despacho.destino || ""),
-    BODEGA_ENTRADA: String(despacho.origen || ""),
+    BODEGA_SALIDA: String(despacho.origen || ""),
+    BODEGA_ENTRADA: String(despacho.destino || ""),
   };
 
   const movimientos = items.map((it, i) => ({
