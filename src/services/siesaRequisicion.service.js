@@ -180,15 +180,15 @@ export function armarPayload(despacho) {
       0,
       255,
     ),
-    BODEGA_SALIDA: String(despacho.origen || ""),
-    BODEGA_ENTRADA: String(despacho.destino || ""),
+    BODEGA_SALIDA: String(despacho.destino || ""),
+    BODEGA_ENTRADA: String(despacho.origen || ""),
   };
 
   const movimientos = items.map((it, i) => ({
     "C.O_OPERACION": co,
     NRO_DOCTO: nroDocto,
     NRO_REGISTRO_MOVIMIENTO: String(i + 1),
-    BODEGA_SALIDA: String(despacho.origen || ""),
+    BODEGA_SALIDA: String(despacho.destino || ""),
     "C.O_MOVIMIENTO": co,
     UNIDAD_MEDIDA: String(it.unidad_medida || ""),
     CANTIDAD: String(Number(it.cantidad_despachador) || 0),
