@@ -51,7 +51,8 @@ export async function actualizarUno(req, res, next) {
  */
 export async function eliminarUno(req, res, next) {
   try {
-    const data = await CapacidadModel.eliminar(req.params.codigo);
+    // unidad opcional (query): "" o ausente = la fila base.
+    const data = await CapacidadModel.eliminar(req.params.codigo, req.query.unidad || "");
     res.json({ ok: true, data });
   } catch (error) {
     next(error);

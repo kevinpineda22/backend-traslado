@@ -201,50 +201,57 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
       const clase = claseDeCategoria(d?.criterios?.CAT);
-      const capInfo = capacidades.get(codigo);
-      const factorCap = capInfo?.factor || 1;
-      const capacidad = capInfo?.capacidad || 0; // en la UM asignada (o base si no hay)
-      const capacidadBase = capacidad * factorCap; // capacidad en unidades base para el cálculo
-      const umExtra = capInfo?.unidad && capInfo?.factor ? { unidad: capInfo.unidad, factor: capInfo.factor } : undefined;
       const inventarioOrigen = o ? num(o.inventario) : 0;
       const disponibleOrigen = o ? num(o.disponible) : 0;
       const inventarioDestino = d ? num(d.inventario) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
-      // `necesidad` es el sugerido SIN tope de origen (el cap se aplica abajo).
-      const necesidad = calcularSugeridoABC({
-        clase,
-        capacidad: capacidadBase,
-        consumoDiario: consumoDestino,
-        inventario: inventarioDestino,
-        cadencias: cadenciasEfectivas,
-      });
-      // El sugerido es el MÁXIMO que se debería mandar (la necesidad), SIN topear
-      // por el origen: aunque el origen no tenga stock, se muestra lo ideal. El
-      // despachador recolecta lo que haya y registra el faltante.
-      const sugerido = necesidad;
-      const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
+      // Variantes a emitir: si el ítem tiene UM asignadas → una fila POR UM
+      // (capacidad en esa UM). Si no → la fila base (capacidad en unidades).
+      const capRows = capacidades.get(codigo) || [];
+      const umRows = capRows.filter((r) => r.unidad && r.factor);
+      const baseRow = capRows.find((r) => !r.unidad);
+      const variantes =
+        umRows.length > 0
+          ? umRows.map((r) => ({ unidad: r.unidad, factor: r.factor, capacidadUM: r.capacidad }))
+          : [{ unidad: null, factor: 1, capacidadUM: baseRow?.capacidad || 0 }];
 
-      // Ítem que no está en el origen: solo tiene sentido si Llano lo necesita.
-      if (!o && necesidad <= 0) continue;
+      for (const v of variantes) {
+        const capacidadBase = v.capacidadUM * (v.factor || 1); // capacidad en base
+        // `necesidad` = sugerido = máximo a mandar (SIN topear por el origen).
+        const necesidad = calcularSugeridoABC({
+          clase,
+          capacidad: capacidadBase,
+          consumoDiario: consumoDestino,
+          inventario: inventarioDestino,
+          cadencias: cadenciasEfectivas,
+        });
+        const sugerido = necesidad;
+        const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
-      productos.push({
-        codigo_item: codigo,
-        descripcion: trim(fuente.descripcion),
-        clase,
-        capacidad,
-        rotacion: trim(fuente.rotacion) || "N/A",
-        unidad_medida: trim(fuente.um),
-        unidades: buildUnidades(fuente, umExtra),
-        criterios: fuente.criterios || {},
-        inventario_origen: inventarioOrigen,
-        disponible_origen: disponibleOrigen,
-        inventario_destino: inventarioDestino,
-        consumo_destino: consumoDestino,
-        necesidad,
-        faltante,
-        sugerido,
-      });
+        // Ítem que no está en el origen: solo tiene sentido si Llano lo necesita.
+        if (!o && necesidad <= 0) continue;
+
+        productos.push({
+          codigo_item: codigo,
+          rowKey: v.unidad ? `${codigo}|${v.unidad}` : codigo, // identidad única de la fila
+          descripcion: trim(fuente.descripcion),
+          clase,
+          capacidad: v.capacidadUM,
+          rotacion: trim(fuente.rotacion) || "N/A",
+          unidad_medida: v.unidad || trim(fuente.um),
+          // Con UM asignada, la fila va fija en esa UM (sin selector). Si no, la base.
+          unidades: v.unidad ? [{ unidad: v.unidad, factor: v.factor }] : buildUnidades(fuente),
+          criterios: fuente.criterios || {},
+          inventario_origen: inventarioOrigen,
+          disponible_origen: disponibleOrigen,
+          inventario_destino: inventarioDestino,
+          consumo_destino: consumoDestino,
+          necesidad,
+          faltante,
+          sugerido,
+        });
+      }
     }
 
     return { data: productos };
@@ -286,8 +293,10 @@ export async function getDisponibilidadItem({ codigo, destino }) {
     let necesidad;
     if (flujo.logica === "abc") {
       const clase = claseDeCategoria(d?.criterios?.CAT);
-      const capInfo = capacidades.get(String(codigo));
-      const capacidad = (capInfo?.capacidad || 0) * (capInfo?.factor || 1); // en base
+      const capRows = capacidades.get(String(codigo)) || [];
+      const umRows = capRows.filter((r) => r.unidad && r.factor);
+      const cr = umRows[0] || capRows.find((r) => !r.unidad) || null;
+      const capacidad = (cr?.capacidad || 0) * (cr?.factor || 1); // en base
       necesidad = calcularSugeridoABC({
         clase,
         capacidad,

@@ -39,9 +39,9 @@ export async function listar() {
 }
 
 /**
- * Devuelve un Map<codigo_item normalizado, { capacidad, unidad, factor }>.
- * `unidad`/`factor` son opcionales: si el ítem tiene una UM asignada, la
- * `capacidad` está EN esa unidad (base = capacidad × factor).
+ * Devuelve un Map<codigo_item normalizado, Array<{ capacidad, unidad, factor }>>.
+ * Un ítem puede tener VARIAS filas (una por UM). La fila "sin UM" (base) usa
+ * unidad "". Si tiene UM, la `capacidad` está EN esa unidad (base = cap × factor).
  */
 export async function mapaCapacidades() {
   const filas = await listar();
@@ -49,9 +49,11 @@ export async function mapaCapacidades() {
   // Normalizamos la clave (sin ceros a la izquierda) para que matchee el
   // codigo_item del snapshot, incluso con filas viejas guardadas con ceros.
   for (const r of filas) {
-    mapa.set(normCodigo(r.codigo_item), {
+    const k = normCodigo(r.codigo_item);
+    if (!mapa.has(k)) mapa.set(k, []);
+    mapa.get(k).push({
       capacidad: num(r.capacidad),
-      unidad: r.unidad ? String(r.unidad).trim() : null,
+      unidad: r.unidad ? String(r.unidad).trim() : "",
       factor: r.factor != null ? num(r.factor) || null : null,
     });
   }
@@ -70,11 +72,12 @@ export async function upsertBulk(items) {
   // upsert con dos filas de la misma clave en el mismo batch rompe con
   // "ON CONFLICT DO UPDATE command cannot affect row a second time" (500).
   // Gana la última aparición (la fila de más abajo en el Excel).
+  // El Excel bulk carga la capacidad BASE (unidad ""). Las UM se asignan por ítem.
   const porItem = new Map();
   for (const i of items) {
     const codigo_item = normCodigo(i.codigo_item ?? i.item ?? "");
     if (!codigo_item) continue;
-    const fila = { codigo_item, capacidad: num(i.capacidad), updated_at: ts };
+    const fila = { codigo_item, unidad: "", capacidad: num(i.capacidad), updated_at: ts };
     const desc = i.descripcion != null ? String(i.descripcion).trim() : "";
     if (desc) fila.descripcion = desc; // solo si viene, para no pisar la existente
     porItem.set(codigo_item, fila);
@@ -94,7 +97,7 @@ export async function upsertBulk(items) {
       const chunk = arr.slice(i, i + CHUNK);
       const { error } = await supabase
         .from(TABLE)
-        .upsert(chunk, { onConflict: "codigo_item" });
+        .upsert(chunk, { onConflict: "codigo_item,unidad" });
       if (error) throw new Error(`Error al guardar capacidades: ${error.message}`);
     }
   };
@@ -105,36 +108,37 @@ export async function upsertBulk(items) {
 }
 
 /**
- * Actualiza (o crea) la capacidad de un solo ítem. Sirve para editar y para
- * CREAR un ítem nuevo a mano (el upsert lo inserta si no existe).
- * `descripcion` es opcional: si no viene, no se toca la existente.
+ * Actualiza (o crea) una fila (ítem + UM). La `unidad` es parte de la CLAVE:
+ * "" es la fila base (capacidad en unidades), un valor es una fila de esa UM
+ * (capacidad en esa UM). Así el mismo ítem puede tener CAJA + BULTO sin pisarse.
  */
 export async function actualizar(codigoItem, capacidad, descripcion, unidad, factor) {
+  const um = String(unidad || "").trim(); // "" = fila base
   const fila = {
     codigo_item: normCodigo(codigoItem),
+    unidad: um,
     capacidad: num(capacidad),
+    factor: um ? (Number(factor) > 0 ? Number(factor) : 1) : null,
     updated_at: new Date().toISOString(),
   };
   if (descripcion != null) fila.descripcion = String(descripcion).trim();
-  // UM opcional: "" → limpia; undefined → no toca; valor → asigna.
-  if (unidad !== undefined) fila.unidad = String(unidad || "").trim() || null;
-  if (factor !== undefined) fila.factor = Number(factor) > 0 ? Number(factor) : null;
 
   const { data, error } = await supabase
     .from(TABLE)
-    .upsert(fila, { onConflict: "codigo_item" })
+    .upsert(fila, { onConflict: "codigo_item,unidad" })
     .select()
     .single();
   if (error) throw new Error(`Error al actualizar capacidad: ${error.message}`);
   return data;
 }
 
-/** Elimina la capacidad de un ítem. */
-export async function eliminar(codigoItem) {
+/** Elimina una fila (ítem + UM). `unidad` "" = la fila base. */
+export async function eliminar(codigoItem, unidad = "") {
   const { error } = await supabase
     .from(TABLE)
     .delete()
-    .eq("codigo_item", normCodigo(codigoItem));
+    .eq("codigo_item", normCodigo(codigoItem))
+    .eq("unidad", String(unidad || "").trim());
   if (error) throw new Error(`Error al eliminar capacidad: ${error.message}`);
   return { ok: true };
 }
