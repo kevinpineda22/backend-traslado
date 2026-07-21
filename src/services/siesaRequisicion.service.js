@@ -161,11 +161,12 @@ export function armarPayload(despacho) {
     (it) => Number(it.cantidad_despachador) > 0,
   );
 
-  // Consecutivo VACÍO a propósito: el conector va con F_CONSEC_AUTO_REG = 1
+  // Consecutivo en 0: el conector va con F_CONSEC_AUTO_REG = 1
   // ("el consecutivo es recalculado con base en la tabla de consecutivos de
   // docto"). Lo asigna SIESA; mandarlo nosotros sería pelearle al ERP por un
-  // número que él ya sabe cuál es.
-  const nroDocto = "";
+  // número que él ya sabe cuál es. Pero SIESA exige que el campo sea numérico,
+  // por lo que mandamos 0 en vez de string vacío.
+  const nroDocto = 0;
   const fecha = fechaSiesa(new Date(despacho.updated_at || Date.now()));
   const co = resolverCO(despacho.origen);
 
