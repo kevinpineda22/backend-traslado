@@ -108,13 +108,15 @@ export async function getProductosTraslado({ origen, destino }) {
             ? num(d.periodo_cubrimiento)
             : num(fuente.periodo_cubrimiento);
 
-      const { stockSeguridad, necesidad, sugerido } = calcularSugeridoGeneral({
+      const { stockSeguridad, necesidad } = calcularSugeridoGeneral({
         consumoDestino,
         periodoCubrimiento,
         inventarioDestino,
         disponibleOrigen,
       });
-      // Faltante: lo que el destino necesita y el origen principal NO puede cubrir.
+      // El sugerido es el MÁXIMO que se debería mandar (la necesidad), sin topear
+      // por el origen. El faltante es lo que el origen no puede cubrir.
+      const sugerido = necesidad;
       const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
       // Ítem que no está en el origen: solo tiene sentido si el destino lo necesita.
@@ -217,7 +219,10 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         inventario: inventarioDestino,
         cadencias: cadenciasEfectivas,
       });
-      const sugerido = Math.min(necesidad, Math.max(0, Math.floor(disponibleOrigen)));
+      // El sugerido es el MÁXIMO que se debería mandar (la necesidad), SIN topear
+      // por el origen: aunque el origen no tenga stock, se muestra lo ideal. El
+      // despachador recolecta lo que haya y registra el faltante.
+      const sugerido = necesidad;
       const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
       // Ítem que no está en el origen: solo tiene sentido si Llano lo necesita.
