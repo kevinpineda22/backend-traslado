@@ -97,6 +97,9 @@ const recolectarSchema = z.object({
           .enum(["sin_stock", "surtido_parcial", "inventario_inflado"])
           .nullable()
           .optional(),
+        nueva_unidad_medida: z.string().optional(),
+        nueva_cantidad_admin: z.number().optional(),
+        nuevo_factor: z.number().optional(),
       }),
     )
     .min(1),

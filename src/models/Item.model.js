@@ -83,18 +83,21 @@ export async function estadisticasMotivos() {
  * @param {boolean} [agotado] - true si no hubo stock suficiente en bodega
  * @param {string|null} [motivo] - motivo del faltante: uno de MOTIVOS_FALTANTE, o null
  */
-export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null) {
+export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null) {
   // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
   const { data: item, error: errGet } = await supabase
     .from(TABLE)
-    .select("cantidad_admin")
+    .select("cantidad_admin, unidad_medida")
     .eq("id", itemId)
     .single();
 
   if (errGet || !item) throw createError(404, "Item no encontrado");
 
   const cant = Number(cantidad) || 0;
-  const pedido = Number(item.cantidad_admin) || 0;
+  const pedido = nueva_cant_admin !== null && nueva_cant_admin !== undefined 
+    ? Number(nueva_cant_admin) 
+    : Number(item.cantidad_admin) || 0;
+
   if (cant > pedido) {
     throw createError(
       422,
@@ -104,13 +107,22 @@ export async function updateCantidadDespachador(itemId, cantidad, agotado = fals
 
   const motivoLimpio = motivo && MOTIVOS_FALTANTE.includes(motivo) ? motivo : null;
 
+  const updatePayload = {
+    cantidad_despachador: cant,
+    agotado: !!agotado,
+    motivo: motivoLimpio,
+  };
+
+  // Si envían una unidad nueva y es distinta a la actual, la mutamos
+  if (nueva_um && nueva_um !== item.unidad_medida) {
+    updatePayload.unidad_medida = nueva_um;
+    updatePayload.cantidad_admin = pedido;
+    if (nuevo_factor) updatePayload.factor = nuevo_factor;
+  }
+
   const { data, error } = await supabase
     .from(TABLE)
-    .update({
-      cantidad_despachador: cant,
-      agotado: !!agotado,
-      motivo: motivoLimpio,
-    })
+    .update(updatePayload)
     .eq("id", itemId)
     .select()
     .single();

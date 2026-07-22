@@ -183,6 +183,9 @@ export async function recolectar(req, res, next) {
         item.cantidad,
         item.agotado,
         item.motivo,
+        item.nueva_unidad_medida,
+        item.nueva_cantidad_admin,
+        item.nuevo_factor
       );
       resultados.push(actualizado);
     }

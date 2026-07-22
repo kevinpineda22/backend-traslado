@@ -469,25 +469,41 @@ export async function getSedes() {
  * @param {string} codigo - Código escaneado.
  */
 export async function resolverCodigoBarras(codigo) {
+  const limpio = String(codigo).trim();
   try {
-    const { data, error } = await supabase
+    // 1. Buscar si es un código de barras específico (EAN/UPC)
+    const { data: eanMatch, error: eanError } = await supabase
       .from("siesa_codigos_barras")
       .select("f120_id, unidad_medida")
-      .eq("codigo_barras", String(codigo).trim())
-      .single();
+      .eq("codigo_barras", limpio)
+      .maybeSingle();
 
-    // Si hay error (como no rows found) o no hay data, asumimos código base
-    if (error || !data) {
-      return { f120_id: String(codigo).trim(), unidad_medida: null };
+    if (eanMatch) {
+      // Es un código de barras, retorna su item y su unidad de medida única
+      return { 
+        isBase: false,
+        f120_id: eanMatch.f120_id, 
+        unidades: [eanMatch.unidad_medida].filter(Boolean) 
+      };
     }
 
-    return {
-      f120_id: data.f120_id,
-      unidad_medida: data.unidad_medida,
+    // 2. Si no es código de barras, asumimos que es el código base (PLU / f120_id)
+    // Buscamos todas las unidades de medida que tiene configuradas
+    const { data: baseMatch, error: baseError } = await supabase
+      .from("siesa_codigos_barras")
+      .select("unidad_medida")
+      .eq("f120_id", limpio);
+
+    const unidades = Array.from(new Set((baseMatch || []).map(b => b.unidad_medida).filter(Boolean)));
+
+    return { 
+      isBase: true,
+      f120_id: limpio, 
+      unidades: unidades.length > 0 ? unidades : ["UND"] // fallback a UND si no hay ninguna
     };
   } catch (error) {
-    // Fallback: tratarlo como código base ante cualquier falla
-    return { f120_id: String(codigo).trim(), unidad_medida: null };
+    // Fallback absoluto ante cualquier falla
+    return { isBase: true, f120_id: limpio, unidades: ["UND"] };
   }
 }
 
