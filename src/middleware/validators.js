@@ -16,6 +16,8 @@ const crearDespachoSchema = z.object({
         unidad_medida: z.string().optional(),
         factor: z.number().optional(),
         rotacion: z.string().optional(),
+        grupo: z.string().nullable().optional(),
+        categoria: z.string().nullable().optional(),
         stock_origen: z.number().optional(),
         stock_destino: z.number().optional(),
         consumo_destino: z.number().optional(),
