@@ -237,6 +237,23 @@ export async function listarSedes(_req, res, next) {
 }
 
 /**
+ * GET /api/siesa/codigos-barras/:codigo
+ * Resuelve un código de barras a su f120_id y unidad de medida.
+ */
+export async function resolverCodigoBarrasCtrl(req, res, next) {
+  try {
+    const { codigo } = req.params;
+    if (!codigo) {
+      return res.status(400).json({ ok: false, error: "El código es requerido" });
+    }
+    const data = await SiesaService.resolverCodigoBarras(codigo);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * GET /api/siesa/stock?sede=00301&items=CODE1,CODE2,...
  * Stock EN VIVO (consulta SIESA en tiempo real) de una lista de ítems en una sede.
  * Pensado para el despachador: pide solo los ítems visibles, no el catálogo entero.

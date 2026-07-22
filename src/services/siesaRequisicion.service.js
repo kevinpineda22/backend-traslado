@@ -190,7 +190,7 @@ export function armarPayload(despacho) {
     NRO_REGISTRO_MOVIMIENTO: String(i + 1),
     BODEGA_SALIDA: String(despacho.origen || ""),
     "C.O_MOVIMIENTO": co,
-    UNIDAD_MEDIDA: String(it.unidad_medida || ""),
+    UNIDAD_MEDIDA: String(it.unidad_medida || "UND"),
     CANTIDAD: String(Number(it.cantidad_despachador) || 0),
     CODIGO_ITEM: String(it.codigo_item || ""),
   }));

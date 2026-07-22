@@ -2,6 +2,7 @@ import { calcularSugeridoGeneral, calcularSugeridoABC } from "./sugerido.service
 import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
 import { mapaCapacidades } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
+import { supabase } from "../config/supabase.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
 import {
   unidadForzadaDe,
@@ -458,6 +459,36 @@ export async function getSedes() {
     .map((codigo) => ({ id: codigo, descripcion: nombreSede(codigo) }))
     .sort((a, b) => a.descripcion.localeCompare(b.descripcion, "es"));
   return { data: sedes };
+}
+
+/**
+ * Resuelve un código (que puede ser un código de barras EAN o un PLU base).
+ * Consulta la tabla `siesa_codigos_barras` en Supabase.
+ * Si lo encuentra, devuelve el `f120_id` asociado y su `unidad_medida`.
+ * Si no, asume que es un código base (PLU) y lo retorna tal cual.
+ * @param {string} codigo - Código escaneado.
+ */
+export async function resolverCodigoBarras(codigo) {
+  try {
+    const { data, error } = await supabase
+      .from("siesa_codigos_barras")
+      .select("f120_id, unidad_medida")
+      .eq("codigo_barras", String(codigo).trim())
+      .single();
+
+    // Si hay error (como no rows found) o no hay data, asumimos código base
+    if (error || !data) {
+      return { f120_id: String(codigo).trim(), unidad_medida: null };
+    }
+
+    return {
+      f120_id: data.f120_id,
+      unidad_medida: data.unidad_medida,
+    };
+  } catch (error) {
+    // Fallback: tratarlo como código base ante cualquier falla
+    return { f120_id: String(codigo).trim(), unidad_medida: null };
+  }
 }
 
 export { getFlujoPorDestino };

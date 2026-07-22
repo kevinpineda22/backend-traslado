@@ -65,16 +65,14 @@ export async function findAll(filters = {}) {
  * Obtener un despacho por ID con sus items y firmas.
  */
 export async function findById(id) {
-  // Ítems agrupados por categoría (aceites juntos, aseo junto, etc.) y ordenados
-  // alfabéticamente dentro del grupo. Despachador y auditor leen ambos por acá,
-  // así que este único orden los alinea a los dos: recolectar de a categoría es
-  // más rápido que ir saltando por toda la lista. Los sin categoría caen al
-  // final (null ordena último en ascendente).
+  // Ítems agrupados por grupo (proveniente de items_siesa) y ordenados
+  // alfabéticamente dentro del grupo. Despachador y auditor leen ambos por acá.
+  // Los sin grupo caen al final (null ordena último en ascendente).
   const { data: despacho, error } = await supabase
     .from(TABLE)
     .select("*, traslados_items(*), traslados_firmas(*)")
     .eq("id", id)
-    .order("categoria", { referencedTable: "traslados_items", ascending: true })
+    .order("grupo", { referencedTable: "traslados_items", ascending: true })
     .order("descripcion", { referencedTable: "traslados_items", ascending: true })
     .single();
 
@@ -115,6 +113,7 @@ export async function create(payload) {
       unidad_medida: item.unidad_medida,
       factor: item.factor ?? 1,
       rotacion: item.rotacion,
+      grupo: item.grupo || null,
       // Snapshot de la categoría: si SIESA reclasifica el producto mañana, el
       // despacho ya cerrado debe seguir contando la historia que vio el admin.
       categoria: item.categoria || null,
