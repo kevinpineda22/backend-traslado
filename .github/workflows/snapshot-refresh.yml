@@ -23,7 +23,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 22: trae WebSocket nativo, que @supabase/supabase-js (realtime)
+          # necesita al crear el cliente. Con Node 20 falla "without native
+          # WebSocket support".
+          node-version: 22
 
       - name: Instalar dependencias
         run: npm ci || npm install
