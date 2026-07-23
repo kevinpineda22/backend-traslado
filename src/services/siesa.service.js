@@ -1,6 +1,6 @@
 import { calcularSugeridoGeneral, calcularSugeridoABC } from "./sugerido.service.js";
 import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
-import { mapaCapacidades } from "../models/Capacidad.model.js";
+import { mapaCapacidades, factoresDeItem } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
 import { supabase } from "../config/supabase.js";
 import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
@@ -486,17 +486,51 @@ export async function getSedes() {
 }
 
 /**
+ * Adjunta el factor (UND por paquete) a cada unidad de medida de un ítem.
+ *
+ * Sin factor, el front NO puede convertir: si el pedido es en P30 y el
+ * despachador cuenta en P15, la única forma de saber que 210 UND son 14 P15 es
+ * conocer que P15 = 15. Antes acá se devolvían strings pelados y el front
+ * asumía factor 1 para toda UM que no fuera la del pedido → conteos inflados.
+ *
+ * Prioridad del factor:
+ *   1. Fila de `traslados_capacidad` del ítem (lo que configuró el admin).
+ *   2. FACTOR_UNIDAD (tabla canónica de paquetes: P6=6, P15=15, P30=30…).
+ *   3. `null` ⇒ factor desconocido. Se devuelve igual, con el factor en null,
+ *      para que el front pueda ocultar esa UM en vez de inventar una conversión.
+ */
+async function conFactores(f120_id, unidades) {
+  let porCapacidad = new Map();
+  try {
+    porCapacidad = await factoresDeItem(f120_id);
+  } catch (err) {
+    // Sin capacidad configurada seguimos con FACTOR_UNIDAD: mejor una UM con
+    // factor canónico que ninguna.
+    console.warn("No se pudieron leer factores de capacidad:", err.message);
+  }
+
+  return unidades.map((um) => {
+    const unidad = trim(um);
+    const factor = porCapacidad.get(unidad) ?? FACTOR_UNIDAD[unidad] ?? null;
+    return { unidad, factor };
+  });
+}
+
+/**
  * Resuelve un código (que puede ser un código de barras EAN o un PLU base).
  * Consulta la tabla `siesa_codigos_barras` en Supabase.
  * Si lo encuentra, devuelve el `f120_id` asociado y su `unidad_medida`.
  * Si no, asume que es un código base (PLU) y lo retorna tal cual.
+ *
+ * `unidades` viene como [{ unidad, factor }] — mismo contrato que
+ * `/siesa/productos`, para que el front tenga UNA sola forma de leer UMs.
  * @param {string} codigo - Código escaneado.
  */
 export async function resolverCodigoBarras(codigo) {
   const limpio = String(codigo).trim();
   try {
     // 1. Buscar si es un código de barras específico (EAN/UPC)
-    const { data: eanMatch, error: eanError } = await supabase
+    const { data: eanMatch } = await supabase
       .from("siesa_codigos_barras")
       .select("f120_id, unidad_medida")
       .eq("codigo_barras", limpio)
@@ -504,30 +538,36 @@ export async function resolverCodigoBarras(codigo) {
 
     if (eanMatch) {
       // Es un código de barras, retorna su item y su unidad de medida única
-      return { 
+      return {
         isBase: false,
-        f120_id: eanMatch.f120_id, 
-        unidades: [eanMatch.unidad_medida].filter(Boolean) 
+        f120_id: eanMatch.f120_id,
+        unidades: await conFactores(
+          eanMatch.f120_id,
+          [eanMatch.unidad_medida].filter(Boolean),
+        ),
       };
     }
 
     // 2. Si no es código de barras, asumimos que es el código base (PLU / f120_id)
     // Buscamos todas las unidades de medida que tiene configuradas
-    const { data: baseMatch, error: baseError } = await supabase
+    const { data: baseMatch } = await supabase
       .from("siesa_codigos_barras")
       .select("unidad_medida")
       .eq("f120_id", limpio);
 
-    const unidades = Array.from(new Set((baseMatch || []).map(b => b.unidad_medida).filter(Boolean)));
+    const unidades = Array.from(
+      new Set((baseMatch || []).map((b) => b.unidad_medida).filter(Boolean)),
+    );
 
-    return { 
+    return {
       isBase: true,
-      f120_id: limpio, 
-      unidades: unidades.length > 0 ? unidades : ["UND"] // fallback a UND si no hay ninguna
+      f120_id: limpio,
+      // Fallback a UND si no hay ninguna configurada
+      unidades: await conFactores(limpio, unidades.length > 0 ? unidades : ["UND"]),
     };
   } catch (error) {
     // Fallback absoluto ante cualquier falla
-    return { isBase: true, f120_id: limpio, unidades: ["UND"] };
+    return { isBase: true, f120_id: limpio, unidades: [{ unidad: "UND", factor: 1 }] };
   }
 }
 

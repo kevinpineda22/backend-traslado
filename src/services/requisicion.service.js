@@ -46,9 +46,13 @@ async function marcar(despachoId, patch) {
  * posterior y no puede tumbar nada.
  *
  * @param {object|string} despachoOId - el despacho (con items) o su id
+ * @param {object} [opts]
+ * @param {boolean} [opts.forzar] - ignora el tope de intentos. Solo para el
+ *   reintento MANUAL desde el panel: alguien miró el error, lo corrigió y pide
+ *   otra pasada. NO saltea la defensa de 'enviado' (eso duplicaría inventario).
  * @returns {Promise<{estado:'enviado'|'pendiente'|'fallido'|'omitido', motivo?:string}>}
  */
-export async function enviarRequisicion(despachoOId) {
+export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
   const id = typeof despachoOId === "string" ? despachoOId : despachoOId?.id;
   if (!id) return { estado: "omitido", motivo: "sin id" };
 
@@ -85,9 +89,13 @@ export async function enviarRequisicion(despachoOId) {
     }
 
     const intentos = Number(despacho.siesa_intentos) || 0;
-    if (intentos >= MAX_INTENTOS) {
+    if (intentos >= MAX_INTENTOS && !forzar) {
       await marcar(id, { siesa_estado: "fallido" });
-      return { estado: "fallido", motivo: "máximo de intentos alcanzado" };
+      return {
+        estado: "fallido",
+        motivo: `máximo de intentos alcanzado (${intentos}/${MAX_INTENTOS})`,
+        agotado: true,
+      };
     }
 
     // Defensa 3: la carrera se resuelve en la BD. Si otra instancia ya lo marcó
@@ -216,5 +224,12 @@ export async function estadoRequisiciones() {
     config[sede] = faltan.length ? { listo: false, falta: faltan } : { listo: true };
   }
 
-  return { ...conteo, config, listoParaEnviar: origenes.every((s) => config[s].listo) };
+  // `problemas` se armaba y se descartaba: el estado reportaba "3 pendientes"
+  // sin decir POR QUÉ, y el porqué solo estaba en los logs de Vercel.
+  return {
+    ...conteo,
+    problemas,
+    config,
+    listoParaEnviar: origenes.every((s) => config[s].listo),
+  };
 }

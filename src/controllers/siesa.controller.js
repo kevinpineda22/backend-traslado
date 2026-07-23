@@ -129,7 +129,9 @@ export async function estadoRequisicionesCtrl(_req, res, next) {
  */
 export async function enviarRequisicionCtrl(req, res, next) {
   try {
-    const resultado = await enviarRequisicion(req.params.despachoId);
+    // ?forzar=1 → reintento manual desde el panel, saltando el tope de intentos.
+    const forzar = ["1", "true"].includes(String(req.query.forzar || "").toLowerCase());
+    const resultado = await enviarRequisicion(req.params.despachoId, { forzar });
     res.json({ ok: resultado.estado !== "fallido", data: resultado });
   } catch (error) {
     next(error);

@@ -61,6 +61,34 @@ export async function mapaCapacidades() {
 }
 
 /**
+ * Factores (UND por paquete) de UN ítem, resueltos con una consulta puntual.
+ *
+ * `mapaCapacidades()` trae la tabla ENTERA — está bien para armar el listado de
+ * productos, pero es carísimo para un escaneo de código de barras, que ocurre
+ * una vez por producto tomado. Acá filtramos por ítem.
+ *
+ * @param {string} codigoItem
+ * @returns {Promise<Map<string, number>>} unidad → factor (solo filas con UM y factor)
+ */
+export async function factoresDeItem(codigoItem) {
+  const codigo = normCodigo(codigoItem);
+  if (!codigo) return new Map();
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("unidad, factor")
+    .eq("codigo_item", codigo);
+  if (error) throw new Error(`Error al leer factores del ítem: ${error.message}`);
+
+  const porUnidad = new Map();
+  for (const r of data || []) {
+    const um = r.unidad ? String(r.unidad).trim() : "";
+    const f = num(r.factor);
+    if (um && f > 0) porUnidad.set(um, f);
+  }
+  return porUnidad;
+}
+
+/**
  * Upsert masivo desde el Excel. Reemplaza/actualiza la capacidad de cada ítem.
  * @param {Array<{item?, codigo_item?, capacidad}>} items
  * @returns {number} cantidad de filas afectadas
