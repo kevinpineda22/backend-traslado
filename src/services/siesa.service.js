@@ -254,6 +254,13 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         // Ítem que no está en el origen: solo tiene sentido si Llano lo necesita.
         if (!o && necesidad <= 0) continue;
 
+        // Con UM asignada, la fila va fija en esa UM (sin selector). Si no, la base.
+        // `unidadesDetalle` trae objetos {unidad, factor}; `unidades` es solo strings
+        // para que el front viejo siga funcionando sin pantallazo blanco (error #31).
+        const unidadesDetalle = v.unidad
+          ? [{ unidad: v.unidad, factor: v.factor }]
+          : buildUnidades(fuente);
+
         productos.push({
           codigo_item: codigo,
           rowKey: v.unidad ? `${codigo}|${v.unidad}` : codigo, // identidad única de la fila
@@ -263,8 +270,8 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           dias_capacidad: diasCapacidad,
           rotacion: trim(fuente.rotacion) || "N/A",
           unidad_medida: v.unidad || trim(fuente.um),
-          // Con UM asignada, la fila va fija en esa UM (sin selector). Si no, la base.
-          unidades: v.unidad ? [{ unidad: v.unidad, factor: v.factor }] : buildUnidades(fuente),
+          unidades: unidadesDetalle.map((u) => u.unidad),
+          unidadesDetalle,
           criterios: fuente.criterios || {},
           inventario_origen: inventarioOrigen,
           disponible_origen: disponibleOrigen,
@@ -486,20 +493,32 @@ export async function getSedes() {
 }
 
 /**
- * Adjunta el factor (UND por paquete) a cada unidad de medida de un ítem.
+ * Arma la respuesta de unidades de un ítem en DOS campos, a propósito:
  *
- * Sin factor, el front NO puede convertir: si el pedido es en P30 y el
- * despachador cuenta en P15, la única forma de saber que 210 UND son 14 P15 es
- * conocer que P15 = 15. Antes acá se devolvían strings pelados y el front
- * asumía factor 1 para toda UM que no fuera la del pedido → conteos inflados.
+ *   unidades:        ["P15","P30"]                      ← contrato histórico
+ *   unidadesDetalle: [{unidad:"P15",factor:15}, …]      ← el dato que faltaba
+ *
+ * POR QUÉ DOS CAMPOS Y NO UNO
+ * `unidades` se devolvía como strings y el front los pintaba directo en el
+ * <select>. Cambiarlo a objetos rompió el front YA DESPLEGADO con un error de
+ * React ("Objects are not valid as a React child"): el navegador quedó en
+ * pantalla blanca hasta que se subiera el bundle nuevo. Un cambio de contrato
+ * que obliga a desplegar los dos repos en un orden exacto es una bomba de
+ * tiempo — el día que uno de los dos despliegues falle, la app se cae.
+ *
+ * Manteniendo `unidades` intacto, CUALQUIER combinación de versiones funciona:
+ * el front viejo sigue leyendo strings y el nuevo prefiere `unidadesDetalle`.
+ *
+ * Sin factor el front no puede convertir: si el pedido es en P30 y se cuenta en
+ * P15, la única forma de saber que 210 UND son 14 P15 es conocer que P15 = 15.
  *
  * Prioridad del factor:
  *   1. Fila de `traslados_capacidad` del ítem (lo que configuró el admin).
  *   2. FACTOR_UNIDAD (tabla canónica de paquetes: P6=6, P15=15, P30=30…).
- *   3. `null` ⇒ factor desconocido. Se devuelve igual, con el factor en null,
- *      para que el front pueda ocultar esa UM en vez de inventar una conversión.
+ *   3. `null` ⇒ factor desconocido. Se devuelve igual, en null, para que el
+ *      front oculte esa UM en vez de inventar una conversión.
  */
-async function conFactores(f120_id, unidades) {
+async function conFactores(f120_id, umsCrudas) {
   let porCapacidad = new Map();
   try {
     porCapacidad = await factoresDeItem(f120_id);
@@ -509,11 +528,14 @@ async function conFactores(f120_id, unidades) {
     console.warn("No se pudieron leer factores de capacidad:", err.message);
   }
 
-  return unidades.map((um) => {
-    const unidad = trim(um);
-    const factor = porCapacidad.get(unidad) ?? FACTOR_UNIDAD[unidad] ?? null;
-    return { unidad, factor };
-  });
+  const unidades = umsCrudas.map(trim).filter(Boolean);
+  return {
+    unidades,
+    unidadesDetalle: unidades.map((unidad) => ({
+      unidad,
+      factor: porCapacidad.get(unidad) ?? FACTOR_UNIDAD[unidad] ?? null,
+    })),
+  };
 }
 
 /**
@@ -522,8 +544,9 @@ async function conFactores(f120_id, unidades) {
  * Si lo encuentra, devuelve el `f120_id` asociado y su `unidad_medida`.
  * Si no, asume que es un código base (PLU) y lo retorna tal cual.
  *
- * `unidades` viene como [{ unidad, factor }] — mismo contrato que
- * `/siesa/productos`, para que el front tenga UNA sola forma de leer UMs.
+ * Devuelve `unidades` (strings, contrato histórico) y `unidadesDetalle`
+ * ([{unidad,factor}], el dato nuevo). Ver `conFactores` para el porqué de los
+ * dos campos.
  * @param {string} codigo - Código escaneado.
  */
 export async function resolverCodigoBarras(codigo) {
@@ -541,10 +564,7 @@ export async function resolverCodigoBarras(codigo) {
       return {
         isBase: false,
         f120_id: eanMatch.f120_id,
-        unidades: await conFactores(
-          eanMatch.f120_id,
-          [eanMatch.unidad_medida].filter(Boolean),
-        ),
+        ...(await conFactores(eanMatch.f120_id, [eanMatch.unidad_medida].filter(Boolean))),
       };
     }
 
@@ -563,11 +583,16 @@ export async function resolverCodigoBarras(codigo) {
       isBase: true,
       f120_id: limpio,
       // Fallback a UND si no hay ninguna configurada
-      unidades: await conFactores(limpio, unidades.length > 0 ? unidades : ["UND"]),
+      ...(await conFactores(limpio, unidades.length > 0 ? unidades : ["UND"])),
     };
   } catch (error) {
     // Fallback absoluto ante cualquier falla
-    return { isBase: true, f120_id: limpio, unidades: [{ unidad: "UND", factor: 1 }] };
+    return {
+      isBase: true,
+      f120_id: limpio,
+      unidades: ["UND"],
+      unidadesDetalle: [{ unidad: "UND", factor: 1 }],
+    };
   }
 }
 
