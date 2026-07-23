@@ -1,0 +1,44 @@
+name: Refrescar snapshot SIESA
+
+# El pull de SIESA (~4.5 min) no entra en el límite de 300s de Vercel. Acá corre
+# en un runner sin ese límite. Reemplaza al cron de Vercel para /api/siesa/refresh.
+on:
+  schedule:
+    # Cada 15 min. Nota: el scheduler de GitHub es best-effort y puede demorarse
+    # algunos minutos bajo carga; para la operación de traslados alcanza de sobra.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {} # permite dispararlo a mano desde la pestaña Actions
+
+# Nunca dos corridas a la vez (además el lock en Supabase ya lo protege).
+concurrency:
+  group: snapshot-refresh
+  cancel-in-progress: false
+
+jobs:
+  refrescar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22: trae WebSocket nativo, que @supabase/supabase-js (realtime)
+          # necesita al crear el cliente. Con Node 20 falla "without native
+          # WebSocket support".
+          node-version: 22
+
+      - name: Instalar dependencias
+        run: npm ci || npm install
+
+      - name: Refrescar snapshot
+        run: node scripts/refresh-snapshot.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CONNEKTA_BASE_URL: ${{ secrets.CONNEKTA_BASE_URL }}
+          CONNEKTA_ID_COMPANIA: ${{ secrets.CONNEKTA_ID_COMPANIA }}
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          # Nombre de la consulta registrada en Connekta (si en prod no es el default).
+          CONNEKTA_QUERY_TRASLADOS: ${{ secrets.CONNEKTA_QUERY_TRASLADOS }}

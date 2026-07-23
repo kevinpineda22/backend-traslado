@@ -17,13 +17,11 @@ import { tomarLock, liberarLock, lockTomado } from "./lock.service.js";
 const TABLE = "traslados_snapshot";
 const QUERY_TRASLADOS =
   process.env.CONNEKTA_QUERY_TRASLADOS || "merkahorro_traslados_dev";
-// Página grande a propósito. El ORDER BY (necesario para paginar sin perder filas)
-// vuelve costosa la paginación por OFFSET: cada página re-ordena el JOIN completo y
-// las páginas profundas (OFFSET decenas de miles) son carísimas. El costo total es
-// ~inversamente proporcional al tamaño de página, así que subirlo de 1000 a 5000
-// baja de ~77 páginas a ~16 y hace que el pull termine holgado dentro del límite de
-// Vercel (maxDuration 300s). Ajustable por env si Connekta limita el tamaño.
-const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 5000;
+// Connekta LIMITA tamPag a 1000 (devuelve 400 si te pasás) → son ~77 páginas.
+// El pull tarda ~4.5 min, pero ya NO importa: corre en GitHub Actions (sin el
+// límite de 300s de Vercel), así que completa tranquilo dentro del timeout del
+// workflow (15 min). No subir de 1000.
+const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 1000;
 const CHUNK = 1000; // filas por insert a Supabase
 
 /* ─── Red de seguridad del snapshot ─────────────────────────────────────
@@ -300,6 +298,39 @@ export async function refrescarSnapshotUnico(detalle = "") {
 /** ¿Hay un refresh corriendo ahora mismo (en cualquier instancia)? */
 export function refreshEnProgreso() {
   return lockTomado(LOCK_REFRESH);
+}
+
+/**
+ * Dispara el workflow de GitHub Actions que corre el pull (fuera del límite de
+ * 300s de Vercel). Lo usa el botón "Actualizar ahora": devuelve al instante y el
+ * pull corre por afuera. Si no está configurado (sin token/repo), devuelve
+ * { disponible: false } para que el llamador corra el pull inline como respaldo.
+ */
+export async function dispararRefreshRemoto() {
+  const token = process.env.GITHUB_DISPATCH_TOKEN;
+  const repo = process.env.GITHUB_REPO; // "owner/repo"
+  const workflow = process.env.GITHUB_WORKFLOW || "snapshot-refresh.yml";
+  const ref = process.env.GITHUB_REF_SNAPSHOT || "main";
+  if (!token || !repo) return { disponible: false };
+
+  const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ref }),
+  });
+
+  // GitHub responde 204 No Content cuando el dispatch se aceptó.
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`GitHub dispatch falló [${resp.status}]: ${txt.slice(0, 200)}`);
+  }
+  return { disponible: true };
 }
 
 /** Timestamp del último refresh (max actualizado_at del snapshot). */
