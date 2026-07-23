@@ -1,0 +1,6 @@
+      for (const v of variantes) {
+        const capacidadBase = v.capacidadUM * (v.factor || 1); // capacidad en base
+        // Días de inventario = cuántos días cubre la capacidad al ritmo de consumo
+        // del destino (capacidad / consumo). Consumo 0 → sin rotación (null).
+        const diasInventario = consumoDestino > 0 ? capacidadBase / consumoDestino : null;
+        // `necesidad` = sugerido = máximo a mandar (SIN topear por el origen).

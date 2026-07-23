@@ -30,11 +30,10 @@ const FORZADAS_CRUDO = {
 
 /* ─── 2. Unidades SELECCIONABLES (set fijo, con selector) ───────────────── */
 // código → lista de unidades a ofrecer (la primera es la base/por defecto).
-const SELECCIONABLES_CRUDO = {
-  "0025587": ["UND", "P15", "P30"], // HUEVO TIPO A
-  "0025588": ["UND", "P15", "P30"], // HUEVO TIPO AA
-  "0025589": ["UND", "P15", "P30"], // HUEVO TIPO AAA
-};
+// Los huevos (0025587/88/89) se pasaron a manejarse por filas de Capacidad
+// (multi-UM P15/P30), así que ya NO usan selector. Se deja el mecanismo por si
+// otro ítem lo necesita a futuro.
+const SELECCIONABLES_CRUDO = {};
 
 // codigoNormalizado → unidad forzada
 const MAPA_FORZADAS = {};

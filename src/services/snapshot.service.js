@@ -17,8 +17,33 @@ import { tomarLock, liberarLock, lockTomado } from "./lock.service.js";
 const TABLE = "traslados_snapshot";
 const QUERY_TRASLADOS =
   process.env.CONNEKTA_QUERY_TRASLADOS || "merkahorro_traslados_dev";
-const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 1000;
+// Página grande a propósito. El ORDER BY (necesario para paginar sin perder filas)
+// vuelve costosa la paginación por OFFSET: cada página re-ordena el JOIN completo y
+// las páginas profundas (OFFSET decenas de miles) son carísimas. El costo total es
+// ~inversamente proporcional al tamaño de página, así que subirlo de 1000 a 5000
+// baja de ~77 páginas a ~16 y hace que el pull termine holgado dentro del límite de
+// Vercel (maxDuration 300s). Ajustable por env si Connekta limita el tamaño.
+const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 5000;
 const CHUNK = 1000; // filas por insert a Supabase
+
+/* ─── Red de seguridad del snapshot ─────────────────────────────────────
+   La consulta de Connekta se pagina SIN un ORDER BY estable, así que cada pull
+   puede traer un subconjunto distinto (filas que se pierden y se duplican).
+   Estos guardas evitan que un pull incompleto pise o borre el snapshot bueno.
+   El fix de raíz es agregar ORDER BY a la consulta registrada; esto es la malla
+   de contención mientras tanto (y ante fallos de red / páginas cortas). */
+
+// Completitud: filas crudas traídas vs total declarado por Connekta. Debajo de
+// este ratio asumimos que faltaron páginas y abortamos.
+const UMBRAL_COMPLETITUD = Number(process.env.SNAPSHOT_MIN_COMPLETITUD) || 0.95;
+// Regresión: ítems del pull nuevo vs los que ya había en el snapshot. Una caída
+// brusca = pull parcial → no pisamos el bueno.
+const UMBRAL_REGRESION = Number(process.env.SNAPSHOT_MIN_REGRESION) || 0.8;
+// Gracia de prune: NO se borra un ítem por faltar en UN pull; solo si lleva este
+// tiempo sin aparecer (varios ciclos de cron de 15 min). Una omisión transitoria
+// de la paginación reaparece y se refresca antes de este corte.
+const GRACIA_PRUNE_MS =
+  (Number(process.env.SNAPSHOT_GRACIA_PRUNE_MIN) || 180) * 60 * 1000;
 
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(v ?? "").trim();
@@ -60,7 +85,12 @@ async function traerDeConnekta() {
 
   // El query ya filtra por bodega (OR), pero recortamos por las dudas.
   const relevantes = new Set(bodegasInvolucradas());
-  return todos.filter((r) => relevantes.has(trim(r.IdBodega)));
+  const filas = todos.filter((r) => relevantes.has(trim(r.IdBodega)));
+
+  // `crudas` (antes de filtrar) y `totalDeclarado` (lo que Connekta dice que hay)
+  // alimentan la guarda de completitud: si crudas << totalDeclarado, faltaron
+  // páginas y no debemos pisar el snapshot bueno.
+  return { filas, crudas: todos.length, totalDeclarado: primera.total };
 }
 
 /**
@@ -138,18 +168,66 @@ function aRegistro(o, ts) {
 
 /* ─── Refresh (lo llama el cron) ───────────────────────────────────── */
 
+/** Se lanza cuando el pull viene incompleto: abortamos sin tocar el snapshot. */
+export class PullIncompletoError extends Error {
+  constructor(mensaje) {
+    super(mensaje);
+    this.name = "PullIncompletoError";
+    this.statusCode = 409;
+    this.expose = true;
+  }
+}
+
+/** Cuenta las filas vigentes del snapshot para las bodegas dadas. */
+async function contarSnapshot(bodegas) {
+  const { count, error } = await supabase
+    .from(TABLE)
+    .select("*", { count: "exact", head: true })
+    .in("bodega", bodegas);
+  if (error) return 0;
+  return count || 0;
+}
+
 /**
- * Trae SIESA, agrega y persiste el snapshot con patrón "upsert + prune":
- *   1. Upsert de todas las filas actuales (con actualizado_at nuevo).
- *   2. Borra las filas viejas (items que ya no existen en SIESA) sin dejar
- *      una ventana con la tabla vacía.
+ * Trae SIESA, agrega y persiste el snapshot con patrón "upsert + prune con
+ * gracia", protegido por dos guardas de completitud:
+ *
+ *   Guarda 1 — completitud: si Connekta declara N filas y trajimos muchas menos,
+ *              faltaron páginas → abortamos SIN tocar el snapshot.
+ *   Guarda 2 — regresión: si el pull trae muchísimos menos ítems que el snapshot
+ *              vigente, es parcial → abortamos.
+ *   Upsert:    refresca actualizado_at de lo que sí vino.
+ *   Prune:     borra SOLO lo ausente por más de GRACIA_PRUNE_MS, no lo que faltó
+ *              en ESTE pull (la paginación inestable lo trae al siguiente).
+ *
+ * Así un pull incompleto nunca destruye el dato bueno: en el peor caso el ítem
+ * omitido conserva sus últimos valores válidos hasta que reaparece.
  */
 export async function refrescarSnapshot() {
   const inicio = new Date().toISOString();
 
-  const rows = await traerDeConnekta();
+  const { filas: rows, crudas, totalDeclarado } = await traerDeConnekta();
+  const bodegas = bodegasInvolucradas();
+
+  // Guarda 1 — completitud (páginas faltantes / respuestas cortas).
+  if (totalDeclarado > 0 && crudas < totalDeclarado * UMBRAL_COMPLETITUD) {
+    const pct = ((crudas / totalDeclarado) * 100).toFixed(1);
+    throw new PullIncompletoError(
+      `Pull incompleto: ${crudas}/${totalDeclarado} filas (${pct}%). Snapshot anterior intacto.`,
+    );
+  }
+
   const agg = agregarPorBodegaItem(rows);
   const registros = Array.from(agg.values()).map((o) => aRegistro(o, inicio));
+
+  // Guarda 2 — regresión brusca vs el snapshot vigente.
+  const prevCount = await contarSnapshot(bodegas);
+  if (prevCount > 0 && registros.length < prevCount * UMBRAL_REGRESION) {
+    const pct = ((registros.length / prevCount) * 100).toFixed(1);
+    throw new PullIncompletoError(
+      `Regresión sospechosa: ${registros.length} ítems vs ${prevCount} previos (${pct}%). Snapshot anterior intacto.`,
+    );
+  }
 
   // 1. Upsert en chunks
   for (let i = 0; i < registros.length; i += CHUNK) {
@@ -160,19 +238,23 @@ export async function refrescarSnapshot() {
     if (error) throw new Error(`Error al guardar snapshot: ${error.message}`);
   }
 
-  // 2. Prune de filas no refrescadas (desaparecidas de SIESA)
-  const bodegas = bodegasInvolucradas();
+  // 2. Prune CON GRACIA: solo lo que lleva mucho sin aparecer (desaparecido de
+  //    SIESA de verdad), no lo que faltó en este pull. Lo omitido por paginación
+  //    reaparece antes del corte y conserva su actualizado_at reciente.
+  const corte = new Date(Date.now() - GRACIA_PRUNE_MS).toISOString();
   const { error: errPrune } = await supabase
     .from(TABLE)
     .delete()
     .in("bodega", bodegas)
-    .lt("actualizado_at", inicio);
+    .lt("actualizado_at", corte);
   if (errPrune) throw new Error(`Error al limpiar snapshot: ${errPrune.message}`);
 
   return {
     total: registros.length,
     bodegas,
     origenFilas: rows.length,
+    crudas,
+    totalDeclarado,
     actualizado_at: inicio,
   };
 }

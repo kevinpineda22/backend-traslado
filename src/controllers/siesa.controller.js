@@ -10,6 +10,7 @@ import {
   refreshEnProgreso,
   ultimaActualizacion,
   RefreshEnCursoError,
+  PullIncompletoError,
 } from "../services/snapshot.service.js";
 import { listarFlujos, getFlujoPorDestino } from "../config/flujos.js";
 
@@ -51,7 +52,7 @@ export async function refrescar(req, res, next) {
     const segundos = Math.round((Date.now() - inicio) / 1000);
 
     console.log(
-      `[refresh] ✅ ${resultado.total} items (${resultado.origenFilas} filas SIESA) en ${segundos}s`,
+      `[refresh] ✅ ${resultado.total} items (${resultado.crudas}/${resultado.totalDeclarado} filas SIESA) en ${segundos}s`,
     );
     res.json({ ok: true, ...resultado, duracion_s: segundos });
   } catch (error) {
@@ -61,6 +62,12 @@ export async function refrescar(req, res, next) {
       return res
         .status(202)
         .json({ ok: true, en_progreso: true, mensaje: "Ya hay una actualización en curso" });
+    }
+    // Pull incompleto: la red de seguridad abortó para NO pisar el snapshot bueno.
+    // No es un crash: es la protección funcionando. El dato anterior queda intacto.
+    if (error instanceof PullIncompletoError) {
+      console.warn(`[refresh] ⚠️ pull incompleto, snapshot intacto: ${error.message}`);
+      return res.status(200).json({ ok: true, saltado: true, motivo: error.message });
     }
     console.error("[refresh] ❌", error);
     res.status(500).json({

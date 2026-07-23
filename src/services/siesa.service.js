@@ -98,9 +98,11 @@ export async function getProductosTraslado({ origen, destino }) {
       const d = dMap.get(codigo);
       const fuente = o || d; // descripción/UM/criterios: preferimos el origen
 
-      const inventarioOrigen = o ? num(o.inventario) : 0;
+      // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
+      // disponible para trasladar / para cubrir la demanda, NO la existencia total.
+      const inventarioOrigen = o ? num(o.disponible) : 0;
       const disponibleOrigen = o ? num(o.disponible) : 0;
-      const inventarioDestino = d ? num(d.inventario) : 0;
+      const inventarioDestino = d ? num(d.disponible) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
       const periodoCubrimiento =
         periodoOverride != null
@@ -120,6 +122,10 @@ export async function getProductosTraslado({ origen, destino }) {
       const sugerido = necesidad;
       const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
+      // Días de inventario = inventarioDestino / consumoDestino
+      // Refleja el sobre-stock real. Si consumo es 0, no tiene rotación (null)
+        const diasInventario = consumoDestino > 0 ? capacidadBase / consumoDestino : null;
+
       // Ítem que no está en el origen: solo tiene sentido si el destino lo necesita.
       if (!o && necesidad <= 0) continue;
 
@@ -136,7 +142,7 @@ export async function getProductosTraslado({ origen, destino }) {
         consumo_destino: consumoDestino,
         periodo_cubrimiento: periodoCubrimiento,
         stock_seguridad: stockSeguridad,
-        dias_inventario: null, // General no maneja capacidad; sí alerta de "sin rotación"
+        dias_inventario: null, // General no maneja capacidad; s� alerta de "sin rotaci�n"
         necesidad,
         faltante,
         sugerido,
@@ -203,9 +209,11 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
       const clase = claseDeCategoria(d?.criterios?.CAT);
-      const inventarioOrigen = o ? num(o.inventario) : 0;
+      // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
+      // disponible para trasladar / para cubrir la demanda, NO la existencia total.
+      const inventarioOrigen = o ? num(o.disponible) : 0;
       const disponibleOrigen = o ? num(o.disponible) : 0;
-      const inventarioDestino = d ? num(d.inventario) : 0;
+      const inventarioDestino = d ? num(d.disponible) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
       // Variantes a emitir: si el ítem tiene UM asignadas → una fila POR UM
@@ -252,7 +260,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           disponible_origen: disponibleOrigen,
           inventario_destino: inventarioDestino,
           consumo_destino: consumoDestino,
-          dias_inventario: diasInventario,
+          dias_inventario: null, // General no maneja capacidad; s� alerta de "sin rotaci�n"
           necesidad,
           faltante,
           sugerido,
@@ -292,7 +300,8 @@ export async function getDisponibilidadItem({ codigo, destino }) {
     for (const r of rows) porBodega.set(trim(r.bodega), r);
 
     const d = porBodega.get(trim(destino));
-    const inventarioDestino = d ? num(d.inventario) : 0;
+    // "Inventario" = disponible (existencia − comprometida), igual que en las tablas.
+    const inventarioDestino = d ? num(d.disponible) : 0;
     const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
     // Necesidad (sin tope de origen) según el flujo del destino.
@@ -513,3 +522,5 @@ export async function resolverCodigoBarras(codigo) {
 }
 
 export { getFlujoPorDestino };
+
+
