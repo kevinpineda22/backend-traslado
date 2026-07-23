@@ -234,9 +234,12 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
 
       for (const v of variantes) {
         const capacidadBase = v.capacidadUM * (v.factor || 1); // capacidad en base
-        // Días de inventario = cuántos días cubre la capacidad al ritmo de consumo
-        // del destino (capacidad / consumo). Consumo 0 → sin rotación (null).
-        const diasInventario = consumoDestino > 0 ? capacidadBase / consumoDestino : null;
+        // Días que CUBRE LA CAPACIDAD al ritmo de consumo (se muestra junto a la
+        // capacidad, para saber cuántos días de venta cubre la meta). Consumo 0 → null.
+        const diasCapacidad = consumoDestino > 0 ? capacidadBase / consumoDestino : null;
+        // Días de INVENTARIO del destino = stock actual del destino / consumo. Va en la
+        // columna "Días inv." y es al que se le aplica el filtro de exclusión.
+        const diasInventario = consumoDestino > 0 ? inventarioDestino / consumoDestino : null;
         // `necesidad` = sugerido = máximo a mandar (SIN topear por el origen).
         const necesidad = calcularSugeridoABC({
           clase,
@@ -257,6 +260,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           descripcion: trim(fuente.descripcion),
           clase,
           capacidad: v.capacidadUM,
+          dias_capacidad: diasCapacidad,
           rotacion: trim(fuente.rotacion) || "N/A",
           unidad_medida: v.unidad || trim(fuente.um),
           // Con UM asignada, la fila va fija en esa UM (sin selector). Si no, la base.
