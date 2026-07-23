@@ -17,13 +17,11 @@ import { tomarLock, liberarLock, lockTomado } from "./lock.service.js";
 const TABLE = "traslados_snapshot";
 const QUERY_TRASLADOS =
   process.env.CONNEKTA_QUERY_TRASLADOS || "merkahorro_traslados_dev";
-// Página grande a propósito. El ORDER BY (necesario para paginar sin perder filas)
-// vuelve costosa la paginación por OFFSET: cada página re-ordena el JOIN completo y
-// las páginas profundas (OFFSET decenas de miles) son carísimas. El costo total es
-// ~inversamente proporcional al tamaño de página, así que subirlo de 1000 a 5000
-// baja de ~77 páginas a ~16 y hace que el pull termine holgado dentro del límite de
-// Vercel (maxDuration 300s). Ajustable por env si Connekta limita el tamaño.
-const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 5000;
+// Connekta LIMITA tamPag a 1000 (devuelve 400 si te pasás) → son ~77 páginas.
+// El pull tarda ~4.5 min, pero ya NO importa: corre en GitHub Actions (sin el
+// límite de 300s de Vercel), así que completa tranquilo dentro del timeout del
+// workflow (15 min). No subir de 1000.
+const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 1000;
 const CHUNK = 1000; // filas por insert a Supabase
 
 /* ─── Red de seguridad del snapshot ─────────────────────────────────────
