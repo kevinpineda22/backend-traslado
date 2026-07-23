@@ -291,6 +291,54 @@ export async function iniciarRecoleccion(id, despachadorId) {
 }
 
 /**
+ * Abandonar la recolección: devuelve el despacho al POOL (estado Creado, sin
+ * despachador) para que otra persona lo tome. Atómico y con candado de propiedad:
+ * solo avanza si SIGUE En_recoleccion Y el que llama es el dueño — así nadie
+ * suelta un despacho ajeno ni pisa un cambio de estado concurrente.
+ * El reset de las cantidades de los ítems lo hace el service, tras este flip.
+ */
+export async function abandonarRecoleccion(id, despachadorId) {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({
+      estado: "Creado",
+      despachador_id: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+    .eq("estado", "En_recoleccion")
+    .eq("despachador_id", despachadorId)
+    .select()
+    .single();
+
+  if (error || !data) {
+    // Leer el estado real para devolver el código correcto (403 vs 409 vs 404).
+    const { data: actual } = await supabase
+      .from(TABLE)
+      .select("estado, despachador_id")
+      .eq("id", id)
+      .single();
+    if (!actual) {
+      const e = new Error("Despacho no encontrado");
+      e.statusCode = 404;
+      e.expose = true;
+      throw e;
+    }
+    if (actual.estado !== "En_recoleccion") {
+      const e = new Error(`No se puede abandonar: el despacho está en estado ${actual.estado}`);
+      e.statusCode = 409;
+      e.expose = true;
+      throw e;
+    }
+    const e = new Error("Solo el despachador que reclamó el despacho puede abandonarlo");
+    e.statusCode = 403;
+    e.expose = true;
+    throw e;
+  }
+  return data;
+}
+
+/**
  * Reasignar (o quitar) el despachador de un despacho.
  */
 export async function updateDespachador(id, despachadorId) {

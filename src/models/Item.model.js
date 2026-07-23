@@ -132,6 +132,22 @@ export async function updateCantidadDespachador(itemId, cantidad, agotado = fals
 }
 
 /**
+ * Resetear la recolección de TODOS los ítems de un despacho: los deja como
+ * "nunca registrados" (cantidad_despachador null, sin agotado ni motivo). Se usa
+ * al ABANDONAR una recolección: el despacho vuelve al pool limpio y el próximo
+ * despachador cuenta —y firma— todo desde cero (trazabilidad de la firma).
+ * NO revierte mutaciones de UM: esas reflejan el empaque real del producto, no
+ * el conteo de una persona.
+ */
+export async function resetRecoleccionByDespacho(despachoId) {
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ cantidad_despachador: null, agotado: false, motivo: null })
+    .eq("despacho_id", despachoId);
+  if (error) throw new Error(`Error al resetear la recolección: ${error.message}`);
+}
+
+/**
  * Insertar un ítem que el auditor recibió pero NO venía en la lista original del
  * despachador. Queda marcado con `agregado_por_auditor = true`, sin cantidad del
  * admin/despachador (0), y con la diferencia = lo que contó el auditor (todo sobrante).

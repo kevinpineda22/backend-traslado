@@ -146,6 +146,25 @@ export async function iniciarRecoleccion(id, despachadorId) {
 }
 
 /**
+ * Abandonar la recolección: el dueño suelta el despacho, que vuelve al pool
+ * LIMPIO (reset de cantidades). Dos pasos, en orden:
+ *   1. Flip atómico con candado de propiedad (valida dueño + estado). Si falla
+ *      (403/409/404), NO se resetea nada.
+ *   2. Reset de las cantidades de los ítems: el próximo cuenta y firma desde cero.
+ */
+export async function abandonarRecoleccion(id, despachadorId) {
+  if (!despachadorId) {
+    const e = new Error("Falta identificar al despachador que abandona");
+    e.statusCode = 400;
+    e.expose = true;
+    throw e;
+  }
+  const despacho = await DespachoModel.abandonarRecoleccion(id, despachadorId);
+  await ItemModel.resetRecoleccionByDespacho(id);
+  return despacho;
+}
+
+/**
  * Verificar que un despachador puede escribir sobre la recolección de un despacho
  * (existe, está En_recoleccion y es suyo). Candado de propiedad — ver el modelo.
  */

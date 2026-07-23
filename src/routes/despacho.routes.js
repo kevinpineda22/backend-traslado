@@ -14,6 +14,7 @@ router.patch("/:id/despachador", DespachoController.reasignarDespachador);
 router.put("/:id/items", DespachoController.editarItems);
 router.patch("/:id/estado", validators.cambiarEstado, DespachoController.cambiarEstado);
 router.post("/:id/iniciar", DespachoController.iniciarRecoleccion);
+router.post("/:id/abandonar", DespachoController.abandonar);
 router.post("/:id/recolectar", validators.recolectar, DespachoController.recolectar);
 router.get("/:id/planilla", DespachoController.planilla);
 

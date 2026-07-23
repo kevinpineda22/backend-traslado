@@ -173,6 +173,25 @@ export async function iniciarRecoleccion(req, res, next) {
 }
 
 /**
+ * POST /api/despachos/:id/abandonar
+ * El despachador dueño suelta la recolección: el despacho vuelve al pool (Creado,
+ * sin dueño) y se resetean las cantidades. Body: { despachador_id }
+ * 403 si no es el dueño, 409 si no está En_recoleccion.
+ */
+export async function abandonar(req, res, next) {
+  try {
+    const { despachador_id } = req.body;
+    const data = await DespachoService.abandonarRecoleccion(
+      req.params.id,
+      despachador_id ?? null,
+    );
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * POST /api/despachos/:id/recolectar
  * Registrar la recolección de un item por el despachador.
  * Body: { items: [{ id, cantidad, agotado? }], despachador_id? }
