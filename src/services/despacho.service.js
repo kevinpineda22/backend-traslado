@@ -93,9 +93,7 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
   // huérfana si el cierre es rechazado (403/409).
   const actualizado = await DespachoModel.updateStatus(id, estado, ownerGuard);
 
-  // Recién con el estado ya avanzado, persistimos la firma. Esa validación de
-  // transición es también la primera barrera contra un doble envío a SIESA: un
-  // segundo intento de cerrar el mismo despacho no llega hasta acá abajo.
+  // Recién con el estado ya avanzado, persistimos la firma.
   if (firmaData) {
     const rol = estado === "Recolectado" ? "despachador" : "auditor";
     await FirmaModel.create({ despacho_id: id, rol, firma_data: firmaData });
@@ -103,25 +101,15 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
 
   if (estado === "Recolectado") {
     try {
-      // Los motivos ya están persistidos (el front hace POST /recolectar antes
-      // de firmar), así que el despacho que leemos acá está completo.
+      // El envío a SIESA ya NO ocurre acá. Ahora lo dispara el AUDITOR al
+      // finalizar (ver confirmarAuditoria): tiene la última palabra sobre lo que
+      // realmente llegó, y SIESA recibe SUS cantidades, no las del despachador.
+      // Acá solo avisamos que la recolección cerró y ya se puede auditar.
       const despacho = await DespachoModel.findById(id);
-
-      // Marcamos la requisición como pendiente ANTES de intentarla: si esta
-      // instancia se muere en el intento (timeout de Vercel), el cron la
-      // encuentra igual. Un envío que nadie registró es un envío perdido.
-      await marcarRequisicionPendiente(id);
-
-      // En paralelo: son independientes y ninguno debe demorar al otro.
-      // `enviarRequisicion` nunca lanza; el correo tampoco.
-      await Promise.all([
-        notificarRecoleccionCerrada(despacho),
-        enviarRequisicion(despacho),
-      ]);
+      await notificarRecoleccionCerrada(despacho);
     } catch (err) {
-      // Llegar acá significa que falló leer el despacho o marcarlo. El cierre YA
-      // ocurrió y no se toca; la requisición la levanta el cron.
-      console.error("[despacho] efectos del cierre fallaron:", err.message);
+      // El cierre YA ocurrió y no se toca; el correo es un efecto posterior.
+      console.error("[despacho] notificación de cierre falló:", err.message);
     }
   }
 
@@ -226,7 +214,12 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
     const cantidadAuditor = conteoAuditor.has(item.id)
       ? conteoAuditor.get(item.id)
       : 0;
-    const cantidadDespachador = Number(item.cantidad_despachador) || 0;
+    // Canonicalización a UND: el auditor cuenta y envía en UND. El despachador
+    // guardó en la unidad del ítem, pero `cantidad_despachador × factor` da SIEMPRE
+    // el total real en UND (el factor queda sincronizado con la unidad guardada).
+    // Así la comparación es en la misma unidad y no compara peras con manzanas.
+    const cantidadDespachador =
+      (Number(item.cantidad_despachador) || 0) * (Number(item.factor) || 1);
     const diferencia = cantidadAuditor - cantidadDespachador;
     if (diferencia !== 0) match = false;
 
@@ -293,6 +286,22 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
 
   // Avanzar estado (valida la transición)
   await DespachoModel.updateStatus(despachoId, estadoFinal);
+
+  // Subida a SIESA: ahora la dispara el AUDITOR al finalizar, con SUS cantidades
+  // verificadas (última palabra sobre lo que realmente llegó). Solo si aprobó o
+  // recibió con inconsistencia — rechazado no mueve inventario.
+  // Mismo patrón resiliente que usaba el recolector: marcar 'pendiente' ANTES de
+  // intentar, para que el cron lo levante si esta instancia se muere en el envío.
+  if (decision === "aprobado" || decision === "inconsistencia") {
+    try {
+      await marcarRequisicionPendiente(despachoId);
+      const despacho = await DespachoModel.findById(despachoId);
+      await enviarRequisicion(despacho); // nunca lanza
+    } catch (err) {
+      // La auditoría YA se cerró; el envío queda 'pendiente' y lo levanta el cron.
+      console.error("[auditoría] envío a SIESA falló (queda pendiente):", err.message);
+    }
+  }
 
   return { estado: estadoFinal };
 }

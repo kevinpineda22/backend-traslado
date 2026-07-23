@@ -145,9 +145,10 @@ export function fechaSiesa(d = new Date()) {
 /**
  * Arma el payload de la requisición a partir de un despacho.
  *
- * Solo viajan los ítems que REALMENTE salieron (`cantidad_despachador > 0`). Lo
- * que se mueve en el ERP es lo que subió al camión, no lo que alguien pidió: si
- * mandáramos `cantidad_admin`, cada faltante crearía inventario fantasma.
+ * Solo viajan los ítems que el AUDITOR verificó que llegaron (`cantidad_auditor
+ * > 0`). Lo que se mueve en el ERP es lo que realmente se recibió y verificó —
+ * el auditor tiene la última palabra: incluye sus correcciones y los productos
+ * que agregó fuera de lista, y excluye lo que no llegó (cantidad_auditor 0).
  *
  * OJO con los nombres de campo: `Documentos` usa "NRO DOCTO" (con espacio) y
  * `Movimientos` usa "NRO_DOCTO" (con guión bajo). Está copiado tal cual del
@@ -158,7 +159,7 @@ export function fechaSiesa(d = new Date()) {
  */
 export function armarPayload(despacho) {
   const items = (despacho?.traslados_items || []).filter(
-    (it) => Number(it.cantidad_despachador) > 0,
+    (it) => Number(it.cantidad_auditor) > 0,
   );
 
   // Consecutivo en 0: el conector va con F_CONSEC_AUTO_REG = 1
@@ -190,8 +191,10 @@ export function armarPayload(despacho) {
     NRO_REGISTRO_MOVIMIENTO: String(i + 1),
     BODEGA_SALIDA: String(despacho.origen || ""),
     "C.O_MOVIMIENTO": co,
-    UNIDAD_MEDIDA: String(it.unidad_medida || "UND"),
-    CANTIDAD: String(Number(it.cantidad_despachador) || 0),
+    // Canonicalización: cantidad_auditor ya viene en UND (unidades reales), sin
+    // importar en qué unidad contó el auditor. A SIESA siempre va en UND.
+    UNIDAD_MEDIDA: "UND",
+    CANTIDAD: String(Number(it.cantidad_auditor) || 0),
     CODIGO_ITEM: String(it.codigo_item || ""),
   }));
 
