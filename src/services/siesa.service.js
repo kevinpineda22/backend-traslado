@@ -122,9 +122,9 @@ export async function getProductosTraslado({ origen, destino }) {
       const sugerido = necesidad;
       const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
-      // Días de inventario = inventarioDestino / consumoDestino
-      // Refleja el sobre-stock real. Si consumo es 0, no tiene rotación (null)
-        const diasInventario = consumoDestino > 0 ? capacidadBase / consumoDestino : null;
+      // Días de inventario del destino = inventario (disponible) / consumo.
+      // Refleja el sobre-stock real. Consumo 0 → sin rotación (null).
+      const diasInventario = consumoDestino > 0 ? inventarioDestino / consumoDestino : null;
 
       // Ítem que no está en el origen: solo tiene sentido si el destino lo necesita.
       if (!o && necesidad <= 0) continue;
@@ -142,7 +142,7 @@ export async function getProductosTraslado({ origen, destino }) {
         consumo_destino: consumoDestino,
         periodo_cubrimiento: periodoCubrimiento,
         stock_seguridad: stockSeguridad,
-        dias_inventario: null, // General no maneja capacidad; s� alerta de "sin rotaci�n"
+        dias_inventario: diasInventario,
         necesidad,
         faltante,
         sugerido,
@@ -209,6 +209,12 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
       const clase = claseDeCategoria(d?.criterios?.CAT);
+      // Solo Llano: mostramos únicamente ítems clasificados en el CAT (A/B/C o
+      // "SIN CLASIFICACION" = Ninguno). Los que no tienen NINGUNA clasificación
+      // (CAT vacío) no son de Llano → quedan fuera. El CAT es a nivel de ítem,
+      // así que da igual leerlo del destino o del origen.
+      const catLlano = trim(d?.criterios?.CAT || o?.criterios?.CAT);
+      if (!catLlano) continue;
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
       const inventarioOrigen = o ? num(o.disponible) : 0;
@@ -260,7 +266,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           disponible_origen: disponibleOrigen,
           inventario_destino: inventarioDestino,
           consumo_destino: consumoDestino,
-          dias_inventario: null, // General no maneja capacidad; s� alerta de "sin rotaci�n"
+          dias_inventario: diasInventario,
           necesidad,
           faltante,
           sugerido,
