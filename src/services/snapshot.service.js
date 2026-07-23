@@ -302,6 +302,39 @@ export function refreshEnProgreso() {
   return lockTomado(LOCK_REFRESH);
 }
 
+/**
+ * Dispara el workflow de GitHub Actions que corre el pull (fuera del límite de
+ * 300s de Vercel). Lo usa el botón "Actualizar ahora": devuelve al instante y el
+ * pull corre por afuera. Si no está configurado (sin token/repo), devuelve
+ * { disponible: false } para que el llamador corra el pull inline como respaldo.
+ */
+export async function dispararRefreshRemoto() {
+  const token = process.env.GITHUB_DISPATCH_TOKEN;
+  const repo = process.env.GITHUB_REPO; // "owner/repo"
+  const workflow = process.env.GITHUB_WORKFLOW || "snapshot-refresh.yml";
+  const ref = process.env.GITHUB_REF_SNAPSHOT || "main";
+  if (!token || !repo) return { disponible: false };
+
+  const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ref }),
+  });
+
+  // GitHub responde 204 No Content cuando el dispatch se aceptó.
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`GitHub dispatch falló [${resp.status}]: ${txt.slice(0, 200)}`);
+  }
+  return { disponible: true };
+}
+
 /** Timestamp del último refresh (max actualizado_at del snapshot). */
 export async function ultimaActualizacion() {
   const { data, error } = await supabase

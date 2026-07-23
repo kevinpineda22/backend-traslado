@@ -9,46 +9,50 @@ import {
   refrescarSnapshotUnico,
   refreshEnProgreso,
   ultimaActualizacion,
+  dispararRefreshRemoto,
   RefreshEnCursoError,
   PullIncompletoError,
 } from "../services/snapshot.service.js";
 import { listarFlujos, getFlujoPorDestino } from "../config/flujos.js";
 
-// Cooldown del refresh manual (sin token): no dispara el pull caro más seguido.
+// Cooldown del refresh manual: si el snapshot es muy reciente, no dispares otra corrida.
 const COOLDOWN_MANUAL_MS = 60 * 1000;
 
 /**
- * GET/POST /api/siesa/refresh
- * Refresca el snapshot desde SIESA → Supabase.
- *   - Cron / con token válido → siempre refresca.
- *   - Manual desde la UI (sin token) → protegido por lock + cooldown para que
- *     el pull caro (~2 min) no se pueda abusar. Devuelve 202 si ya hay uno en
- *     curso, 429 si se actualizó hace muy poco.
+ * POST /api/siesa/refresh — botón "Actualizar ahora".
+ *
+ * El pull real (~4.5 min) corre en GitHub Actions, fuera del límite de 300s de
+ * Vercel. Este endpoint solo DISPARA ese workflow y responde al instante (202),
+ * así el botón nunca se cuelga. El front sigue el avance por /siesa/estado.
+ *
+ * Si el dispatch a GitHub no está configurado (sin GITHUB_DISPATCH_TOKEN/REPO),
+ * cae al modo viejo: corre el pull inline (que puede tardar y llegar al timeout).
  */
 export async function refrescar(req, res, next) {
   try {
-    const esperado = process.env.REFRESH_TOKEN;
-    const auth = req.get("authorization") || "";
-    const token = auth.replace(/^Bearer\s+/i, "") || req.query.token;
-    const conToken = esperado && token === esperado;
-
-    if (!conToken) {
-      // Modo manual (UI): sin token, pero acotado para no abusar del pull.
-      // No preguntamos "¿hay uno en curso?" antes de arrancar: entre el check y
-      // el arranque hay una ventana de carrera. El lock de refrescarSnapshotUnico
-      // es el árbitro; acá solo traducimos su respuesta a HTTP.
-      const ultima = await ultimaActualizacion();
-      if (ultima && Date.now() - new Date(ultima).getTime() < COOLDOWN_MANUAL_MS) {
-        return res.status(429).json({
-          ok: false,
-          error: "Se actualizó hace muy poco, esperá un momento",
-          actualizado_at: ultima,
-        });
-      }
+    // Cooldown: si se actualizó hace muy poco, no tiene sentido re-disparar.
+    const ultima = await ultimaActualizacion();
+    if (ultima && Date.now() - new Date(ultima).getTime() < COOLDOWN_MANUAL_MS) {
+      return res.status(429).json({
+        ok: false,
+        error: "Se actualizó hace muy poco, esperá un momento",
+        actualizado_at: ultima,
+      });
     }
 
+    // Camino normal: disparar GitHub Actions y volver al toque.
+    const { disponible } = await dispararRefreshRemoto();
+    if (disponible) {
+      return res.status(202).json({
+        ok: true,
+        disparado: true,
+        mensaje: "Actualización disparada. El inventario se refresca en 1-2 minutos.",
+      });
+    }
+
+    // Fallback (dispatch no configurado): pull inline como antes.
     const inicio = Date.now();
-    const resultado = await refrescarSnapshotUnico(conToken ? "cron" : "manual");
+    const resultado = await refrescarSnapshotUnico("manual");
     const segundos = Math.round((Date.now() - inicio) / 1000);
 
     console.log(
