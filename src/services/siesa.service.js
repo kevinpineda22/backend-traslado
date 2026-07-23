@@ -136,6 +136,7 @@ export async function getProductosTraslado({ origen, destino }) {
         consumo_destino: consumoDestino,
         periodo_cubrimiento: periodoCubrimiento,
         stock_seguridad: stockSeguridad,
+        dias_inventario: null, // General no maneja capacidad; sí alerta de "sin rotación"
         necesidad,
         faltante,
         sugerido,
@@ -219,6 +220,9 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
 
       for (const v of variantes) {
         const capacidadBase = v.capacidadUM * (v.factor || 1); // capacidad en base
+        // Días de inventario = cuántos días cubre la capacidad al ritmo de consumo
+        // del destino (capacidad / consumo). Consumo 0 → sin rotación (null).
+        const diasInventario = consumoDestino > 0 ? capacidadBase / consumoDestino : null;
         // `necesidad` = sugerido = máximo a mandar (SIN topear por el origen).
         const necesidad = calcularSugeridoABC({
           clase,
@@ -248,6 +252,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           disponible_origen: disponibleOrigen,
           inventario_destino: inventarioDestino,
           consumo_destino: consumoDestino,
+          dias_inventario: diasInventario,
           necesidad,
           faltante,
           sugerido,
