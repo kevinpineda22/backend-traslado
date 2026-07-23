@@ -39,6 +39,10 @@ export async function obtenerDetalle(req, res, next) {
         codigo_item: item.codigo_item,
         descripcion: item.descripcion,
         unidad_medida: item.unidad_medida,
+        // factor: necesario para convertir a UND cuando el auditor cuenta en la
+        // unidad (pack) del ítem, ej: 9 P3 × factor 3 = 27 UND. Es un atributo
+        // del producto, NO revela cuánto despachó nadie: no rompe la ceguera.
+        factor: item.factor,
         cantidad_admin: item.cantidad_admin,
         categoria: item.categoria,
         // NOTA: cantidad_despachador y diferencia se ocultan intencionalmente
