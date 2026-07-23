@@ -81,17 +81,25 @@ export async function crear(payload) {
  * pendiente y el cron la reintenta (ver requisicion.service), pero la bodega no
  * se queda trabada esperando a SIESA.
  */
-export async function cambiarEstado(id, estado, firmaData) {
-  // Si hay firma, guardarla primero
+export async function cambiarEstado(id, estado, firmaData, despachadorId = null) {
+  // Candado de propiedad SOLO al cerrar la recolección (→ Recolectado): ese cierre
+  // es del despachador y dispara el envío a SIESA, así que no puede cerrarlo quien
+  // no reclamó el despacho. El resto de transiciones (auditor/admin) pasan sin el
+  // opt y conservan el comportamiento previo.
+  const ownerGuard = estado === "Recolectado" ? { despachadorId } : {};
+
+  // `updateStatus` valida la transición (En_recoleccion → Recolectado) y, con el
+  // ownerGuard, la propiedad — ANTES de guardar la firma, para no dejar una firma
+  // huérfana si el cierre es rechazado (403/409).
+  const actualizado = await DespachoModel.updateStatus(id, estado, ownerGuard);
+
+  // Recién con el estado ya avanzado, persistimos la firma. Esa validación de
+  // transición es también la primera barrera contra un doble envío a SIESA: un
+  // segundo intento de cerrar el mismo despacho no llega hasta acá abajo.
   if (firmaData) {
     const rol = estado === "Recolectado" ? "despachador" : "auditor";
     await FirmaModel.create({ despacho_id: id, rol, firma_data: firmaData });
   }
-
-  // `updateStatus` valida la transición (En_recoleccion → Recolectado). Esa
-  // validación es también la primera barrera contra un doble envío a SIESA: un
-  // segundo intento de cerrar el mismo despacho no llega hasta acá abajo.
-  const actualizado = await DespachoModel.updateStatus(id, estado);
 
   if (estado === "Recolectado") {
     try {
@@ -135,6 +143,14 @@ async function marcarRequisicionPendiente(id) {
  */
 export async function iniciarRecoleccion(id, despachadorId) {
   return DespachoModel.iniciarRecoleccion(id, despachadorId);
+}
+
+/**
+ * Verificar que un despachador puede escribir sobre la recolección de un despacho
+ * (existe, está En_recoleccion y es suyo). Candado de propiedad — ver el modelo.
+ */
+export async function assertPuedeRecolectar(despachoId, despachadorId) {
+  return DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
 }
 
 /**

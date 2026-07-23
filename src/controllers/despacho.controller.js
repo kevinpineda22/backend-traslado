@@ -139,8 +139,13 @@ export async function crear(req, res, next) {
  */
 export async function cambiarEstado(req, res, next) {
   try {
-    const { estado, firma_data } = req.body;
-    const data = await DespachoService.cambiarEstado(req.params.id, estado, firma_data);
+    const { estado, firma_data, despachador_id } = req.body;
+    const data = await DespachoService.cambiarEstado(
+      req.params.id,
+      estado,
+      firma_data,
+      despachador_id ?? null,
+    );
     res.json({ ok: true, data });
   } catch (error) {
     next(error);
@@ -170,11 +175,18 @@ export async function iniciarRecoleccion(req, res, next) {
 /**
  * POST /api/despachos/:id/recolectar
  * Registrar la recolección de un item por el despachador.
- * Body: { items: [{ id, cantidad, agotado? }] }
+ * Body: { items: [{ id, cantidad, agotado? }], despachador_id? }
  */
 export async function recolectar(req, res, next) {
   try {
-    const { items } = req.body;
+    const { items, despachador_id } = req.body;
+
+    // Candado de propiedad: el despacho debe estar En_recoleccion y ser de quien
+    // llama. Una sola verificación por lote (todos los ítems son del mismo
+    // despacho), ANTES de escribir nada — así un segundo despachador no pisa
+    // cantidades. Lanza 403/409/404 si no corresponde.
+    await DespachoService.assertPuedeRecolectar(req.params.id, despachador_id ?? null);
+
     const resultados = [];
 
     for (const item of items) {

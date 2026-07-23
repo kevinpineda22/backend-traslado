@@ -140,8 +140,20 @@ export async function create(payload) {
 
 /**
  * Actualizar el estado de un despacho validando la transición.
+ *
+ * @param {string} id
+ * @param {string} nuevoEstado
+ * @param {object} [opts]
+ * @param {string} [opts.despachadorId] - Si se pasa, exige que el despacho sea
+ *   de ese despachador (candado de propiedad). Se usa al CERRAR la recolección
+ *   (En_recoleccion → Recolectado): impide que un segundo despachador — lista
+ *   vieja, otra pestaña, el monitor — cierre un despacho que no reclamó. El
+ *   auditor y el admin llaman sin este opt y conservan el comportamiento previo.
+ *
+ * Atómico: el UPDATE se ata al estado leído (`.eq("estado", actual.estado)`), así
+ * dos cierres concurrentes no pasan los dos — el segundo no matchea y recibe 409.
  */
-export async function updateStatus(id, nuevoEstado) {
+export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   const TRANSICIONES = {
     Creado: ["En_recoleccion"],
     En_recoleccion: ["Recolectado"],
@@ -152,31 +164,101 @@ export async function updateStatus(id, nuevoEstado) {
     Recibido_con_inconsistencia: [],
   };
 
-  // Validar transición
+  // Leer estado + dueño actuales
   const { data: actual } = await supabase
     .from(TABLE)
-    .select("estado")
+    .select("estado, despachador_id")
     .eq("id", id)
     .single();
 
-  if (!actual) throw new Error("Despacho no encontrado");
+  if (!actual) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
 
   const permitidos = TRANSICIONES[actual.estado] ?? [];
   if (!permitidos.includes(nuevoEstado)) {
-    throw new Error(
+    const e = new Error(
       `Transición inválida: ${actual.estado} → ${nuevoEstado}. Permitidas: ${permitidos.join(", ") || "ninguna"}`,
     );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
   }
 
-  const { data, error } = await supabase
+  // Candado de propiedad: si se exige dueño y el despacho ya tiene uno distinto,
+  // no lo dejamos avanzar (403). No es autenticación real — el despachador_id
+  // viaja en el body y es falsificable — pero frena el choque ACCIDENTAL entre
+  // dos despachadores legítimos, que es el caso real. Blindaje contra spoofing
+  // llega con la auth real (ver roadmap del sistema).
+  if (despachadorId && actual.despachador_id && actual.despachador_id !== despachadorId) {
+    const e = new Error("Este despacho lo está gestionando otro despachador");
+    e.statusCode = 403;
+    e.expose = true;
+    throw e;
+  }
+
+  // UPDATE atómico: atado al estado leído (cierra la ventana TOCTOU) y, si se
+  // exige dueño, también al despachador_id.
+  let q = supabase
     .from(TABLE)
     .update({ estado: nuevoEstado, updated_at: new Date().toISOString() })
     .eq("id", id)
-    .select()
+    .eq("estado", actual.estado);
+  if (despachadorId) q = q.eq("despachador_id", despachadorId);
+
+  const { data, error } = await q.select().single();
+
+  if (error || !data) {
+    const e = new Error("El despacho cambió de estado o de dueño mientras se cerraba");
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  return data;
+}
+
+/**
+ * Candado de propiedad para las escrituras de recolección (`POST /recolectar`).
+ * Verifica que el despacho esté EN recolección y sea del despachador que llama.
+ * Impide que un segundo despachador (lista vieja, otra pestaña, el monitor, o el
+ * syncer offline de otra sesión) pise las cantidades de un despacho que no reclamó.
+ *
+ * Mismo alcance que updateStatus: frena el choque accidental entre despachadores
+ * legítimos; el spoofing lo cubre la auth real cuando llegue.
+ *
+ * @param {string} id
+ * @param {string} [despachadorId] - dueño esperado (correo del despachador)
+ * @throws 404 si no existe, 409 si no está En_recoleccion, 403 si no es el dueño
+ */
+export async function assertPuedeRecolectar(id, despachadorId) {
+  const { data: d, error } = await supabase
+    .from(TABLE)
+    .select("estado, despachador_id")
+    .eq("id", id)
     .single();
 
-  if (error) throw new Error(`Error al actualizar estado: ${error.message}`);
-  return data;
+  if (error || !d) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (d.estado !== "En_recoleccion") {
+    const e = new Error(`No se puede recolectar: el despacho está en estado ${d.estado}`);
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (despachadorId && d.despachador_id && d.despachador_id !== despachadorId) {
+    const e = new Error("Este despacho lo está recolectando otro despachador");
+    e.statusCode = 403;
+    e.expose = true;
+    throw e;
+  }
+  return d;
 }
 
 /**

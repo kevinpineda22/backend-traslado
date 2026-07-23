@@ -87,6 +87,9 @@ const confirmarSchema = z.object({
 // El tope superior (cantidad <= cantidad_admin) se valida en el modelo, contra
 // el valor guardado en la base — Zod no lo conoce en tiempo de request.
 const recolectarSchema = z.object({
+  // Dueño que escribe la recolección — el controller lo valida contra el despacho
+  // (candado de propiedad). Opcional para no romper clientes viejos; el front lo manda.
+  despachador_id: z.string().optional(),
   items: z
     .array(
       z.object({
