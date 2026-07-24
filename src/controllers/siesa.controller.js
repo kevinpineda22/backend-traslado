@@ -46,7 +46,7 @@ export async function refrescar(req, res, next) {
       return res.status(202).json({
         ok: true,
         disparado: true,
-        mensaje: "Actualización disparada. El inventario se refresca en 1-2 minutos.",
+        mensaje: "Actualización disparada. El inventario se refresca en ~5 minutos.",
       });
     }
 

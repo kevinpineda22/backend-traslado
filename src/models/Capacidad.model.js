@@ -96,21 +96,24 @@ export async function factoresDeItem(codigoItem) {
 export async function upsertBulk(items) {
   const ts = new Date().toISOString();
 
-  // Dedup por codigo_item: el Excel suele traer el mismo ítem repetido y un
-  // upsert con dos filas de la misma clave en el mismo batch rompe con
-  // "ON CONFLICT DO UPDATE command cannot affect row a second time" (500).
-  // Gana la última aparición (la fila de más abajo en el Excel).
-  // El Excel bulk carga la capacidad BASE (unidad ""). Las UM se asignan por ítem.
-  const porItem = new Map();
+  // Dedup por (codigo_item, unidad): el Excel puede traer el MISMO ítem con UM
+  // DISTINTAS (ej: CAJA y BULTO) → son filas separadas que NO se deben pisar. Un
+  // upsert con dos filas de la MISMA clave en el mismo batch rompe con "ON CONFLICT
+  // DO UPDATE command cannot affect row a second time" (500), por eso deduplicamos
+  // por la clave compuesta (código|unidad), igual que el alta manual.
+  // Sin columna UM en el Excel → unidad "" (fila base), como siempre.
+  const porClave = new Map();
   for (const i of items) {
     const codigo_item = normCodigo(i.codigo_item ?? i.item ?? "");
     if (!codigo_item) continue;
-    const fila = { codigo_item, unidad: "", capacidad: num(i.capacidad), updated_at: ts };
+    const unidad = String(i.unidad ?? i.um ?? "").trim(); // "" = fila base
+    const factor = unidad ? (Number(i.factor) > 0 ? Number(i.factor) : 1) : null;
+    const fila = { codigo_item, unidad, capacidad: num(i.capacidad), factor, updated_at: ts };
     const desc = i.descripcion != null ? String(i.descripcion).trim() : "";
     if (desc) fila.descripcion = desc; // solo si viene, para no pisar la existente
-    porItem.set(codigo_item, fila);
+    porClave.set(`${codigo_item}|${unidad}`, fila);
   }
-  const filas = Array.from(porItem.values());
+  const filas = Array.from(porClave.values());
 
   // Separar filas CON y SIN descripción y upsertarlas en tandas distintas.
   // Clave: PostgREST arma el set de columnas del UNIÓN de keys del batch, y en
