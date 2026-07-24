@@ -127,23 +127,41 @@ const trim = (v) => String(v ?? "").trim();
  * @returns {{item:string, bodega:string, cantidad:number}[]} faltantes, deduplicados por ítem
  */
 export function detectarFaltantes(siesaData) {
-  // SIESA devuelve este cuerpo de formas distintas según el content-type: array
-  // de objetos (lo esperado), pero también un STRING con ese array en JSON (axios
-  // NO lo parsea si el content-type no es application/json) o texto plano. Si solo
-  // contemplamos el array, un string nos deja con [] y el ajuste NUNCA dispara.
+  // Primero intentamos la lectura estructurada (rápida y precisa).
+  const estructurado = faltantesEstructurado(siesaData);
+  if (estructurado.length) return estructurado;
+
+  // Red de seguridad: SIESA envuelve el error de formas impredecibles
+  // ({ codigo, detalle: [...] }, { Errores: [...] }, string, texto plano...). En
+  // vez de perseguir cada forma, escaneamos el cuerpo ENTERO serializado: los
+  // literales "Item:..Bodega:.." y "Faltante Inv.: -N" están SIEMPRE presentes,
+  // sin importar el envoltorio. Si el estructurado ya encontró, este no corre.
+  return faltantesDesdeTexto(aTexto(siesaData));
+}
+
+/**
+ * Lectura estructurada del cuerpo de SIESA. Contempla array pelado, string JSON
+ * (axios no lo parsea si el content-type no es application/json), y el envoltorio
+ * `{ Errores | errores | detalle | Detalle: [...] }`. Devuelve [] si no matchea
+ * ninguna forma conocida — ahí entra el fallback por texto de detectarFaltantes.
+ */
+function faltantesEstructurado(siesaData) {
   let data = siesaData;
   if (typeof data === "string") {
     try {
       data = JSON.parse(data);
     } catch {
-      // No es JSON parseable: escaneamos el texto crudo, que igual trae los datos.
       return faltantesDesdeTexto(data);
     }
   }
 
   const arr = Array.isArray(data)
     ? data
-    : data?.Errores ?? data?.errores ?? (data ? [data] : []);
+    : data?.Errores ??
+      data?.errores ??
+      data?.detalle ?? // ← SIESA envuelve la respuesta bajo `detalle`
+      data?.Detalle ??
+      (data ? [data] : []);
   if (!Array.isArray(arr)) return [];
 
   const porItem = new Map();
