@@ -301,7 +301,14 @@ export async function importarRequisicion(despacho) {
   });
 
   if (status >= 400 || !respuestaOk(data)) {
-    throw new Error(`SIESA rechazó la requisición [HTTP ${status}]: ${detalleError(data)}`);
+    const err = new Error(
+      `SIESA rechazó la requisición [HTTP ${status}]: ${detalleError(data)}`,
+    );
+    // Adjuntamos la respuesta cruda para que el orquestador decida si el rechazo
+    // es un faltante de stock ajustable (registro 470) sin re-parsear el mensaje.
+    err.siesaData = data;
+    err.httpStatus = status;
+    throw err;
   }
 
   return {

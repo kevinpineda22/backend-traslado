@@ -66,7 +66,7 @@ function setCache(key, data) {
   }
 }
 
-async function ejecutarConsultaEstandar({ descripcion, parametros }, page = 1) {
+export async function ejecutarConsultaEstandar({ descripcion, parametros }, page = 1) {
   let intento = 0;
   const maxIntentos = 4;
   while (intento < maxIntentos) {

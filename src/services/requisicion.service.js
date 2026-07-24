@@ -7,6 +7,11 @@ import {
   ConfigSiesaError,
   configFaltante,
 } from "./siesaRequisicion.service.js";
+import {
+  importarAjuste,
+  detectarFaltantes,
+  ajusteAutoHabilitado,
+} from "./siesaAjuste.service.js";
 
 /* =============================================
    Orquestación del envío de requisiciones a SIESA
@@ -38,6 +43,74 @@ const lockDe = (despachoId) => `siesa:requisicion:${despachoId}`;
 async function marcar(despachoId, patch) {
   const { error } = await supabase.from(TABLE).update(patch).eq("id", despachoId);
   if (error) console.error(`[requisicion] no se pudo marcar ${despachoId}:`, error.message);
+}
+
+/**
+ * Importa la requisición y, si SIESA la rechaza por FALTANTE DE STOCK y el ajuste
+ * automático está habilitado, inserta las unidades faltantes con un ajuste de
+ * entrada y reintenta el traslado UNA vez.
+ *
+ * Idempotencia del ajuste (defensa contra inventario fantasma duplicado):
+ *   - El ajuste es un write al ERP. Solo se hace si `siesa_ajuste_estado` NO es
+ *     'hecho'. Una vez hecho, jamás se repite: si el traslado sigue fallando por
+ *     faltante tras un ajuste previo, se corta y se avisa (necesita ojo humano).
+ *   - Corre DENTRO del lock del despacho (lo toma `enviarRequisicion`), así que
+ *     no hay dos ajustes simultáneos para el mismo despacho.
+ *
+ * Devuelve lo mismo que `importarRequisicion`, o lanza (lo maneja el catch de
+ * `enviarRequisicion`, que marca la requisición pendiente/fallida como siempre).
+ *
+ * @param {object} despacho - cabecera + items (recién leído de la BD)
+ */
+async function enviarConAjusteAutomatico(despacho) {
+  try {
+    return await importarRequisicion(despacho);
+  } catch (err) {
+    if (!ajusteAutoHabilitado()) throw err;
+
+    const faltantes = detectarFaltantes(err.siesaData);
+    if (!faltantes.length) throw err; // el rechazo NO es por falta de stock
+
+    if (despacho.siesa_ajuste_estado === "hecho") {
+      // Ya insertamos stock antes y SIGUE rechazando por faltante. No re-ajustamos
+      // (duplicaría inventario). Puede ser otro ítem o un ajuste anterior corto.
+      throw new Error(
+        `El traslado sigue sin stock tras un ajuste ya hecho: ${err.message}. ` +
+          "No se re-ajusta para no duplicar inventario — revisar manualmente.",
+      );
+    }
+
+    let aj;
+    try {
+      aj = await importarAjuste(despacho, faltantes);
+    } catch (e) {
+      await marcar(despacho.id, {
+        siesa_ajuste_estado: "fallido",
+        siesa_ajuste_error: String(e.message).slice(0, 1000),
+      });
+      throw new Error(`Ajuste de inventario falló: ${e.message}`);
+    }
+
+    await marcar(despacho.id, {
+      siesa_ajuste_estado: "hecho",
+      siesa_ajuste_docto: aj.docto || null,
+      siesa_ajuste_at: new Date().toISOString(),
+      siesa_ajuste_payload: aj.payload || null,
+      siesa_ajuste_error: null,
+    });
+    // Y en el objeto en memoria, por si algo lo relee en esta misma pasada.
+    despacho.siesa_ajuste_estado = "hecho";
+
+    const itemsTxt = faltantes.map((f) => `${f.item}×${f.cantidad}`).join(", ");
+    console.log(
+      `[requisicion] 🩹 despacho ${despacho.id}: ajuste de entrada hecho (docto ${
+        aj.docto || "s/n"
+      }; ${itemsTxt}). Reintentando el traslado.`,
+    );
+
+    // Reintento único: si vuelve a fallar, cae al catch de enviarRequisicion.
+    return await importarRequisicion(despacho);
+  }
 }
 
 /**
@@ -112,7 +185,7 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     if (!reservado) return { estado: "omitido", motivo: "ya enviado (carrera)" };
 
     try {
-      const r = await importarRequisicion(despacho);
+      const r = await enviarConAjusteAutomatico(despacho);
 
       if (r.vacio) {
         // Despacho sin nada recolectado: no hay requisición que crear.
