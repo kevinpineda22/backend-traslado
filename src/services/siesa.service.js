@@ -100,9 +100,12 @@ export async function getProductosTraslado({ origen, destino }) {
 
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
-      const inventarioOrigen = o ? num(o.disponible) : 0;
-      const disponibleOrigen = o ? num(o.disponible) : 0;
-      const inventarioDestino = d ? num(d.disponible) : 0;
+      // Ojo: CantidadDisponible puede venir NEGATIVA (cuando cant_pos_1 > existencia).
+      // Un inventario negativo inflaría el sugerido (objetivo − (−x) = objetivo + x),
+      // así que lo acotamos a 0: no puede haber "menos que nada" de stock.
+      const inventarioOrigen = o ? Math.max(0, num(o.disponible)) : 0;
+      const disponibleOrigen = o ? Math.max(0, num(o.disponible)) : 0;
+      const inventarioDestino = d ? Math.max(0, num(d.disponible)) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
       const periodoCubrimiento =
         periodoOverride != null
@@ -217,9 +220,12 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       if (!catLlano) continue;
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
-      const inventarioOrigen = o ? num(o.disponible) : 0;
-      const disponibleOrigen = o ? num(o.disponible) : 0;
-      const inventarioDestino = d ? num(d.disponible) : 0;
+      // Ojo: CantidadDisponible puede venir NEGATIVA (cuando cant_pos_1 > existencia).
+      // Un inventario negativo inflaría el sugerido (objetivo − (−x) = objetivo + x),
+      // así que lo acotamos a 0: no puede haber "menos que nada" de stock.
+      const inventarioOrigen = o ? Math.max(0, num(o.disponible)) : 0;
+      const disponibleOrigen = o ? Math.max(0, num(o.disponible)) : 0;
+      const inventarioDestino = d ? Math.max(0, num(d.disponible)) : 0;
       const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
       // Variantes a emitir: si el ítem tiene UM asignadas → una fila POR UM
@@ -317,8 +323,8 @@ export async function getDisponibilidadItem({ codigo, destino }) {
     for (const r of rows) porBodega.set(trim(r.bodega), r);
 
     const d = porBodega.get(trim(destino));
-    // "Inventario" = disponible (existencia − comprometida), igual que en las tablas.
-    const inventarioDestino = d ? num(d.disponible) : 0;
+    // Disponible acotado a 0 (puede venir negativo) — igual que en las tablas.
+    const inventarioDestino = d ? Math.max(0, num(d.disponible)) : 0;
     const consumoDestino = d ? num(d.consumo_promedio) : 0;
 
     // Necesidad (sin tope de origen) según el flujo del destino.
