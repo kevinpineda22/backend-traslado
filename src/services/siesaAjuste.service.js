@@ -105,13 +105,33 @@ const trim = (v) => String(v ?? "").trim();
  * @returns {{item:string, bodega:string, cantidad:number}[]} faltantes, deduplicados por ítem
  */
 export function detectarFaltantes(siesaData) {
-  const arr = Array.isArray(siesaData)
-    ? siesaData
-    : siesaData?.Errores ?? siesaData?.errores ?? [];
+  // SIESA devuelve este cuerpo de formas distintas según el content-type: array
+  // de objetos (lo esperado), pero también un STRING con ese array en JSON (axios
+  // NO lo parsea si el content-type no es application/json) o texto plano. Si solo
+  // contemplamos el array, un string nos deja con [] y el ajuste NUNCA dispara.
+  let data = siesaData;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      // No es JSON parseable: escaneamos el texto crudo, que igual trae los datos.
+      return faltantesDesdeTexto(data);
+    }
+  }
+
+  const arr = Array.isArray(data)
+    ? data
+    : data?.Errores ?? data?.errores ?? (data ? [data] : []);
   if (!Array.isArray(arr)) return [];
 
   const porItem = new Map();
   for (const e of arr) {
+    // Una entrada puede venir ella misma como string (array de strings).
+    if (typeof e === "string") {
+      for (const f of faltantesDesdeTexto(e)) acumularFaltante(porItem, f);
+      continue;
+    }
+
     const detalle = String(e?.f_detalle ?? e?.detalle ?? "");
     const esFaltante =
       /sin cantidad disponible/i.test(detalle) || String(e?.f_tipo_reg) === "470";
@@ -124,13 +144,38 @@ export function detectarFaltantes(siesaData) {
     const fm = /Faltante\s*Inv\.?:\s*-?\s*([\d.]+)/i.exec(detalle);
     const cantidad = fm ? Math.abs(Number(fm[1])) : 0;
 
-    if (!item || !(cantidad > 0)) continue;
-    // Un mismo ítem no debería repetirse, pero si repite nos quedamos con el
-    // faltante MAYOR: insertar de menos dejaría el traslado rechazado igual.
-    const prev = porItem.get(item);
-    if (!prev || cantidad > prev.cantidad) porItem.set(item, { item, bodega, cantidad });
+    acumularFaltante(porItem, { item, bodega, cantidad });
   }
   return [...porItem.values()];
+}
+
+/**
+ * Extrae faltantes de un texto plano (fallback cuando el cuerpo no es JSON).
+ * Cada faltante trae "Item:<code>Bodega:<bod>" y, más adelante en la misma
+ * entrada, "Faltante Inv.: -<N>". Los ítems y los faltantes salen en el MISMO
+ * orden (uno por registro 470), así que los emparejamos por índice.
+ */
+function faltantesDesdeTexto(txt) {
+  const s = String(txt || "");
+  const items = [...s.matchAll(/Item:\s*(.*?)\s*Bodega:\s*([A-Za-z0-9]+)/gi)];
+  const falts = [...s.matchAll(/Faltante\s*Inv\.?:\s*-?\s*([\d.]+)/gi)];
+  const porItem = new Map();
+  items.forEach((m, i) => {
+    const cantidad = falts[i] ? Math.abs(Number(falts[i][1])) : 0;
+    acumularFaltante(porItem, { item: m[1]?.trim(), bodega: m[2]?.trim(), cantidad });
+  });
+  return [...porItem.values()];
+}
+
+/**
+ * Suma un faltante al mapa por ítem. Un mismo ítem no debería repetirse, pero si
+ * repite nos quedamos con el faltante MAYOR: insertar de menos dejaría el traslado
+ * rechazado igual. Ignora ítems vacíos o con cantidad no positiva.
+ */
+function acumularFaltante(porItem, { item, bodega, cantidad }) {
+  if (!item || !(cantidad > 0)) return;
+  const prev = porItem.get(item);
+  if (!prev || cantidad > prev.cantidad) porItem.set(item, { item, bodega, cantidad });
 }
 
 /**

@@ -66,9 +66,16 @@ async function enviarConAjusteAutomatico(despacho) {
   try {
     return await importarRequisicion(despacho);
   } catch (err) {
-    if (!ajusteAutoHabilitado()) throw err;
+    const autoOn = ajusteAutoHabilitado();
+    const faltantes = autoOn ? detectarFaltantes(err.siesaData) : [];
+    // Log conclusivo: dice si el flag está prendido y cuántos faltantes se
+    // detectaron. Si autoOn=false → falta la env var; si autoOn=true y
+    // faltantes=0 → el rechazo no es por stock (o no se pudo parsear la respuesta).
+    console.log(
+      `[requisicion] despacho ${despacho.id}: rechazo SIESA — ajusteAuto=${autoOn}, faltantes=${faltantes.length}`,
+    );
 
-    const faltantes = detectarFaltantes(err.siesaData);
+    if (!autoOn) throw err;
     if (!faltantes.length) throw err; // el rechazo NO es por falta de stock
 
     if (despacho.siesa_ajuste_estado === "hecho") {
