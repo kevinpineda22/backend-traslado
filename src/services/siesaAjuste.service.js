@@ -395,16 +395,18 @@ export function configAjusteFaltante(sede) {
  */
 export function armarPayloadAjuste({ bodega, co, fecha, lineas }) {
   const documento = {
-    // El conector 250295 exige el consecutivo en Documentos por su nombre crudo.
-    // 0 = lo asigna SIESA (F_CONSEC_AUTO_REG = 1, horneado en el conector).
-    f350_consec_docto: 0,
+    // El conector 250295 exige el consecutivo en Documentos por su nombre crudo,
+    // y espera los valores como STRING (igual que el resto del body). "0" = lo
+    // asigna SIESA (F_CONSEC_AUTO_REG = 1, horneado en el conector).
+    f350_consec_docto: "0",
     FECHA_DOCTO: fecha,
     BODEGA: bodega,
   };
 
   const movimientos = lineas.map((l, i) => ({
-    // Consecutivo en 0: el conector va con F_CONSEC_AUTO_REG = 1, lo asigna SIESA.
-    consec_docto: 0,
+    // Consecutivo en "0": el conector va con F_CONSEC_AUTO_REG = 1, lo asigna SIESA.
+    // Como string, igual que el resto del body (ver documento arriba).
+    consec_docto: "0",
     nro_registro: String(i + 1),
     BODEGA: bodega,
     "C.O MOVIMIENTO": co,
