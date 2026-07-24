@@ -1,6 +1,6 @@
 import axios from "axios";
 import "dotenv/config";
-import { ejecutarConsultaEstandar } from "./siesaStock.service.js";
+import { ejecutarConsulta } from "../config/connekta.js";
 import { resolverCO, fechaSiesa } from "./siesaRequisicion.service.js";
 
 /* =============================================
@@ -113,33 +113,32 @@ const trim = (v) => String(v ?? "").trim();
 
 /**
  * Probe read-only de la consulta de costo (para GET /siesa/ajuste/estado?probe=ITEM).
- * Ejecuta la consulta estándar y devuelve el resultado O el error CRUDO de SIESA
- * (status + cuerpo), sin envolverlo. Sirve para diagnosticar un 401/403/400 sin
- * tener que bucear los logs. Es un SELECT: no escribe nada en el ERP.
+ * Usa el endpoint DINÁMICO (que es el correcto para esta consulta). Construye el
+ * mapa completo y reporta el total, cuántos ítems quedaron y el dato del ítem
+ * consultado. Es un SELECT: no escribe nada en el ERP.
  */
 export async function probarConsultaCosto(item) {
   const codigo = trim(item);
   try {
-    const filas = await ejecutarConsultaEstandar({
-      descripcion: cfg.consultaCosto(),
-      parametros: `${cfg.paramItem()}=${codigo}`,
-    });
+    const cache = await refrescarMapaCostos();
+    const hit = cache.mapa.get(codigo) || null;
     return {
       ok: true,
       consulta: cfg.consultaCosto(),
-      param: `${cfg.paramItem()}=${codigo}`,
-      filas: Array.isArray(filas) ? filas.length : 0,
-      muestra: (Array.isArray(filas) ? filas : []).slice(0, 2),
+      endpoint: "dinamica",
+      totalRegistros: cache.total,
+      paginasLeidas: cache.paginas,
+      filasValidas: cache.filas,
+      itemsEnMapa: cache.mapa.size,
+      item: codigo,
+      encontrado: hit,
     };
   } catch (e) {
-    const raw = e.response?.data;
     return {
       ok: false,
       consulta: cfg.consultaCosto(),
-      param: `${cfg.paramItem()}=${codigo}`,
-      status: e.response?.status ?? null,
-      statusText: e.response?.statusText ?? null,
-      body: typeof raw === "string" ? raw.slice(0, 600) : raw ?? null,
+      endpoint: "dinamica",
+      item: codigo,
       message: e.message,
     };
   }
@@ -252,17 +251,79 @@ function acumularFaltante(porItem, { item, bodega, cantidad }) {
   if (!prev || cantidad > prev.cantidad) porItem.set(item, { item, bodega, cantidad });
 }
 
+/* ── Mapa de costos (consulta DINÁMICA, cacheado) ────────────────────────────
+   `merkahorro_costo_promedio_dev` es una consulta DINÁMICA (la crearon ellos),
+   y las dinámicas NO aceptan parámetros por ítem: devuelven el dataset entero
+   paginado (ver docs/ARQUITECTURA.md y config/connekta.js). Así que traemos TODO
+   una vez, armamos un mapa item→{costo, unidadNegocio} y lo cacheamos. Los ajustes
+   son raros y el costo cambia lento, así que un TTL largo alcanza y sobra. */
+const COSTO_TTL_MS = Number(process.env.SIESA_AJUSTE_COSTO_TTL_MS) || 6 * 60 * 60 * 1000;
+const COSTO_TAM_PAG = Number(process.env.SIESA_AJUSTE_COSTO_TAMPAG) || 1000;
+const COSTO_MAX_PAGINAS = Number(process.env.SIESA_AJUSTE_COSTO_MAX_PAGINAS) || 300;
+
+let _costoCache = { mapa: null, time: 0, total: 0, filas: 0, paginas: 0 };
+
 /**
- * Costo + unidad de negocio de cada ítem, desde `merkahorro_costo_promedio_dev`.
- *
- * Esa consulta devuelve una fila por INSTALACIÓN del ítem, y en este ERP la
- * instalación (`IdInstalacion` = 001/002/003) ES la unidad de negocio. Por eso el
- * costo y la unidad de negocio salen SIEMPRE de la misma fila: son coherentes por
- * construcción.
- *
- * Si un ítem tiene varias instalaciones, tomamos la de MAYOR costo (valuación
- * conservadora: mejor sobrevaluar un ajuste técnico que subvaluarlo). El override
- * `SIESA_AJUSTE_UNIDAD_NEGOCIO` fuerza una unidad de negocio fija si hiciera falta.
+ * Acumula filas al mapa item→{costo, unidadNegocio}. La consulta trae una fila por
+ * INSTALACIÓN, y acá la instalación (`IdInstalacion` = 001/002/003) ES la unidad de
+ * negocio → costo y unidad de negocio salen de la MISMA fila. Si un ítem tiene
+ * varias instalaciones, nos quedamos con la de MAYOR costo (valuación conservadora).
+ */
+function acumularCostos(mapa, rows, fija) {
+  let n = 0;
+  for (const r of rows || []) {
+    const item = trim(r.IdItem);
+    const costo = Number(r.CostoPromInst);
+    if (!item || !Number.isFinite(costo)) continue;
+    n += 1;
+    const prev = mapa.get(item);
+    if (!prev || costo > prev.costo) {
+      mapa.set(item, { costo, unidadNegocio: fija || trim(r.IdInstalacion) });
+    }
+  }
+  return n;
+}
+
+/**
+ * Carga (o reusa de caché) el mapa completo de costos. Pagina toda la consulta
+ * dinámica una sola vez por TTL.
+ */
+async function cargarMapaCostos({ force = false } = {}) {
+  if (!force && _costoCache.mapa && Date.now() - _costoCache.time < COSTO_TTL_MS) {
+    return _costoCache;
+  }
+  const fija = cfg.unidadNegocioFija();
+  const mapa = new Map();
+  let filas = 0;
+
+  const primera = await ejecutarConsulta(cfg.consultaCosto(), 1, COSTO_TAM_PAG);
+  filas += acumularCostos(mapa, primera.datos, fija);
+
+  const limite = Math.min(primera.totalPaginas || 1, COSTO_MAX_PAGINAS);
+  for (let pag = 2; pag <= limite; pag++) {
+    const page = await ejecutarConsulta(cfg.consultaCosto(), pag, COSTO_TAM_PAG);
+    filas += acumularCostos(mapa, page.datos, fija);
+  }
+
+  _costoCache = {
+    mapa,
+    time: Date.now(),
+    total: primera.total || 0,
+    filas,
+    paginas: limite,
+  };
+  return _costoCache;
+}
+
+/** Fuerza recarga del mapa de costos (para probes / diagnóstico). */
+export async function refrescarMapaCostos() {
+  return cargarMapaCostos({ force: true });
+}
+
+/**
+ * Costo + unidad de negocio de cada ítem, del mapa cacheado de la consulta dinámica.
+ * Si un ítem no está en el mapa, usa `SIESA_AJUSTE_COSTO_DEFAULT` si está configurado;
+ * si no, lanza (no inventamos un costo para escribir en el ERP).
  *
  * @param {string[]} items
  * @returns {Promise<Record<string,{costo:number, unidadNegocio:string}>>}
@@ -271,34 +332,19 @@ export async function getDatosItems(items) {
   const unicos = [...new Set((items || []).map(trim).filter(Boolean))];
   const fija = cfg.unidadNegocioFija();
   const porDefecto = cfg.costoDefault();
+
+  let mapa;
+  try {
+    ({ mapa } = await cargarMapaCostos());
+  } catch (e) {
+    throw new Error(`No se pudo consultar el costo (${cfg.consultaCosto()}): ${e.message}`);
+  }
+
   const out = {};
-
   for (const item of unicos) {
-    let filas = [];
-    try {
-      filas = await ejecutarConsultaEstandar({
-        descripcion: cfg.consultaCosto(),
-        parametros: `${cfg.paramItem()}=${item}`,
-      });
-    } catch (e) {
-      throw new Error(`No se pudo consultar el costo del ítem ${item}: ${e.message}`);
-    }
-
-    // La consulta puede ignorar el parámetro y devolver el catálogo entero —
-    // filtramos por IdItem por las dudas.
-    const propias = (filas || []).filter((r) => trim(r.IdItem) === item);
-    // Fila de mayor costo → de ahí salen costo Y unidad de negocio (misma fila).
-    let mejor = null;
-    for (const r of propias) {
-      const costo = Number(r.CostoPromInst);
-      if (!Number.isFinite(costo)) continue;
-      if (!mejor || costo > mejor.costo) {
-        mejor = { costo, unidadNegocio: fija || trim(r.IdInstalacion) };
-      }
-    }
-
-    if (mejor) {
-      out[item] = mejor;
+    const hit = mapa.get(item);
+    if (hit) {
+      out[item] = hit;
     } else if (porDefecto != null) {
       out[item] = { costo: porDefecto, unidadNegocio: fija };
     } else {
