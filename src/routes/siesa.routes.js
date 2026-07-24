@@ -15,6 +15,9 @@ router.get("/estado", SiesaController.estado);
 router.get("/refresh", SiesaController.refrescar);
 router.post("/refresh", SiesaController.refrescar);
 
+// Diagnóstico read-only del ajuste automático de inventario.
+router.get("/ajuste/estado", SiesaController.estadoAjusteCtrl);
+
 // Requisiciones importadas a SIESA al cerrar un despacho.
 router.get("/requisiciones/estado", SiesaController.estadoRequisicionesCtrl);
 router.get("/requisiciones/reintentar", SiesaController.reintentarRequisiciones);

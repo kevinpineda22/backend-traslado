@@ -87,6 +87,28 @@ export function ajusteAutoHabilitado() {
   );
 }
 
+/**
+ * Estado de la config del ajuste, para diagnóstico read-only (GET /siesa/ajuste/estado).
+ * Existe por la misma razón que /health/email: "la variable está cargada en Vercel"
+ * NO es lo mismo que "el runtime la ve". `envAutoRaw` muestra EXACTAMENTE qué llega
+ * a process.env — si es null, la env var no está atada a este deployment.
+ * No expone secretos (keys/tokens quedan afuera).
+ */
+export function estadoAjusteConfig(sede = "PV001") {
+  return {
+    autoHabilitado: ajusteAutoHabilitado(),
+    envAutoRaw: process.env.SIESA_AJUSTE_AUTO ?? null,
+    idDocumento: cfg.idDocumento(),
+    nombreDocumento: cfg.nombreDocumento(),
+    idSistema: cfg.idSistema(),
+    unidadMedida: cfg.unidadMedida(),
+    unidadNegocioFija: cfg.unidadNegocioFija() || null,
+    consultaCosto: cfg.consultaCosto(),
+    paramItem: cfg.paramItem(),
+    configFalta: configAjusteFaltante(sede),
+  };
+}
+
 const trim = (v) => String(v ?? "").trim();
 
 /**

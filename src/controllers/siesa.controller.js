@@ -1,5 +1,6 @@
 import * as SiesaService from "../services/siesa.service.js";
 import { getStockLote } from "../services/siesaStock.service.js";
+import { estadoAjusteConfig } from "../services/siesaAjuste.service.js";
 import {
   reintentarPendientes,
   estadoRequisiciones,
@@ -124,6 +125,16 @@ export async function estadoRequisicionesCtrl(_req, res, next) {
   } catch (error) {
     next(error);
   }
+}
+
+/**
+ * GET /api/siesa/ajuste/estado
+ * Diagnóstico read-only: qué ve el runtime respecto del ajuste automático.
+ * Clave `envAutoRaw` — si es null, SIESA_AJUSTE_AUTO no está atada a este deploy.
+ */
+export function estadoAjusteCtrl(req, res) {
+  const sede = String(req.query.sede || "PV001").trim();
+  res.json({ ok: true, data: estadoAjusteConfig(sede) });
 }
 
 /**
