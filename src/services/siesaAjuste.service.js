@@ -112,6 +112,14 @@ export function estadoAjusteConfig(sede = "PV001") {
 const trim = (v) => String(v ?? "").trim();
 
 /**
+ * Clave canónica de ítem para cruzar el costo. La consulta de costo guarda el
+ * `IdItem` SIN ceros a la izquierda ("15312") mientras que el faltante de SIESA
+ * viene CON ceros ("0015312"). Normalizamos ambos lados sacando los ceros para que
+ * crucen. (El código que se manda al conector sigue siendo el original con ceros.)
+ */
+const normItem = (v) => trim(v).replace(/^0+/, "") || "0";
+
+/**
  * Probe read-only de la consulta de costo (para GET /siesa/ajuste/estado?probe=ITEM).
  * Usa el endpoint DINÁMICO (que es el correcto para esta consulta). Construye el
  * mapa completo y reporta el total, cuántos ítems quedaron y el dato del ítem
@@ -121,26 +129,7 @@ export async function probarConsultaCosto(item) {
   const codigo = trim(item);
   try {
     const cache = await refrescarMapaCostos();
-    const hit = cache.mapa.get(codigo) || null;
-
-    // Si no matchea directo, probamos normalizaciones de ceros a la izquierda para
-    // detectar un desajuste de formato (codigo_item vs v121_id_item).
-    let matchVariante = null;
-    if (!hit) {
-      const sinCeros = codigo.replace(/^0+/, "");
-      const variantes = [
-        sinCeros,
-        sinCeros.padStart(6, "0"),
-        sinCeros.padStart(7, "0"),
-        sinCeros.padStart(8, "0"),
-      ];
-      for (const v of variantes) {
-        if (v !== codigo && cache.mapa.get(v)) {
-          matchVariante = { variante: v, dato: cache.mapa.get(v) };
-          break;
-        }
-      }
-    }
+    const hit = cache.mapa.get(normItem(codigo)) || null;
 
     return {
       ok: true,
@@ -151,9 +140,8 @@ export async function probarConsultaCosto(item) {
       filasValidas: cache.filas,
       itemsEnMapa: cache.mapa.size,
       item: codigo,
+      claveNormalizada: normItem(codigo),
       encontrado: hit,
-      matchVariante,
-      muestraKeys: [...cache.mapa.keys()].slice(0, 8),
     };
   } catch (e) {
     return {
@@ -294,7 +282,7 @@ let _costoCache = { mapa: null, time: 0, total: 0, filas: 0, paginas: 0 };
 function acumularCostos(mapa, rows, fija) {
   let n = 0;
   for (const r of rows || []) {
-    const item = trim(r.IdItem);
+    const item = normItem(r.IdItem);
     const costo = Number(r.CostoPromInst);
     if (!item || !Number.isFinite(costo)) continue;
     n += 1;
@@ -364,7 +352,7 @@ export async function getDatosItems(items) {
 
   const out = {};
   for (const item of unicos) {
-    const hit = mapa.get(item);
+    const hit = mapa.get(normItem(item));
     if (hit) {
       out[item] = hit;
     } else if (porDefecto != null) {
