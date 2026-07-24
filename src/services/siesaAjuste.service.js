@@ -112,6 +112,40 @@ export function estadoAjusteConfig(sede = "PV001") {
 const trim = (v) => String(v ?? "").trim();
 
 /**
+ * Probe read-only de la consulta de costo (para GET /siesa/ajuste/estado?probe=ITEM).
+ * Ejecuta la consulta estándar y devuelve el resultado O el error CRUDO de SIESA
+ * (status + cuerpo), sin envolverlo. Sirve para diagnosticar un 401/403/400 sin
+ * tener que bucear los logs. Es un SELECT: no escribe nada en el ERP.
+ */
+export async function probarConsultaCosto(item) {
+  const codigo = trim(item);
+  try {
+    const filas = await ejecutarConsultaEstandar({
+      descripcion: cfg.consultaCosto(),
+      parametros: `${cfg.paramItem()}=${codigo}`,
+    });
+    return {
+      ok: true,
+      consulta: cfg.consultaCosto(),
+      param: `${cfg.paramItem()}=${codigo}`,
+      filas: Array.isArray(filas) ? filas.length : 0,
+      muestra: (Array.isArray(filas) ? filas : []).slice(0, 2),
+    };
+  } catch (e) {
+    const raw = e.response?.data;
+    return {
+      ok: false,
+      consulta: cfg.consultaCosto(),
+      param: `${cfg.paramItem()}=${codigo}`,
+      status: e.response?.status ?? null,
+      statusText: e.response?.statusText ?? null,
+      body: typeof raw === "string" ? raw.slice(0, 600) : raw ?? null,
+      message: e.message,
+    };
+  }
+}
+
+/**
  * Detecta qué ítems rechazó SIESA por "sin cantidad disponible" y cuánto falta.
  *
  * SIESA devuelve un array de errores; cada faltante es un registro tipo 470 con:

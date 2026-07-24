@@ -1,6 +1,6 @@
 import * as SiesaService from "../services/siesa.service.js";
 import { getStockLote } from "../services/siesaStock.service.js";
-import { estadoAjusteConfig } from "../services/siesaAjuste.service.js";
+import { estadoAjusteConfig, probarConsultaCosto } from "../services/siesaAjuste.service.js";
 import {
   reintentarPendientes,
   estadoRequisiciones,
@@ -132,9 +132,17 @@ export async function estadoRequisicionesCtrl(_req, res, next) {
  * Diagnóstico read-only: qué ve el runtime respecto del ajuste automático.
  * Clave `envAutoRaw` — si es null, SIESA_AJUSTE_AUTO no está atada a este deploy.
  */
-export function estadoAjusteCtrl(req, res) {
-  const sede = String(req.query.sede || "PV001").trim();
-  res.json({ ok: true, data: estadoAjusteConfig(sede) });
+export async function estadoAjusteCtrl(req, res, next) {
+  try {
+    const sede = String(req.query.sede || "PV001").trim();
+    const data = estadoAjusteConfig(sede);
+    // ?probe=ITEM → ejecuta la consulta de costo y adjunta el resultado/error crudo.
+    const probe = String(req.query.probe || "").trim();
+    if (probe) data.probeCosto = await probarConsultaCosto(probe);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
 }
 
 /**
