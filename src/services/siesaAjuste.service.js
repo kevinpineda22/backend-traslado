@@ -122,6 +122,26 @@ export async function probarConsultaCosto(item) {
   try {
     const cache = await refrescarMapaCostos();
     const hit = cache.mapa.get(codigo) || null;
+
+    // Si no matchea directo, probamos normalizaciones de ceros a la izquierda para
+    // detectar un desajuste de formato (codigo_item vs v121_id_item).
+    let matchVariante = null;
+    if (!hit) {
+      const sinCeros = codigo.replace(/^0+/, "");
+      const variantes = [
+        sinCeros,
+        sinCeros.padStart(6, "0"),
+        sinCeros.padStart(7, "0"),
+        sinCeros.padStart(8, "0"),
+      ];
+      for (const v of variantes) {
+        if (v !== codigo && cache.mapa.get(v)) {
+          matchVariante = { variante: v, dato: cache.mapa.get(v) };
+          break;
+        }
+      }
+    }
+
     return {
       ok: true,
       consulta: cfg.consultaCosto(),
@@ -132,6 +152,8 @@ export async function probarConsultaCosto(item) {
       itemsEnMapa: cache.mapa.size,
       item: codigo,
       encontrado: hit,
+      matchVariante,
+      muestraKeys: [...cache.mapa.keys()].slice(0, 8),
     };
   } catch (e) {
     return {
