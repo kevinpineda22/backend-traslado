@@ -7,6 +7,28 @@ const TABLE = "traslados_items";
 export const MOTIVOS_FALTANTE = ["sin_stock", "surtido_parcial", "inventario_inflado"];
 
 /**
+ * Canonicalización a UND de lo que despachó el despachador.
+ *
+ * El despachador guarda la cantidad EN LA UNIDAD del renglón (un ítem son varios
+ * renglones, uno por UM, y cada UM tiene su propio factor), así que el número
+ * crudo no es comparable con nada. `cantidad_despachador × factor` da SIEMPRE el
+ * total real en UND, que es la unidad en la que el auditor guarda su conteo.
+ *
+ * Sin esto, un renglón en P48 con cantidad_despachador=2 (96 UND reales) contra un
+ * auditor que contó 96 daba diferencia 94 en vez de 0.
+ *
+ * El fallback a 1 cubre `factor` nulo o 0: la columna es `numeric(12,4) default 1`
+ * pero es nullable, y un factor 0 anularía la cantidad. Misma defensa que usan
+ * `compararAuditoria` y `filasComparativo`.
+ *
+ * @param {{cantidad_despachador?: number, factor?: number}} item
+ * @returns {number} total despachado en UND
+ */
+export function despachadoEnUnd(item) {
+  return (Number(item?.cantidad_despachador) || 0) * (Number(item?.factor) || 1);
+}
+
+/**
  * Estadísticas de motivos de faltante para el dashboard: por cada motivo, cuántas
  * veces ocurrió, cuántos ítems distintos lo tienen, y el ranking de ítems que más
  * lo repiten. Sirve para ver qué productos fallan más y cómo está el inventario.
@@ -152,6 +174,10 @@ export async function resetRecoleccionByDespacho(despachoId) {
  * despachador. Queda marcado con `agregado_por_auditor = true`, sin cantidad del
  * admin/despachador (0), y con la diferencia = lo que contó el auditor (todo sobrante).
  *
+ * Acá NO hace falta `despachadoEnUnd`: no se despachó nada (cantidad_despachador 0),
+ * así que el factor no participa y la diferencia es el conteo del auditor, que ya
+ * viene en UND. No "corregir" esto multiplicando por factor.
+ *
  * @param {string} despachoId
  * @param {object} item - { codigo_item, descripcion, unidad_medida, cantidad_auditor }
  */
@@ -185,13 +211,14 @@ export async function insertItemAuditor(despachoId, item) {
 export async function marcarNoRecibido(itemId) {
   const { data: item } = await supabase
     .from(TABLE)
-    .select("cantidad_despachador")
+    .select("cantidad_despachador, factor")
     .eq("id", itemId)
     .single();
 
   if (!item) throw new Error("Item no encontrado");
 
-  const diferencia = 0 - (Number(item.cantidad_despachador) || 0);
+  // Contado 0 (no llegó) menos lo despachado, ambos en UND.
+  const diferencia = 0 - despachadoEnUnd(item);
 
   const { data, error } = await supabase
     .from(TABLE)
@@ -210,18 +237,20 @@ export async function marcarNoRecibido(itemId) {
 
 /**
  * Actualizar cantidad_auditor y diferencia de un item.
+ * `cantidadAuditor` ya viene en UND (el auditor cuenta y envía en UND), así que lo
+ * despachado se canonicaliza para comparar en la misma unidad.
  */
 export async function updateCantidadAuditor(itemId, cantidadAuditor) {
-  // Primero obtenemos el item para calcular diferencia
+  // Primero obtenemos el item para calcular diferencia (con factor: ver despachadoEnUnd)
   const { data: item } = await supabase
     .from(TABLE)
-    .select("cantidad_despachador")
+    .select("cantidad_despachador, factor")
     .eq("id", itemId)
     .single();
 
   if (!item) throw new Error("Item no encontrado");
 
-  const diferencia = (cantidadAuditor || 0) - (item.cantidad_despachador || 0);
+  const diferencia = (Number(cantidadAuditor) || 0) - despachadoEnUnd(item);
 
   const { data, error } = await supabase
     .from(TABLE)

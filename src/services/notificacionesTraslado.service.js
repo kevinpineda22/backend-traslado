@@ -277,9 +277,11 @@ export async function enviarComparativoAuditoria(despacho, decision) {
 
 /**
  * Correo de ERROR cuando la subida a SIESA falla al cerrar la recolección
- * (despachador). Incluye el JSON crudo del error de SIESA. Best-effort.
+ * (despachador). Incluye el mensaje legible Y el JSON crudo de la respuesta de
+ * SIESA. Best-effort.
  * @param {object} despacho
- * @param {{estado?:string, motivo?:string}} resultado - lo que devolvió enviarRequisicion
+ * @param {{estado?:string, motivo?:string, siesaData?:any, httpStatus?:number}} resultado
+ *   - lo que devolvió enviarRequisicion
  */
 export async function enviarErrorSiesa(despacho, resultado) {
   if (!emailConfigurado()) {
@@ -293,6 +295,30 @@ export async function enviarErrorSiesa(despacho, resultado) {
   const detalle = resultado?.motivo || despacho?.siesa_error || "Sin detalle.";
   const fecha = fechaHoraLegible(despacho.updated_at || Date.now());
 
+  // JSON crudo de la respuesta de SIESA. Solo existe cuando el rechazo vino del
+  // ERP: un timeout o un fallo de red no tiene cuerpo que mostrar, y en ese caso
+  // se omite el bloque en vez de imprimir "undefined".
+  let jsonCrudo = "";
+  if (resultado?.siesaData !== undefined) {
+    let texto;
+    try {
+      texto = JSON.stringify(resultado.siesaData, null, 2);
+    } catch {
+      // Referencias circulares: mejor algo legible que perder el bloque entero.
+      texto = String(resultado.siesaData);
+    }
+    // Tope defensivo: un correo con una respuesta gigante puede ser rechazado por
+    // el servidor SMTP. El detalle útil de SIESA viene al principio.
+    const TOPE = 20000;
+    if (texto.length > TOPE) {
+      texto = `${texto.slice(0, TOPE)}\n\n… (truncado, ${texto.length} caracteres en total)`;
+    }
+    const http = resultado?.httpStatus != null ? ` (HTTP ${esc(String(resultado.httpStatus))})` : "";
+    jsonCrudo = `
+    <p style="margin:12px 0 6px;font-weight:bold;">JSON crudo de SIESA${http}:</p>
+    <pre style="background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word;">${esc(texto)}</pre>`;
+  }
+
   const html = `
   <div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:640px;">
     <h2 style="color:#b91c1c;margin-bottom:4px;">Error al subir el traslado a SIESA</h2>
@@ -303,7 +329,7 @@ export async function enviarErrorSiesa(despacho, resultado) {
       <tr><td style="padding:2px 8px;color:#64748b;">Fecha</td><td style="padding:2px 8px;">${esc(fecha)}</td></tr>
     </table>
     <p style="margin:0 0 6px;font-weight:bold;">Respuesta de SIESA:</p>
-    <pre style="background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word;">${esc(detalle)}</pre>
+    <pre style="background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word;">${esc(detalle)}</pre>${jsonCrudo}
     <p style="margin-top:16px;font-size:12px;color:#94a3b8;">Correo automático del sistema de Traslados — Merkahorro. No responder.</p>
   </div>`;
 

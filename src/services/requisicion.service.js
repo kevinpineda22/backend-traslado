@@ -46,6 +46,20 @@ async function marcar(despachoId, patch) {
 }
 
 /**
+ * Traslada `siesaData`/`httpStatus` de un error a otro que lo envuelve.
+ *
+ * `importarRequisicion` adjunta la respuesta CRUDA de SIESA al error. Cuando ese
+ * error se re-envuelve en un `new Error(...)` para agregar contexto, esos campos se
+ * pierden y el correo al líder de inventarios llega sin el JSON — que es
+ * justamente el dato que sirve para diagnosticar.
+ */
+function conSiesaData(errNuevo, errOriginal) {
+  if (errOriginal?.siesaData !== undefined) errNuevo.siesaData = errOriginal.siesaData;
+  if (errOriginal?.httpStatus !== undefined) errNuevo.httpStatus = errOriginal.httpStatus;
+  return errNuevo;
+}
+
+/**
  * Importa la requisición y, si SIESA la rechaza por FALTANTE DE STOCK y el ajuste
  * automático está habilitado, inserta las unidades faltantes con un ajuste de
  * entrada y reintenta el traslado UNA vez.
@@ -81,9 +95,14 @@ async function enviarConAjusteAutomatico(despacho) {
     if (despacho.siesa_ajuste_estado === "hecho") {
       // Ya insertamos stock antes y SIGUE rechazando por faltante. No re-ajustamos
       // (duplicaría inventario). Puede ser otro ítem o un ajuste anterior corto.
-      throw new Error(
-        `El traslado sigue sin stock tras un ajuste ya hecho: ${err.message}. ` +
-          "No se re-ajusta para no duplicar inventario — revisar manualmente.",
+      // Se re-adjunta `siesaData`: envolver el error en uno nuevo perdía la
+      // respuesta cruda de SIESA, que es justo lo que se manda por correo.
+      throw conSiesaData(
+        new Error(
+          `El traslado sigue sin stock tras un ajuste ya hecho: ${err.message}. ` +
+            "No se re-ajusta para no duplicar inventario — revisar manualmente.",
+        ),
+        err,
       );
     }
 
@@ -95,7 +114,10 @@ async function enviarConAjusteAutomatico(despacho) {
         siesa_ajuste_estado: "fallido",
         siesa_ajuste_error: String(e.message).slice(0, 1000),
       });
-      throw new Error(`Ajuste de inventario falló: ${e.message}`);
+      // `e` es el fallo del AJUSTE; `err` es el rechazo original del traslado.
+      // Se conserva la respuesta cruda del rechazo original, que es la que explica
+      // por qué se intentó ajustar.
+      throw conSiesaData(new Error(`Ajuste de inventario falló: ${e.message}`), err);
     }
 
     await marcar(despacho.id, {
@@ -130,7 +152,9 @@ async function enviarConAjusteAutomatico(despacho) {
  * @param {boolean} [opts.forzar] - ignora el tope de intentos. Solo para el
  *   reintento MANUAL desde el panel: alguien miró el error, lo corrigió y pide
  *   otra pasada. NO saltea la defensa de 'enviado' (eso duplicaría inventario).
- * @returns {Promise<{estado:'enviado'|'pendiente'|'fallido'|'omitido', motivo?:string}>}
+ * @returns {Promise<{estado:'enviado'|'pendiente'|'fallido'|'omitido', motivo?:string,
+ *   siesaData?:any, httpStatus?:number}>} `siesaData` es la respuesta CRUDA de SIESA
+ *   cuando el fallo vino del ERP (ausente en timeouts y fallos de red).
  */
 export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
   const id = typeof despachoOId === "string" ? despachoOId : despachoOId?.id;
@@ -227,7 +251,15 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
       console.error(
         `[requisicion] ❌ despacho ${id} intento ${intentos + 1}/${MAX_INTENTOS}: ${err.message}`,
       );
-      return { estado, motivo: err.message };
+      // `siesaData` viaja en el retorno (no se persiste) para que el correo de error
+      // pueda mostrar el JSON crudo del rechazo. Puede venir undefined: un timeout
+      // o un fallo de red no tiene respuesta que adjuntar.
+      return {
+        estado,
+        motivo: err.message,
+        siesaData: err.siesaData,
+        httpStatus: err.httpStatus,
+      };
     }
   } finally {
     await liberarLock(lock);

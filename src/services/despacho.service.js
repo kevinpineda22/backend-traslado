@@ -105,18 +105,11 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
   }
 
   if (estado === "Recolectado") {
-    // 1. Avisar que la recolección cerró y ya se puede auditar.
-    try {
-      const despacho = await DespachoModel.findById(id);
-      await notificarRecoleccionCerrada(despacho);
-    } catch (err) {
-      // El cierre YA ocurrió y no se toca; el correo es un efecto posterior.
-      console.error("[despacho] notificación de cierre falló:", err.message);
-    }
-
     // #4 — Flujo Llano (00301→00401): auto-marcar pendientes como Agotado o
     // Fantasma según el stock en vivo. El despachador NO elige motivos en este
-    // flujo (los oculta el front). Best-effort: si SIESA no contesta, los
+    // flujo (los oculta el front). Va PRIMERO (antes de notificar y de SIESA) para
+    // que el correo de faltantes/fantasma incluya estos motivos y que SIESA los
+    // excluya (cantidad_despachador queda en 0). Best-effort: si falla, los
     // pendientes quedan como están y el despacho igual se cierra.
     try {
       const despacho = await DespachoModel.findById(id);
@@ -134,20 +127,26 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
             const disponible = Number(s?.disponible ?? 0);
             if (disponible <= 0) {
               // Sin stock → Agotado
-              await ItemModel.updateCantidadDespachador(
-                item.id, 0, true, "sin_stock",
-              );
+              await ItemModel.updateCantidadDespachador(item.id, 0, true, "sin_stock");
             } else {
               // Hay stock pero no se recolectó → Fantasma
-              await ItemModel.updateCantidadDespachador(
-                item.id, 0, false, "inventario_inflado",
-              );
+              await ItemModel.updateCantidadDespachador(item.id, 0, false, "inventario_inflado");
             }
           }
         }
       }
     } catch (err) {
       console.error("[despacho] auto-marcado #4 falló (no bloquea):", err.message);
+    }
+
+    // 1. Avisar que la recolección cerró (ya con los motivos auto-marcados) y que
+    //    se puede auditar.
+    try {
+      const despacho = await DespachoModel.findById(id);
+      await notificarRecoleccionCerrada(despacho);
+    } catch (err) {
+      // El cierre YA ocurrió y no se toca; el correo es un efecto posterior.
+      console.error("[despacho] notificación de cierre falló:", err.message);
     }
 
     // 2. Subir a SIESA con las cantidades del DESPACHADOR. La palabra la tiene el
@@ -158,7 +157,8 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
     try {
       await marcarRequisicionPendiente(id);
       const despacho = await DespachoModel.findById(id);
-      const r = await enviarRequisicion(despacho); // nunca lanza; { estado, motivo }
+      // Nunca lanza; { estado, motivo, siesaData?, httpStatus? }
+      const r = await enviarRequisicion(despacho);
       // Si la subida NO salió (fallido/pendiente), avisar al líder de inventarios
       // con el JSON del error. Los 'omitido' son benignos (ya enviado / carrera).
       if (r && (r.estado === "fallido" || r.estado === "pendiente")) {
@@ -387,15 +387,21 @@ export async function generarPlanilla(despachoId, tipo) {
     tipo === "recoleccion" ? "Plano Recolección" : "Plano Final",
   );
 
-  // Columnas
+  // Columnas. En el plano FINAL todo va canonicalizado a UND para que la fila sea
+  // coherente: el despachador guarda en la UM del renglón y el auditor en UND, así
+  // que mezclarlos daba filas sin sentido ("despachó 2, contó 96, diferencia 0").
+  // En el plano de RECOLECCIÓN se deja la UM del ítem: el despachador recoge packs,
+  // no unidades, y ahí la UM nativa es la información útil.
+  const esFinal = tipo === "final";
+  const sufijoUnd = esFinal ? " (UND)" : "";
   sheet.columns = [
     { header: "Item", key: "codigo", width: 15 },
     { header: "Descripción", key: "descripcion", width: 40 },
     { header: "UM", key: "um", width: 8 },
-    { header: "Cant. Admin", key: "cantAdmin", width: 14 },
-    { header: "Cant. Despachador", key: "cantDespachador", width: 18 },
-    { header: "Cant. Auditor", key: "cantAuditor", width: 14 },
-    { header: "Diferencia", key: "diferencia", width: 14 },
+    { header: `Cant. Admin${sufijoUnd}`, key: "cantAdmin", width: 14 },
+    { header: `Cant. Despachador${sufijoUnd}`, key: "cantDespachador", width: 18 },
+    { header: `Cant. Auditor${sufijoUnd}`, key: "cantAuditor", width: 14 },
+    { header: `Diferencia${sufijoUnd}`, key: "diferencia", width: 14 },
     { header: "Estado", key: "estado", width: 14 },
   ];
 
@@ -409,14 +415,25 @@ export async function generarPlanilla(despachoId, tipo) {
 
   // Datos
   despacho.traslados_items?.forEach((item) => {
+    const factor = Number(item.factor) || 1;
+    // `?? "-"` se conserva: null es "nunca se registró", distinto de un 0 real.
     sheet.addRow({
       codigo: item.codigo_item,
       descripcion: item.descripcion,
       um: item.unidad_medida,
-      cantAdmin: item.cantidad_admin ?? "-",
-      cantDespachador: tipo === "final" ? (item.cantidad_despachador ?? "-") : "-",
-      cantAuditor: tipo === "final" ? (item.cantidad_auditor ?? "-") : "-",
-      diferencia: tipo === "final" ? (item.diferencia ?? "-") : "-",
+      cantAdmin:
+        item.cantidad_admin == null
+          ? "-"
+          : esFinal
+            ? Number(item.cantidad_admin) * factor
+            : item.cantidad_admin,
+      cantDespachador:
+        esFinal && item.cantidad_despachador != null
+          ? ItemModel.despachadoEnUnd(item)
+          : "-",
+      // cantidad_auditor ya está en UND: el auditor cuenta y guarda en UND.
+      cantAuditor: esFinal ? (item.cantidad_auditor ?? "-") : "-",
+      diferencia: esFinal ? (item.diferencia ?? "-") : "-",
       estado: item.aceptado === true ? "OK" : item.aceptado === false ? "Rechazado" : "Pendiente",
     });
   });
