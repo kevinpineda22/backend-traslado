@@ -202,9 +202,16 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
 
   // UPDATE atómico: atado al estado leído (cierra la ventana TOCTOU) y, si se
   // exige dueño, también al despachador_id.
+  const ahora = new Date().toISOString();
+  const patch = { estado: nuevoEstado, updated_at: ahora };
+  // Trazabilidad de tiempos (#1): estampamos el hito según el estado destino.
+  if (nuevoEstado === "Recolectado") patch.recoleccion_finalizada_at = ahora;
+  if (["Auditado", "Rechazado", "Recibido_con_inconsistencia"].includes(nuevoEstado)) {
+    patch.auditoria_finalizada_at = ahora;
+  }
   let q = supabase
     .from(TABLE)
-    .update({ estado: nuevoEstado, updated_at: new Date().toISOString() })
+    .update(patch)
     .eq("id", id)
     .eq("estado", actual.estado);
   if (despachadorId) q = q.eq("despachador_id", despachadorId);
@@ -218,6 +225,18 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
     throw e;
   }
   return data;
+}
+
+/**
+ * Estampa `auditoria_iniciada_at` la PRIMERA vez que el auditor compara (empieza
+ * a contar). Idempotente: el `.is(..., null)` hace que reintentos NO lo pisen, así
+ * queda el primer comparar y no el último. Trazabilidad (#1). Best-effort. */
+export async function marcarAuditoriaIniciada(id) {
+  await supabase
+    .from(TABLE)
+    .update({ auditoria_iniciada_at: new Date().toISOString() })
+    .eq("id", id)
+    .is("auditoria_iniciada_at", null);
 }
 
 /**
@@ -270,6 +289,7 @@ export async function iniciarRecoleccion(id, despachadorId) {
   const patch = {
     estado: "En_recoleccion",
     updated_at: new Date().toISOString(),
+    recoleccion_iniciada_at: new Date().toISOString(), // trazabilidad (#1)
   };
   if (despachadorId) patch.despachador_id = despachadorId;
 

@@ -45,6 +45,7 @@ export async function obtenerDetalle(req, res, next) {
         factor: item.factor,
         cantidad_admin: item.cantidad_admin,
         categoria: item.categoria,
+        no_recibido: item.no_recibido || false,
         // NOTA: cantidad_despachador y diferencia se ocultan intencionalmente
       }));
 
@@ -86,6 +87,7 @@ export async function comparar(req, res, next) {
         id: d.id,
         codigo_item: d.codigo_item,
         descripcion: d.descripcion,
+        no_recibido: d.no_recibido || false,
       }));
 
     res.json({ ok: true, data: { match, recontar } });

@@ -145,10 +145,15 @@ export function fechaSiesa(d = new Date()) {
 /**
  * Arma el payload de la requisición a partir de un despacho.
  *
- * Solo viajan los ítems que el AUDITOR verificó que llegaron (`cantidad_auditor
- * > 0`). Lo que se mueve en el ERP es lo que realmente se recibió y verificó —
- * el auditor tiene la última palabra: incluye sus correcciones y los productos
- * que agregó fuera de lista, y excluye lo que no llegó (cantidad_auditor 0).
+ * Solo viajan los ítems que el DESPACHADOR recolectó y salieron de origen
+ * (`cantidad_despachador > 0`). La palabra la tiene el despachador: SIESA refleja
+ * lo que salió del camión, no lo que auditó después el auditor (la auditoría es
+ * control documental — ver confirmarAuditoria).
+ *
+ * OJO con la UNIDAD: `cantidad_despachador` está guardada en la unidad del ítem,
+ * NO en UND. `cantidad_despachador × factor` da el total real en UND (el factor
+ * queda sincronizado con la unidad guardada — misma canonicalización que
+ * compararAuditoria). A SIESA siempre va en UND.
  *
  * OJO con los nombres de campo: `Documentos` usa "NRO DOCTO" (con espacio) y
  * `Movimientos` usa "NRO_DOCTO" (con guión bajo). Está copiado tal cual del
@@ -159,7 +164,7 @@ export function fechaSiesa(d = new Date()) {
  */
 export function armarPayload(despacho) {
   const items = (despacho?.traslados_items || []).filter(
-    (it) => Number(it.cantidad_auditor) > 0,
+    (it) => Number(it.cantidad_despachador) > 0,
   );
 
   // Consecutivo en 0: el conector va con F_CONSEC_AUTO_REG = 1
@@ -191,10 +196,10 @@ export function armarPayload(despacho) {
     NRO_REGISTRO_MOVIMIENTO: String(i + 1),
     BODEGA_SALIDA: String(despacho.origen || ""),
     "C.O_MOVIMIENTO": co,
-    // Canonicalización: cantidad_auditor ya viene en UND (unidades reales), sin
-    // importar en qué unidad contó el auditor. A SIESA siempre va en UND.
+    // Canonicalización a UND: cantidad_despachador está en la unidad del ítem;
+    // × factor da el total real en UND. A SIESA siempre va en UND.
     UNIDAD_MEDIDA: "UND",
-    CANTIDAD: String(Number(it.cantidad_auditor) || 0),
+    CANTIDAD: String((Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1)),
     CODIGO_ITEM: String(it.codigo_item || ""),
   }));
 

@@ -178,6 +178,37 @@ export async function insertItemAuditor(despachoId, item) {
 }
 
 /**
+ * Marcar un ítem como "No recibido" por el auditor (informativo, no toca SIESA).
+ * Lee el ítem primero para calcular diferencia correcta, setea cantidad_auditor=0
+ * y no_recibido=true. #5.
+ */
+export async function marcarNoRecibido(itemId) {
+  const { data: item } = await supabase
+    .from(TABLE)
+    .select("cantidad_despachador")
+    .eq("id", itemId)
+    .single();
+
+  if (!item) throw new Error("Item no encontrado");
+
+  const diferencia = 0 - (Number(item.cantidad_despachador) || 0);
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({
+      cantidad_auditor: 0,
+      diferencia,
+      no_recibido: true,
+    })
+    .eq("id", itemId)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Error al marcar no recibido: ${error.message}`);
+  return data;
+}
+
+/**
  * Actualizar cantidad_auditor y diferencia de un item.
  */
 export async function updateCantidadAuditor(itemId, cantidadAuditor) {

@@ -2,8 +2,13 @@ import * as DespachoModel from "../models/Despacho.model.js";
 import * as ItemModel from "../models/Item.model.js";
 import * as FirmaModel from "../models/Firma.model.js";
 import { createError } from "../middleware/errorHandler.js";
-import { notificarRecoleccionCerrada } from "./notificacionesTraslado.service.js";
+import {
+  notificarRecoleccionCerrada,
+  enviarComparativoAuditoria,
+  enviarErrorSiesa,
+} from "./notificacionesTraslado.service.js";
 import { enviarRequisicion } from "./requisicion.service.js";
+import { getStockLote } from "./siesaStock.service.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
 import ExcelJS from "exceljs";
 
@@ -100,16 +105,69 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
   }
 
   if (estado === "Recolectado") {
+    // 1. Avisar que la recolección cerró y ya se puede auditar.
     try {
-      // El envío a SIESA ya NO ocurre acá. Ahora lo dispara el AUDITOR al
-      // finalizar (ver confirmarAuditoria): tiene la última palabra sobre lo que
-      // realmente llegó, y SIESA recibe SUS cantidades, no las del despachador.
-      // Acá solo avisamos que la recolección cerró y ya se puede auditar.
       const despacho = await DespachoModel.findById(id);
       await notificarRecoleccionCerrada(despacho);
     } catch (err) {
       // El cierre YA ocurrió y no se toca; el correo es un efecto posterior.
       console.error("[despacho] notificación de cierre falló:", err.message);
+    }
+
+    // #4 — Flujo Llano (00301→00401): auto-marcar pendientes como Agotado o
+    // Fantasma según el stock en vivo. El despachador NO elige motivos en este
+    // flujo (los oculta el front). Best-effort: si SIESA no contesta, los
+    // pendientes quedan como están y el despacho igual se cierra.
+    try {
+      const despacho = await DespachoModel.findById(id);
+      if (despacho.flujo === "llano") {
+        const pendientes = (despacho.traslados_items || []).filter(
+          (it) => it.cantidad_despachador == null,
+        );
+        if (pendientes.length > 0) {
+          const stock = await getStockLote({
+            sede: despacho.origen,
+            items: pendientes.map((it) => it.codigo_item),
+          });
+          for (const item of pendientes) {
+            const s = stock[item.codigo_item];
+            const disponible = Number(s?.disponible ?? 0);
+            if (disponible <= 0) {
+              // Sin stock → Agotado
+              await ItemModel.updateCantidadDespachador(
+                item.id, 0, true, "sin_stock",
+              );
+            } else {
+              // Hay stock pero no se recolectó → Fantasma
+              await ItemModel.updateCantidadDespachador(
+                item.id, 0, false, "inventario_inflado",
+              );
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[despacho] auto-marcado #4 falló (no bloquea):", err.message);
+    }
+
+    // 2. Subir a SIESA con las cantidades del DESPACHADOR. La palabra la tiene el
+    //    despachador: SIESA refleja lo que salió del camión. El auditor ya NO sube
+    //    a SIESA — solo verifica y manda el correo comparativo (ver
+    //    confirmarAuditoria). Patrón resiliente: marcar 'pendiente' ANTES de
+    //    intentar, para que el cron lo levante si esta instancia muere en el envío.
+    try {
+      await marcarRequisicionPendiente(id);
+      const despacho = await DespachoModel.findById(id);
+      const r = await enviarRequisicion(despacho); // nunca lanza; { estado, motivo }
+      // Si la subida NO salió (fallido/pendiente), avisar al líder de inventarios
+      // con el JSON del error. Los 'omitido' son benignos (ya enviado / carrera).
+      if (r && (r.estado === "fallido" || r.estado === "pendiente")) {
+        await enviarErrorSiesa(despacho, r).catch((e) =>
+          console.error("[despacho] correo de error SIESA falló:", e.message),
+        );
+      }
+    } catch (err) {
+      console.error("[despacho] envío a SIESA falló (queda pendiente):", err.message);
     }
   }
 
@@ -202,6 +260,12 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
   const despacho = await DespachoModel.findById(despachoId);
   if (!despacho) throw createError(404, "Despacho no encontrado");
 
+  // Trazabilidad (#1): el primer comparar marca el inicio de la auditoría.
+  // Best-effort e idempotente — nunca frena la comparación.
+  await DespachoModel.marcarAuditoriaIniciada(despachoId).catch((e) =>
+    console.error("[auditoría] no se pudo marcar inicio:", e.message),
+  );
+
   const conteoAuditor = new Map(
     (itemsAuditor || []).map((i) => [i.id, Number(i.cantidad_auditor) || 0]),
   );
@@ -230,6 +294,7 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
       cantidad_despachador: cantidadDespachador,
       cantidad_auditor: cantidadAuditor,
       diferencia,
+      no_recibido: item.no_recibido || false,
     };
   });
 
@@ -258,13 +323,17 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
   const estadoFinal = ESTADO_POR_DECISION[decision];
   if (!estadoFinal) throw createError(400, `Decisión inválida: ${decision}`);
 
-  // Persistir cantidades del auditor. Dos clases de ítem:
-  //  - Existentes (traen `id`)  → se actualiza cantidad_auditor + diferencia.
+  // Persistir cantidades del auditor. Tres clases de ítem:
   //  - Nuevos (traen `nuevo:true`, sin `id`) → mercancía que NO venía en la lista
   //    original; se inserta marcada como agregado_por_auditor.
+  //  - No recibidos (traen `no_recibido:true`) → el auditor reporta que no llegó
+  //    físicamente; se marca como cantidad_auditor=0 + no_recibido=true (#5).
+  //  - Existentes (traen `id`)  → se actualiza cantidad_auditor + diferencia.
   for (const item of items) {
     if (item?.nuevo || item?.id == null) {
       await ItemModel.insertItemAuditor(despachoId, item);
+    } else if (item?.no_recibido) {
+      await ItemModel.marcarNoRecibido(item.id);
     } else {
       await ItemModel.updateCantidadAuditor(item.id, item.cantidad_auditor);
     }
@@ -287,20 +356,15 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
   // Avanzar estado (valida la transición)
   await DespachoModel.updateStatus(despachoId, estadoFinal);
 
-  // Subida a SIESA: ahora la dispara el AUDITOR al finalizar, con SUS cantidades
-  // verificadas (última palabra sobre lo que realmente llegó). Solo si aprobó o
-  // recibió con inconsistencia — rechazado no mueve inventario.
-  // Mismo patrón resiliente que usaba el recolector: marcar 'pendiente' ANTES de
-  // intentar, para que el cron lo levante si esta instancia se muere en el envío.
-  if (decision === "aprobado" || decision === "inconsistencia") {
-    try {
-      await marcarRequisicionPendiente(despachoId);
-      const despacho = await DespachoModel.findById(despachoId);
-      await enviarRequisicion(despacho); // nunca lanza
-    } catch (err) {
-      // La auditoría YA se cerró; el envío queda 'pendiente' y lo levanta el cron.
-      console.error("[auditoría] envío a SIESA falló (queda pendiente):", err.message);
-    }
+  // La subida a SIESA ya NO ocurre acá: la dispara el DESPACHADOR al cerrar la
+  // recolección (ver cambiarEstado), con SUS cantidades. El auditor es control
+  // documental — su salida es el correo con la tabla comparativa al líder de
+  // inventarios. Best-effort: el cierre de la auditoría ya está persistido.
+  try {
+    const despacho = await DespachoModel.findById(despachoId);
+    await enviarComparativoAuditoria(despacho, decision);
+  } catch (err) {
+    console.error("[auditoría] correo comparativo falló:", err.message);
   }
 
   return { estado: estadoFinal };

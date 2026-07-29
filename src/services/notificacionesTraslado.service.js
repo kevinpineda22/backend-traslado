@@ -16,10 +16,12 @@ import { fechaHoraLegible } from "../config/tiempo.js";
    Los tres son best-effort: una caída de SMTP no revierte el despacho.
    ============================================= */
 
+// Solo el TEXTO visible cambió (pedido de negocio): los valores internos
+// (sin_stock, inventario_inflado) se mantienen. Espejo del MOTIVO_LABEL del front.
 const MOTIVO_LABEL = {
-  sin_stock: "Sin stock",
+  sin_stock: "Agotado",
   surtido_parcial: "Surtido parcial en PV",
-  inventario_inflado: "Inventario inflado",
+  inventario_inflado: "Inventario Fantasma",
 };
 
 const MOTIVO_INFLADO = "inventario_inflado";
@@ -189,6 +191,127 @@ export async function notificarFaltantesRecoleccion(despacho) {
     inflados: inflados.length,
     resultados,
   };
+}
+
+/* =============================================
+   #2 — Correos del cierre de AUDITORÍA y de ERROR de subida a SIESA.
+   Ambos van al líder de inventarios (DESTINATARIOS.inventarios →
+   Inventarios@merkahorrosas.com). Best-effort: nunca tumban el flujo.
+   ============================================= */
+
+const ENCABEZADOS_COMPARATIVO = ["Ítem", "Producto", "Enviado (UND)", "Contado (UND)", "Diferencia"];
+
+const DECISION_LABEL = {
+  aprobado: "Aprobado",
+  inconsistencia: "Recibido con inconsistencia",
+  rechazado: "Rechazado",
+};
+
+/** ¿El ítem salió de origen? Misma regla que despacho.service.noSalioDeOrigen. */
+function salioDeOrigen(it) {
+  if (it.agotado === true) return false;
+  if (it.cantidad_despachador != null && Number(it.cantidad_despachador) === 0) return false;
+  return true;
+}
+
+/**
+ * Filas del comparativo Enviado vs Contado (en UND). Enviado = cantidad_despachador
+ * × factor (canonicalización estándar); Contado = cantidad_auditor (ya en UND).
+ * Solo ítems que salieron de origen + extras agregados por el auditor.
+ */
+function filasComparativo(items) {
+  return items
+    .filter((it) => salioDeOrigen(it) || it.agregado_por_auditor || it.no_recibido)
+    .map((it) => {
+      const noRecibido = it.no_recibido === true;
+      const enviado = (Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1);
+      const contado = noRecibido ? 0 : (Number(it.cantidad_auditor) || 0);
+      const dif = contado - enviado;
+      const color = noRecibido ? "#b91c1c" : dif === 0 ? "#16a34a" : "#dc2626";
+      const extra = [];
+      if (it.agregado_por_auditor) extra.push('agregado en auditoría');
+      if (noRecibido) extra.push('NO RECIBIDO');
+      const extraHtml = extra.length
+        ? ` <span style="color:#b91c1c;font-size:11px;font-weight:bold;">(${extra.join(', ')})</span>`
+        : "";
+      return `
+      <tr>
+        ${celdaCodigo(it)}
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || "—")}${extraHtml}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${enviado}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${contado}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;color:${color};font-weight:bold;">${dif > 0 ? "+" : ""}${dif}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+/**
+ * Correo con la TABLA COMPARATIVA al líder de inventarios, al finalizar la
+ * auditoría. El auditor es control documental — este correo es su salida (ya no
+ * sube a SIESA, eso lo hizo el despachador). Best-effort.
+ * @param {object} despacho - cabecera + traslados_items (con cantidad_auditor ya persistida)
+ * @param {"aprobado"|"inconsistencia"|"rechazado"} decision
+ */
+export async function enviarComparativoAuditoria(despacho, decision) {
+  if (!emailConfigurado()) {
+    console.error(
+      `[traslados] ⚠️ comparativo NO enviado (despacho ${despacho?.id}): falta EMAIL_USER/PASS`,
+    );
+    return { success: false };
+  }
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const decisionTxt = DECISION_LABEL[decision] || decision || "—";
+  return sendEmail({
+    to: DESTINATARIOS.inventarios,
+    subject: `Auditoría finalizada — ${ruta} (${decisionTxt})`,
+    html: armarHtml({
+      despacho,
+      titulo: "Comparativo de auditoría",
+      intro: `El auditor finalizó la revisión (decisión: ${decisionTxt}). Comparativo Enviado vs Contado (UND):`,
+      filas: filasComparativo(despacho?.traslados_items || []),
+      encabezados: ENCABEZADOS_COMPARATIVO,
+    }),
+  });
+}
+
+/**
+ * Correo de ERROR cuando la subida a SIESA falla al cerrar la recolección
+ * (despachador). Incluye el JSON crudo del error de SIESA. Best-effort.
+ * @param {object} despacho
+ * @param {{estado?:string, motivo?:string}} resultado - lo que devolvió enviarRequisicion
+ */
+export async function enviarErrorSiesa(despacho, resultado) {
+  if (!emailConfigurado()) {
+    console.error(
+      `[traslados] ⚠️ error SIESA NO notificado (despacho ${despacho?.id}): falta EMAIL_USER/PASS`,
+    );
+    return { success: false };
+  }
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const estado = resultado?.estado || "pendiente";
+  const detalle = resultado?.motivo || despacho?.siesa_error || "Sin detalle.";
+  const fecha = fechaHoraLegible(despacho.updated_at || Date.now());
+
+  const html = `
+  <div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:640px;">
+    <h2 style="color:#b91c1c;margin-bottom:4px;">Error al subir el traslado a SIESA</h2>
+    <p style="margin:0 0 12px;">La requisición del despacho <b>${esc(String(despacho.id))}</b> (${esc(ruta)}) no se pudo subir a SIESA al cerrar la recolección. Quedó <b>${esc(estado)}</b>; el cron la reintenta, pero puede necesitar revisión manual.</p>
+    <table style="margin:8px 0 12px;font-size:14px;">
+      <tr><td style="padding:2px 8px;color:#64748b;">Despacho</td><td style="padding:2px 8px;"><b>${esc(String(despacho.id))}</b></td></tr>
+      <tr><td style="padding:2px 8px;color:#64748b;">Ruta</td><td style="padding:2px 8px;">${esc(ruta)}</td></tr>
+      <tr><td style="padding:2px 8px;color:#64748b;">Fecha</td><td style="padding:2px 8px;">${esc(fecha)}</td></tr>
+    </table>
+    <p style="margin:0 0 6px;font-weight:bold;">Respuesta de SIESA:</p>
+    <pre style="background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word;">${esc(detalle)}</pre>
+    <p style="margin-top:16px;font-size:12px;color:#94a3b8;">Correo automático del sistema de Traslados — Merkahorro. No responder.</p>
+  </div>`;
+
+  return sendEmail({
+    to: DESTINATARIOS.inventarios,
+    subject: `⚠️ Error al subir a SIESA — ${ruta} (despacho ${String(despacho.id).slice(0, 8)})`,
+    html,
+  });
 }
 
 /**
