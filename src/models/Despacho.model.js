@@ -6,6 +6,26 @@ const TABLE = "traslados_despachos";
 const ESTADOS_FINALES = ["Auditado", "Rechazado", "Recibido_con_inconsistencia"];
 
 /**
+ * Aplica el filtro de visibilidad por `inactivo` a una query.
+ *
+ * Por DEFECTO oculta los inactivos, y eso es deliberado: los paneles del
+ * despachador y del auditor no deben verlos, y ese filtro tiene que vivir acá —
+ * en la única puerta por la que salen los despachos — y no en cada panel. Si cada
+ * front decidiera por su cuenta, el próximo panel que alguien agregue nace
+ * mostrando traslados inactivos y nadie se entera.
+ *
+ * @param query - query de Supabase
+ * @param {object} filters
+ * @param {boolean} [filters.inactivo]           - true = SOLO inactivos (panel de alertas)
+ * @param {boolean} [filters.incluir_inactivos]  - true = activos + inactivos
+ */
+function aplicarFiltroInactivo(query, filters = {}) {
+  if (filters.inactivo === true) return query.eq("inactivo", true);
+  if (filters.incluir_inactivos === true) return query;
+  return query.eq("inactivo", false);
+}
+
+/**
  * Ítems que están en despachos ACTIVOS (no finalizados). Sirve para avisar al
  * admin que un ítem+origen ya tiene un traslado en curso: el stock todavía no se
  * descontó, así que crear otro puede sobre-asignar inventario.
@@ -16,6 +36,13 @@ export async function itemsEnDespachosActivos() {
     .from(TABLE)
     .select("id, origen, destino, created_at, estado, traslados_items(codigo_item)")
     .not("estado", "in", `(${ESTADOS_FINALES.join(",")})`)
+    // Un borrador todavía no es un traslado comprometido: es la lista que el admin
+    // está armando. Incluirlo haría que el panel le avise de su PROPIO borrador
+    // mientras lo llena — un aviso que aparece siempre deja de avisar nada.
+    .neq("estado", "Borrador")
+    // Un traslado inactivo no va a salir de la bodega, así que no compite por el
+    // stock. Avisar por él sería frenar un traslado bueno por uno congelado.
+    .eq("inactivo", false)
     .order("created_at", { ascending: false });
 
   if (error) throw new Error(`Error al leer despachos activos: ${error.message}`);
@@ -47,6 +74,8 @@ export async function findAll(filters = {}) {
   // — los paneles filtran por varios estados a la vez.
   if (Array.isArray(filters.estado)) query = query.in("estado", filters.estado);
   else if (filters.estado) query = query.eq("estado", filters.estado);
+
+  query = aplicarFiltroInactivo(query, filters);
 
   if (filters.sin_asignar) {
     query = query.is("despachador_id", null);
@@ -80,12 +109,41 @@ export async function findById(id) {
   return despacho;
 }
 
+/** Mapea un ítem del payload del admin a la fila de `traslados_items`. */
+function aFilaItem(despachoId, item) {
+  return {
+    despacho_id: despachoId,
+    codigo_item: item.codigo_item,
+    descripcion: item.descripcion,
+    unidad_medida: item.unidad_medida,
+    factor: item.factor ?? 1,
+    rotacion: item.rotacion,
+    grupo: item.grupo || null,
+    // Snapshot de la categoría: si SIESA reclasifica el producto mañana, el
+    // despacho ya cerrado debe seguir contando la historia que vio el admin.
+    categoria: item.categoria || null,
+    stock_origen: item.stock_origen,
+    stock_destino: item.stock_destino,
+    consumo_destino: item.consumo_destino,
+    stock_seguridad: item.stock_seguridad,
+    sugerido: item.sugerido,
+    cantidad_admin: item.cantidad,
+  };
+}
+
 /**
  * Crear un despacho con sus items.
- * @param {object} payload - { origen, destino, despachador_id, admin_id, criterios, items[] }
+ *
+ * `estado` decide si nace listo para el despachador ("Creado", el caso normal) o
+ * como lista en construcción ("Borrador", solo flujo General — ver
+ * agregarItemsBorrador). `disponible_at` solo se sella cuando nace en "Creado":
+ * es el reloj de las alertas de inactividad, y un borrador todavía no espera a nadie.
+ *
+ * @param {object} payload - { origen, destino, despachador_id, admin_id, criterios, items[], estado? }
  */
 export async function create(payload) {
-  const { items, ...cabecera } = payload;
+  const { items, estado, ...cabecera } = payload;
+  const estadoInicial = estado === "Borrador" ? "Borrador" : "Creado";
 
   // 1. Insertar cabecera
   const { data: despacho, error: errCab } = await supabase
@@ -97,37 +155,32 @@ export async function create(payload) {
       despachador_id: cabecera.despachador_id,
       admin_id: cabecera.admin_id,
       criterios: cabecera.criterios,
-      estado: "Creado",
+      estado: estadoInicial,
+      disponible_at: estadoInicial === "Creado" ? new Date().toISOString() : null,
     })
     .select()
     .single();
 
-  if (errCab) throw new Error(`Error al crear despacho: ${errCab.message}`);
+  if (errCab) {
+    // El índice parcial `idx_despachos_borrador_unico` garantiza un solo borrador
+    // abierto por (origen, destino). Traducimos el choque a un 409 legible: el
+    // caso real es el admin con dos pestañas abiertas, no un bug.
+    if (errCab.code === "23505" && estadoInicial === "Borrador") {
+      const e = new Error(
+        "Ya existe un listado en curso para esta ruta. Recargá la página para verlo.",
+      );
+      e.statusCode = 409;
+      e.expose = true;
+      throw e;
+    }
+    throw new Error(`Error al crear despacho: ${errCab.message}`);
+  }
 
   // 2. Insertar items (con snapshot de lo que vio el admin)
   if (items?.length > 0) {
-    const itemsConDespacho = items.map((item) => ({
-      despacho_id: despacho.id,
-      codigo_item: item.codigo_item,
-      descripcion: item.descripcion,
-      unidad_medida: item.unidad_medida,
-      factor: item.factor ?? 1,
-      rotacion: item.rotacion,
-      grupo: item.grupo || null,
-      // Snapshot de la categoría: si SIESA reclasifica el producto mañana, el
-      // despacho ya cerrado debe seguir contando la historia que vio el admin.
-      categoria: item.categoria || null,
-      stock_origen: item.stock_origen,
-      stock_destino: item.stock_destino,
-      consumo_destino: item.consumo_destino,
-      stock_seguridad: item.stock_seguridad,
-      sugerido: item.sugerido,
-      cantidad_admin: item.cantidad,
-    }));
-
     const { error: errItems } = await supabase
       .from("traslados_items")
-      .insert(itemsConDespacho);
+      .insert(items.map((item) => aFilaItem(despacho.id, item)));
 
     if (errItems) throw new Error(`Error al insertar items: ${errItems.message}`);
   }
@@ -155,6 +208,9 @@ export async function create(payload) {
  */
 export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   const TRANSICIONES = {
+    // Borrador = lista en construcción del flujo General. Su única salida es
+    // "Creado" (finalizar el despacho), y la hace `finalizarBorrador`.
+    Borrador: ["Creado"],
     Creado: ["En_recoleccion"],
     En_recoleccion: ["Recolectado"],
     Recolectado: ["En_recepcion", "Auditado", "Rechazado", "Recibido_con_inconsistencia"],
@@ -167,13 +223,26 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   // Leer estado + dueño actuales
   const { data: actual } = await supabase
     .from(TABLE)
-    .select("estado, despachador_id")
+    .select("estado, despachador_id, inactivo")
     .eq("id", id)
     .single();
 
   if (!actual) {
     const e = new Error("Despacho no encontrado");
     e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+
+  // Un traslado inactivo está congelado: no avanza hasta que alguien lo reactive
+  // desde el panel. El chequeo va acá, en la única puerta por la que se avanza el
+  // estado, y no en cada llamador — un panel con la lista vieja en pantalla puede
+  // intentar cerrarlo después de que el barrido lo inactivó.
+  if (actual.inactivo) {
+    const e = new Error(
+      "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar.",
+    );
+    e.statusCode = 409;
     e.expose = true;
     throw e;
   }
@@ -208,6 +277,20 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   if (nuevoEstado === "Recolectado") patch.recoleccion_finalizada_at = ahora;
   if (["Auditado", "Rechazado", "Recibido_con_inconsistencia"].includes(nuevoEstado)) {
     patch.auditoria_finalizada_at = ahora;
+  }
+
+  // Entrega de posta al auditor: se re-sella el reloj de inactividad y se limpia
+  // la marca de la alerta de la etapa anterior. Sin el reset, un traslado que ya
+  // disparó la alerta de recolección arrastraría esa marca y —si vuelve a
+  // estancarse esperando auditoría— la alerta del auditor saldría sobre un reloj
+  // viejo. Cada etapa mide su propia espera.
+  //
+  // `disponible_at` arranca igual a `recoleccion_finalizada_at` acá, pero NO son
+  // lo mismo: el hito es historial y no se toca más; el reloj se reinicia si
+  // alguien reactiva el traslado (ver setActivo).
+  if (nuevoEstado === "Recolectado") {
+    patch.disponible_at = ahora;
+    patch.alerta_recoleccion_at = null;
   }
   let q = supabase
     .from(TABLE)
@@ -255,13 +338,21 @@ export async function marcarAuditoriaIniciada(id) {
 export async function assertPuedeRecolectar(id, despachadorId) {
   const { data: d, error } = await supabase
     .from(TABLE)
-    .select("estado, despachador_id")
+    .select("estado, despachador_id, inactivo")
     .eq("id", id)
     .single();
 
   if (error || !d) {
     const e = new Error("Despacho no encontrado");
     e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (d.inactivo) {
+    const e = new Error(
+      "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar.",
+    );
+    e.statusCode = 409;
     e.expose = true;
     throw e;
   }
@@ -298,11 +389,14 @@ export async function iniciarRecoleccion(id, despachadorId) {
     .update(patch)
     .eq("id", id)
     .eq("estado", "Creado")
+    // Un inactivo no se puede reclamar. Va atado al mismo UPDATE atómico y no en
+    // un chequeo previo: entre leer y escribir, el barrido pudo inactivarlo.
+    .eq("inactivo", false)
     .select()
     .single();
 
   if (error || !data) {
-    const err = new Error("El despacho ya fue tomado o cambió de estado");
+    const err = new Error("El despacho ya fue tomado, se inactivó o cambió de estado");
     err.statusCode = 409;
     err.expose = true;
     return Promise.reject(err);
@@ -318,12 +412,19 @@ export async function iniciarRecoleccion(id, despachadorId) {
  * El reset de las cantidades de los ítems lo hace el service, tras este flip.
  */
 export async function abandonarRecoleccion(id, despachadorId) {
+  const ahora = new Date().toISOString();
   const { data, error } = await supabase
     .from(TABLE)
     .update({
       estado: "Creado",
       despachador_id: null,
-      updated_at: new Date().toISOString(),
+      updated_at: ahora,
+      // Vuelve al pool ⇒ el reloj de inactividad arranca de nuevo y la alerta
+      // puede volver a salir. Si conserváramos el `disponible_at` original, un
+      // traslado tomado y soltado a las 4 horas dispararía la alerta al instante,
+      // culpando al pool por el tiempo que estuvo en manos de alguien.
+      disponible_at: ahora,
+      alerta_recoleccion_at: null,
     })
     .eq("id", id)
     .eq("estado", "En_recoleccion")
@@ -372,9 +473,13 @@ export async function updateDespachador(id, despachadorId) {
   return data;
 }
 
+/** Estados en los que la lista de ítems todavía se puede tocar (nadie recolectó). */
+const ESTADOS_EDITABLES = ["Borrador", "Creado"];
+
 /**
- * Editar los ítems de un despacho — SOLO en estado "Creado" (no arrancó).
- * Actualiza cantidades y elimina los ítems que ya no vengan en la lista.
+ * Editar los ítems de un despacho — solo mientras nadie recolectó
+ * ("Borrador" o "Creado"). Actualiza cantidades y elimina los ítems que ya no
+ * vengan en la lista.
  * @param {string} id
  * @param {Array<{id, cantidad}>} items - ítems que quedan (con su cantidad_admin)
  */
@@ -386,8 +491,10 @@ export async function editarItems(id, items) {
     e.expose = true;
     throw e;
   }
-  if (cab.estado !== "Creado") {
-    const e = new Error("Solo se pueden editar los ítems de un despacho en estado Creado");
+  if (!ESTADOS_EDITABLES.includes(cab.estado)) {
+    const e = new Error(
+      `Solo se pueden editar los ítems de un despacho en ${ESTADOS_EDITABLES.join(" o ")}`,
+    );
     e.statusCode = 409;
     e.expose = true;
     throw e;
@@ -468,6 +575,8 @@ export async function findAllWithResumen(filters = {}) {
   if (Array.isArray(filters.estado)) query = query.in("estado", filters.estado);
   else if (filters.estado) query = query.eq("estado", filters.estado);
 
+  query = aplicarFiltroInactivo(query, filters);
+
   if (filters.sin_asignar) {
     query = query.is("despachador_id", null);
   } else if (filters.despachador_id) {
@@ -529,8 +638,304 @@ export async function findForAuditor() {
   const { data, error } = await supabase
     .from(TABLE)
     .select("id, origen, destino, estado, created_at, updated_at")
-    .in("estado", ["Recolectado", "En_recepcion"]);
+    .in("estado", ["Recolectado", "En_recepcion"])
+    // Los inactivos desaparecen también del auditor (ver aplicarFiltroInactivo).
+    .eq("inactivo", false);
 
   if (error) throw new Error(`Error al listar despachos para auditoría: ${error.message}`);
   return data;
+}
+
+/* =============================================
+   BORRADOR — la lista que el admin arma durante la semana (flujo General)
+   ============================================= */
+
+/**
+ * El borrador abierto de una ruta, con sus ítems. `null` si no hay ninguno.
+ * El índice parcial garantiza que sea a lo sumo uno (ver migración 013).
+ */
+export async function findBorrador(origen, destino) {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("*, traslados_items(*)")
+    .eq("estado", "Borrador")
+    .eq("origen", origen)
+    .eq("destino", destino)
+    .maybeSingle();
+
+  if (error) throw new Error(`Error al buscar el listado en curso: ${error.message}`);
+  return data;
+}
+
+/** Todos los borradores abiertos (para mostrarlos en el panel del admin). */
+export async function findBorradores() {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("*, traslados_items(id, codigo_item, descripcion, unidad_medida, cantidad_admin)")
+    .eq("estado", "Borrador")
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Error al listar los listados en curso: ${error.message}`);
+  return data || [];
+}
+
+/**
+ * Agrega ítems a un borrador con semántica REEMPLAZAR (decisión del negocio):
+ * si el ítem ya está en la lista, la cantidad nueva pisa la anterior; si no está,
+ * se inserta. Devuelve qué se hizo con cada uno para que el panel pueda decir
+ * "3 agregados, 2 actualizados".
+ *
+ * La identidad del ítem dentro del despacho es `(codigo_item, unidad_medida)`, la
+ * misma con la que el admin arma el carrito: el mismo producto en CAJA y en BULTO
+ * son dos renglones distintos, y pisar uno con el otro perdería la presentación.
+ *
+ * @param {string} id - despacho en Borrador
+ * @param {Array<object>} items - ítems del payload del admin
+ * @returns {Promise<{agregados:number, actualizados:number}>}
+ */
+export async function agregarItemsBorrador(id, items) {
+  const { data: cab } = await supabase.from(TABLE).select("estado").eq("id", id).single();
+  if (!cab) {
+    const e = new Error("Listado no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (cab.estado !== "Borrador") {
+    const e = new Error(
+      `Este despacho ya se finalizó (estado ${cab.estado}): no se le pueden agregar ítems`,
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  const { data: actuales, error: errLeer } = await supabase
+    .from("traslados_items")
+    .select("id, codigo_item, unidad_medida")
+    .eq("despacho_id", id);
+  if (errLeer) throw new Error(`Error al leer el listado: ${errLeer.message}`);
+
+  const clave = (codigo, um) => `${String(codigo ?? "").trim()}|${String(um ?? "").trim()}`;
+  const existentes = new Map(
+    (actuales || []).map((it) => [clave(it.codigo_item, it.unidad_medida), it.id]),
+  );
+
+  const nuevos = [];
+  let actualizados = 0;
+
+  for (const item of items) {
+    const itemId = existentes.get(clave(item.codigo_item, item.unidad_medida));
+    if (itemId) {
+      // REEMPLAZAR: la cantidad nueva pisa la anterior. También se refresca el
+      // snapshot de inventario, porque es el que el admin vio HOY al decidir —
+      // conservar el del lunes contaría una historia que ya no es cierta.
+      const { error } = await supabase
+        .from("traslados_items")
+        .update({
+          cantidad_admin: item.cantidad,
+          sugerido: item.sugerido,
+          stock_origen: item.stock_origen,
+          stock_destino: item.stock_destino,
+          consumo_destino: item.consumo_destino,
+          stock_seguridad: item.stock_seguridad,
+          factor: item.factor ?? 1,
+        })
+        .eq("id", itemId);
+      if (error) throw new Error(`Error al actualizar el ítem del listado: ${error.message}`);
+      actualizados += 1;
+    } else {
+      nuevos.push(aFilaItem(id, item));
+    }
+  }
+
+  if (nuevos.length) {
+    const { error } = await supabase.from("traslados_items").insert(nuevos);
+    if (error) throw new Error(`Error al agregar ítems al listado: ${error.message}`);
+  }
+
+  await supabase.from(TABLE).update({ updated_at: new Date().toISOString() }).eq("id", id);
+
+  return { agregados: nuevos.length, actualizados };
+}
+
+/**
+ * Finaliza el borrador: pasa a "Creado" y recién ahí aparece en el panel del
+ * despachador. Sella `disponible_at` — es el instante desde el que corre la
+ * alerta de "nadie inició la recolección", no la fecha en que se abrió la lista.
+ *
+ * Atómico contra el estado leído: dos clicks en "Finalizar" no lo pasan dos veces.
+ * Rechaza un borrador vacío: un despacho sin ítems no es nada que recolectar, y
+ * llegaría al despachador como una lista en blanco.
+ */
+export async function finalizarBorrador(id, { despachadorId } = {}) {
+  const { data: cab } = await supabase
+    .from(TABLE)
+    .select("estado, traslados_items(id)")
+    .eq("id", id)
+    .single();
+
+  if (!cab) {
+    const e = new Error("Listado no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (cab.estado !== "Borrador") {
+    const e = new Error(`Este despacho ya está en estado ${cab.estado}`);
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if ((cab.traslados_items || []).length === 0) {
+    const e = new Error("El listado está vacío: agregá al menos un producto antes de finalizar");
+    e.statusCode = 422;
+    e.expose = true;
+    throw e;
+  }
+
+  const ahora = new Date().toISOString();
+  const patch = { estado: "Creado", updated_at: ahora, disponible_at: ahora };
+  if (despachadorId) patch.despachador_id = despachadorId;
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update(patch)
+    .eq("id", id)
+    .eq("estado", "Borrador")
+    .select()
+    .single();
+
+  if (error || !data) {
+    const e = new Error("El listado ya se había finalizado");
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  return data;
+}
+
+/** Descarta un borrador entero (ítems por cascade). Solo si sigue en Borrador. */
+export async function descartarBorrador(id) {
+  const { data, error } = await supabase
+    .from(TABLE)
+    .delete()
+    .eq("id", id)
+    .eq("estado", "Borrador")
+    .select("id")
+    .maybeSingle();
+
+  if (error) throw new Error(`Error al descartar el listado: ${error.message}`);
+  if (!data) {
+    const e = new Error("El listado no existe o ya se finalizó");
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  return { id, descartado: true };
+}
+
+/* =============================================
+   INACTIVAR / REACTIVAR
+   ============================================= */
+
+/**
+ * Marca un traslado como inactivo o lo devuelve a la circulación.
+ *
+ * Al REACTIVAR se re-sella `disponible_at` y se limpian las marcas de alerta: el
+ * traslado vuelve a la cola como si recién llegara. Sin eso, un traslado
+ * reactivado ya viene con el reloj vencido y el barrido lo inactivaría de nuevo en
+ * la pasada siguiente — el botón "Reactivar" no serviría para nada.
+ *
+ * Los hitos de trazabilidad (`recoleccion_finalizada_at` y compañía) NO se tocan:
+ * son historial de lo que pasó, y reactivar no cambia el pasado.
+ *
+ * @param {string} id
+ * @param {boolean} activo - true = reactivar, false = inactivar
+ * @param {string} [motivo] - por qué se inactivó (queda para el panel)
+ */
+export async function setActivo(id, activo, motivo = null) {
+  const ahora = new Date().toISOString();
+  const patch = activo
+    ? {
+        inactivo: false,
+        inactivo_at: null,
+        inactivo_motivo: null,
+        disponible_at: ahora,
+        alerta_recoleccion_at: null,
+        alerta_auditoria_at: null,
+        updated_at: ahora,
+      }
+    : {
+        inactivo: true,
+        inactivo_at: ahora,
+        inactivo_motivo: motivo,
+        updated_at: ahora,
+      };
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update(patch)
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Error al cambiar la actividad del traslado: ${error?.message}`);
+  }
+  return data;
+}
+
+/* =============================================
+   CONSULTAS DEL BARRIDO DE ALERTAS
+   ============================================= */
+
+/**
+ * Traslados estancados en una etapa desde antes del corte.
+ *
+ * @param {object} opts
+ * @param {string[]} opts.estados - etapas donde el traslado ESPERA a alguien
+ * @param {string} opts.corte     - ISO; `disponible_at` anterior a esto = vencido
+ * @param {string|null} [opts.campoAlerta] - columna de la marca de aviso; se pide
+ *   `IS NULL` para no volver a avisar. `null` = sin deduplicar (usado por la
+ *   inactivación, cuyo "ya se hizo" es la bandera `inactivo` misma).
+ * @param {boolean} [opts.auditoriaSinIniciar] - exige `auditoria_iniciada_at IS
+ *   NULL`. El estado se queda en "Recolectado" mientras el auditor cuenta (el
+ *   comparar no lo cambia), así que sin esta condición avisaríamos de un traslado
+ *   que el auditor YA está auditando — la alerta diría una mentira.
+ */
+export async function findEstancados({
+  estados,
+  corte,
+  campoAlerta = null,
+  auditoriaSinIniciar = false,
+}) {
+  let q = supabase
+    .from(TABLE)
+    .select(
+      "id, origen, destino, estado, created_at, disponible_at, despachador_id, auditoria_iniciada_at",
+    )
+    .in("estado", estados)
+    .eq("inactivo", false)
+    // `disponible_at` nulo = sin reloj. No debería pasar (la migración hace
+    // backfill), pero un NULL colado no puede convertirse en "vencido hace
+    // infinito" y disparar una avalancha de correos.
+    .not("disponible_at", "is", null)
+    .lt("disponible_at", corte);
+
+  if (campoAlerta) q = q.is(campoAlerta, null);
+  if (auditoriaSinIniciar) q = q.is("auditoria_iniciada_at", null);
+
+  const { data, error } = await q.order("disponible_at", { ascending: true });
+  if (error) throw new Error(`Error al buscar traslados estancados: ${error.message}`);
+  return data || [];
+}
+
+/** Sella la marca de "esta alerta ya se avisó" para no repetir el correo. */
+export async function marcarAlertaEnviada(id, campoAlerta) {
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ [campoAlerta]: new Date().toISOString() })
+    .eq("id", id);
+  if (error) console.error(`[alertas] no se pudo marcar ${campoAlerta} en ${id}:`, error.message);
 }

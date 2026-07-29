@@ -340,6 +340,96 @@ export async function enviarErrorSiesa(despacho, resultado) {
   });
 }
 
+/* =============================================
+   Alertas por inactividad (las dispara el barrido — ver alertas.service.js)
+   ============================================= */
+
+/**
+ * Correo de traslado estancado. Plantilla propia y sin tabla de ítems, a
+ * propósito: el lector no tiene que revisar productos, tiene que ir a destrabar
+ * un traslado. Lo único que necesita es CUÁL, CUÁNTO lleva y QUÉ falta hacer.
+ *
+ * @param {object} p
+ * @param {object} p.despacho    - cabecera (id, origen, destino, disponible_at)
+ * @param {string} p.titulo
+ * @param {string} p.queFalta    - la acción concreta que nadie hizo
+ * @param {number} p.horas       - umbral configurado que se superó
+ * @param {number} p.horasReales - cuánto lleva realmente esperando
+ */
+function armarHtmlAlerta({ despacho, titulo, queFalta, horas, horasReales }) {
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const desde = fechaHoraLegible(despacho.disponible_at || despacho.created_at);
+
+  return `
+  <div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:640px;">
+    <h2 style="color:#b45309;margin-bottom:4px;">⏱ ${esc(titulo)}</h2>
+    <p style="margin:0 0 12px;">${esc(queFalta)}</p>
+    <table style="margin:8px 0 16px;font-size:14px;">
+      <tr><td style="padding:2px 8px;color:#64748b;">Traslado</td><td style="padding:2px 8px;"><b>${esc(String(despacho.id))}</b></td></tr>
+      <tr><td style="padding:2px 8px;color:#64748b;">Ruta</td><td style="padding:2px 8px;">${esc(ruta)}</td></tr>
+      <tr><td style="padding:2px 8px;color:#64748b;">Esperando desde</td><td style="padding:2px 8px;">${esc(desde)}</td></tr>
+      <tr><td style="padding:2px 8px;color:#64748b;">Tiempo sin atender</td><td style="padding:2px 8px;"><b>${esc(horasReales)} h</b> (el aviso está configurado en ${esc(horas)} h)</td></tr>
+    </table>
+    <p style="margin-top:16px;font-size:12px;color:#94a3b8;">
+      Correo automático del sistema de Traslados — Merkahorro. No responder.<br>
+      Las horas de este aviso se configuran en el panel de administración, sección Alertas.
+    </p>
+  </div>`;
+}
+
+/**
+ * Destinatarios de una alerta: los que cargó el encargado en el panel, o los de
+ * despachos si la lista está vacía. El fallback importa — una alerta configurada
+ * sin correos que no le llega a nadie es peor que no tener la alerta, porque el
+ * panel dice que está activa.
+ */
+const destinatariosAlerta = (correos) =>
+  correos?.length ? correos : DESTINATARIOS.despachos;
+
+/**
+ * Nadie inició la recolección. Best-effort: devuelve { success }, no lanza.
+ * @param {object} despacho
+ * @param {{horas:number, horasReales:number, correos:string[]}} cfg
+ */
+export async function notificarSinIniciarRecoleccion(despacho, { horas, horasReales, correos }) {
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  return sendEmail({
+    to: destinatariosAlerta(correos),
+    subject: `⏱ Traslado sin recolectar hace ${horasReales} h — ${ruta}`,
+    html: armarHtmlAlerta({
+      despacho,
+      titulo: "Nadie inició la recolección",
+      queFalta:
+        "El traslado está disponible en el panel del despachador y todavía ningún " +
+        "despachador lo tomó. Hay que asignarlo o averiguar por qué quedó parado.",
+      horas,
+      horasReales,
+    }),
+  });
+}
+
+/**
+ * El despachador cerró y nadie empezó a auditar. Best-effort.
+ * @param {object} despacho
+ * @param {{horas:number, horasReales:number, correos:string[]}} cfg
+ */
+export async function notificarSinIniciarAuditoria(despacho, { horas, horasReales, correos }) {
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  return sendEmail({
+    to: destinatariosAlerta(correos),
+    subject: `⏱ Traslado sin auditar hace ${horasReales} h — ${ruta}`,
+    html: armarHtmlAlerta({
+      despacho,
+      titulo: "Nadie inició la auditoría",
+      queFalta:
+        "La recolección ya cerró y la mercancía está esperando que el auditor de " +
+        "destino la reciba y la cuente. Nadie abrió todavía este traslado en el panel del auditor.",
+      horas,
+      horasReales,
+    }),
+  });
+}
+
 /**
  * Dispara TODOS los correos del cierre de recolección y deja en el log qué pasó
  * con cada uno. Nunca lanza: el correo no puede tumbar el flujo de negocio.

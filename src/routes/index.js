@@ -4,6 +4,7 @@ import despachoRoutes from "./despacho.routes.js";
 import auditorRoutes from "./auditor.routes.js";
 import capacidadRoutes from "./capacidad.routes.js";
 import configRoutes from "./config.routes.js";
+import alertasRoutes from "./alertas.routes.js";
 import { verificarEmail } from "../services/email.service.js";
 
 const router = Router();
@@ -13,6 +14,7 @@ router.use("/despachos", despachoRoutes);
 router.use("/auditor", auditorRoutes);
 router.use("/capacidad", capacidadRoutes);
 router.use("/config", configRoutes);
+router.use("/alertas", alertasRoutes);
 
 // Health check
 router.get("/health", (_req, res) => {

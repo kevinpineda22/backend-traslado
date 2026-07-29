@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+// Ítem tal como lo manda el admin al crear un despacho o al engordar un borrador.
+const itemAdminSchema = z.object({
+  codigo_item: z.string().min(1),
+  descripcion: z.string().optional(),
+  unidad_medida: z.string().optional(),
+  factor: z.number().optional(),
+  rotacion: z.string().optional(),
+  grupo: z.string().nullable().optional(),
+  categoria: z.string().nullable().optional(),
+  stock_origen: z.number().optional(),
+  stock_destino: z.number().optional(),
+  consumo_destino: z.number().optional(),
+  stock_seguridad: z.number().optional(),
+  sugerido: z.number().optional(),
+  cantidad: z.number().positive("cantidad debe ser mayor a 0"),
+});
+
 // Esquema para crear un despacho
 const crearDespachoSchema = z.object({
   flujo: z.string().optional(),
@@ -8,26 +25,12 @@ const crearDespachoSchema = z.object({
   despachador_id: z.string().optional(), // opcional: sin asignar = pool
   admin_id: z.string().optional(),
   criterios: z.array(z.string()).optional(),
-  items: z
-    .array(
-      z.object({
-        codigo_item: z.string().min(1),
-        descripcion: z.string().optional(),
-        unidad_medida: z.string().optional(),
-        factor: z.number().optional(),
-        rotacion: z.string().optional(),
-        grupo: z.string().nullable().optional(),
-        categoria: z.string().nullable().optional(),
-        stock_origen: z.number().optional(),
-        stock_destino: z.number().optional(),
-        consumo_destino: z.number().optional(),
-        stock_seguridad: z.number().optional(),
-        sugerido: z.number().optional(),
-        cantidad: z.number().positive("cantidad debe ser mayor a 0"),
-      }),
-    )
-    .min(1, "Debe incluir al menos un item"),
+  // "Borrador" = lista en construcción (flujo General); ausente o "Creado" = el
+  // despacho nace listo para el despachador, como siempre.
+  estado: z.enum(["Borrador", "Creado"]).optional(),
+  items: z.array(itemAdminSchema).min(1, "Debe incluir al menos un item"),
 });
+
 
 // Esquema para cambio de estado
 const cambiarEstadoSchema = z.object({
@@ -159,6 +162,37 @@ const configSchema = z.object({
   }),
 });
 
+// Config de alertas por inactividad.
+// Las horas se exigen > 0: un umbral de 0 dispararía la alerta en el mismo barrido
+// en que el traslado se creó, o inactivaría todo el pool de una pasada.
+const horasAlerta = z.preprocess(
+  (v) => Number(v),
+  z.number().positive("las horas deben ser mayores a 0"),
+);
+
+// Los correos se validan acá Y se sanean en el modelo. La doble puerta es a
+// propósito: acá el admin recibe un mensaje que dice qué corregir; el modelo
+// protege al barrido de cualquier basura que ya esté guardada en la BD.
+const correosAlerta = z
+  .array(z.string().email("correo inválido"))
+  .optional()
+  .default([]);
+
+const alertaCorreoSchema = z.object({
+  activa: z.boolean(),
+  horas: horasAlerta,
+  correos: correosAlerta,
+});
+
+const alertasConfigSchema = z.object({
+  recoleccion: alertaCorreoSchema,
+  auditoria: alertaCorreoSchema,
+  inactivar: z.object({
+    activa: z.boolean(),
+    horas: horasAlerta,
+  }),
+});
+
 /**
  * Middleware factory: valida req.body contra un esquema Zod.
  */
@@ -182,6 +216,7 @@ function validate(schema) {
 
 export const validators = {
   crearDespacho: validate(crearDespachoSchema),
+  alertasConfig: validate(alertasConfigSchema),
   cambiarEstado: validate(cambiarEstadoSchema),
   comparar: validate(compararSchema),
   confirmar: validate(confirmarSchema),

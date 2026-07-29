@@ -72,6 +72,68 @@ export async function crear(payload) {
   return DespachoModel.create(payload);
 }
 
+/* =============================================
+   BORRADOR — el listado que el admin arma durante la semana (flujo General)
+   ============================================= */
+
+/**
+ * Abre o engorda el listado de una ruta, en UNA sola operación.
+ *
+ * El panel no tiene que saber si el borrador ya existe: manda los ítems y este
+ * método decide. Si el front tuviera que consultar primero y crear después, dos
+ * pestañas abiertas podrían crear dos borradores para la misma ruta — y el índice
+ * único de la base rechazaría el segundo con un error que el admin no entiende.
+ *
+ * Semántica de ítem repetido: REEMPLAZAR (decisión del negocio). El panel avisa
+ * antes; acá se ejecuta.
+ *
+ * @param {object} payload - igual que `crear`, con { origen, destino, items[] }
+ * @returns {Promise<{despacho:object, agregados:number, actualizados:number, creado:boolean}>}
+ */
+export async function agregarAlListado(payload) {
+  const { origen, destino, items } = payload;
+
+  const existente = await DespachoModel.findBorrador(origen, destino);
+  if (!existente) {
+    const despacho = await DespachoModel.create({ ...payload, estado: "Borrador" });
+    return { despacho, agregados: items.length, actualizados: 0, creado: true };
+  }
+
+  const { agregados, actualizados } = await DespachoModel.agregarItemsBorrador(
+    existente.id,
+    items,
+  );
+  return {
+    despacho: await DespachoModel.findBorrador(origen, destino),
+    agregados,
+    actualizados,
+    creado: false,
+  };
+}
+
+/** El listado abierto de una ruta (con sus ítems), o null. */
+export async function obtenerListado(origen, destino) {
+  return DespachoModel.findBorrador(origen, destino);
+}
+
+/** Todos los listados abiertos, para mostrarlos en el panel del admin. */
+export async function listarListados() {
+  return DespachoModel.findBorradores();
+}
+
+/**
+ * Finalizar el listado: pasa a "Creado" y recién ahí lo ve el despachador.
+ * Es el punto sin retorno del flujo semanal — después de esto no se agregan ítems.
+ */
+export async function finalizarListado(id, despachadorId = null) {
+  return DespachoModel.finalizarBorrador(id, { despachadorId });
+}
+
+/** Descartar un listado completo sin despacharlo. */
+export async function descartarListado(id) {
+  return DespachoModel.descartarBorrador(id);
+}
+
 /**
  * Cambiar estado de un despacho.
  *

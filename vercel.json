@@ -14,6 +14,10 @@
     {
       "path": "/api/siesa/requisiciones/reintentar",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/alertas/barrer",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

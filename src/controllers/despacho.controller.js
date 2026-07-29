@@ -34,8 +34,15 @@ export async function itemsActivos(_req, res, next) {
 
 export async function listar(req, res, next) {
   try {
-    const { estado, despachador_id, sin_asignar, resumen } = req.query;
-    const filters = { estado, despachador_id, sin_asignar };
+    const { estado, despachador_id, sin_asignar, resumen, incluir_inactivos } = req.query;
+    const filters = {
+      estado,
+      despachador_id,
+      sin_asignar,
+      // Los inactivos se ocultan por defecto (ver Despacho.model). El monitor del
+      // admin puede pedirlos explícitamente para ver el panorama completo.
+      incluir_inactivos: incluir_inactivos === "true",
+    };
 
     if (resumen === "true") {
       const data = await DespachoService.listarConResumen(filters);
@@ -127,6 +134,75 @@ export async function crear(req, res, next) {
   try {
     const data = await DespachoService.crear(req.body);
     res.status(201).json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* =============================================
+   BORRADOR — listado semanal del flujo General
+   ============================================= */
+
+/**
+ * POST /api/despachos/listado
+ * Abre el listado de la ruta o le agrega ítems si ya existe.
+ * Body: igual que crear un despacho — { origen, destino, flujo, items[] }
+ * Resp: { ok, data: { despacho, agregados, actualizados, creado } }
+ */
+export async function agregarAlListado(req, res, next) {
+  try {
+    const data = await DespachoService.agregarAlListado(req.body);
+    res.status(data.creado ? 201 : 200).json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/despachos/listado?origen=PV001&destino=00201
+ * El listado abierto de esa ruta (con ítems), o null si no hay ninguno.
+ * Sin `destino` devuelve TODOS los listados abiertos.
+ */
+export async function obtenerListado(req, res, next) {
+  try {
+    const { origen, destino } = req.query;
+    if (!destino) {
+      return res.json({ ok: true, data: await DespachoService.listarListados() });
+    }
+    if (!origen) {
+      return res.status(400).json({ ok: false, error: "origen es requerido junto con destino" });
+    }
+    res.json({ ok: true, data: await DespachoService.obtenerListado(origen, destino) });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/despachos/listado/:id/finalizar
+ * Cierra el listado: pasa a "Creado" y aparece en el panel del despachador.
+ * Body: { despachador_id? }
+ */
+export async function finalizarListado(req, res, next) {
+  try {
+    const data = await DespachoService.finalizarListado(
+      req.params.id,
+      req.body?.despachador_id ?? null,
+    );
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/despachos/listado/:id
+ * Descarta el listado entero sin despacharlo.
+ */
+export async function descartarListado(req, res, next) {
+  try {
+    const data = await DespachoService.descartarListado(req.params.id);
+    res.json({ ok: true, data });
   } catch (error) {
     next(error);
   }
