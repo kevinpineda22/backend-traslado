@@ -137,6 +137,11 @@ function aRegistro(o, ts) {
     um: trim(o.UM),
     um_orden: trim(o.UMOrden),
     factor: num(o.Factor) || 1,
+    // Volumen de la UNIDAD DE ORDEN (misma fila de t122 de la que sale Factor).
+    // NO se agrega entre instalaciones: es un atributo del ítem, no una cantidad
+    // — sumarlo daría el volumen multiplicado por la cantidad de instalaciones.
+    // `null` cuando SIESA no lo tiene: distinto de 0 ("ocupa cero"), ver mig. 014.
+    volumen: o.Volumen == null || o.Volumen === "" ? null : num(o.Volumen),
     inventario: o._inv,
     disponible: o._disp,
     comprometido: o._comp,

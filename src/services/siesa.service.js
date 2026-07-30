@@ -140,6 +140,9 @@ export async function getProductosTraslado({ origen, destino }) {
         rotacion: trim(fuente.rotacion) || "N/A",
         unidad_medida: trim(fuente.um),
         unidades: buildUnidades(fuente),
+        // Volumen de la unidad de orden. Viaja como `null` cuando SIESA no lo
+        // tiene, para que el panel distinga "sin dato" de "ocupa cero".
+        volumen: fuente.volumen == null ? null : num(fuente.volumen),
         criterios: fuente.criterios || {},
         inventario_origen: inventarioOrigen,
         disponible_origen: disponibleOrigen,
@@ -280,6 +283,8 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           unidad_medida: v.unidad || trim(fuente.um),
           unidades: unidadesDetalle.map((u) => u.unidad),
           unidadesDetalle,
+          // Volumen de la unidad de orden (ver getProductosTraslado).
+          volumen: fuente.volumen == null ? null : num(fuente.volumen),
           criterios: fuente.criterios || {},
           inventario_origen: inventarioOrigen,
           disponible_origen: disponibleOrigen,

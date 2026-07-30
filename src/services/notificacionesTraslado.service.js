@@ -1,6 +1,13 @@
 import { sendEmail, DESTINATARIOS, emailConfigurado } from "./email.service.js";
 import { nombreSede } from "../config/flujos.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
+import {
+  MARCA,
+  encabezadoMarca,
+  pieMarca,
+  envolverMarca,
+  filaDato,
+} from "./emailMarca.js";
 
 /* =============================================
    Notificaciones de traslado (correo)
@@ -63,36 +70,52 @@ const ENCABEZADOS_FALTANTES = ["Ítem", "Producto", "Pedido", "Recolectado", "Mo
  * Arma el HTML del correo. `filas` y `encabezados` se pasan desde afuera porque
  * el correo de cierre y el de faltantes muestran columnas distintas.
  */
-function armarHtml({ despacho, titulo, intro, filas, encabezados = ENCABEZADOS_FALTANTES }) {
+function armarHtml({
+  despacho,
+  titulo,
+  intro,
+  filas,
+  encabezados = ENCABEZADOS_FALTANTES,
+  acento = MARCA.verde,
+}) {
   const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
   // Hora de Colombia, NO la del servidor (Vercel corre en UTC). Ver config/tiempo.js.
   const fecha = fechaHoraLegible(despacho.updated_at || Date.now());
   const ths = encabezados
     .map(
       (h, i) =>
-        `<th style="padding:8px 10px;text-align:${i === 0 || i === encabezados.length - 1 ? "left" : "center"};">${esc(h)}</th>`,
+        `<th style="padding:9px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;text-align:${
+          i === 0 || i === encabezados.length - 1 ? "left" : "center"
+        };">${esc(h)}</th>`,
     )
     .join("");
 
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:640px;">
-    <h2 style="color:#2d1578;margin-bottom:4px;">${esc(titulo)}</h2>
-    <p style="margin:0 0 12px;">${esc(intro)}</p>
-    <table style="margin:8px 0 16px;font-size:14px;">
-      <tr><td style="padding:2px 8px;color:#64748b;">Despacho</td><td style="padding:2px 8px;"><b>${esc(String(despacho.id))}</b></td></tr>
-      <tr><td style="padding:2px 8px;color:#64748b;">Ruta</td><td style="padding:2px 8px;">${esc(ruta)}</td></tr>
-      <tr><td style="padding:2px 8px;color:#64748b;">Fecha</td><td style="padding:2px 8px;">${esc(fecha)}</td></tr>
+  return envolverMarca(`
+    ${encabezadoMarca({ titulo, acento })}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td style="padding:20px 26px 8px;">
+          <p style="margin:0 0 14px;font-size:14px;line-height:1.6;color:${MARCA.texto};">${esc(intro)}</p>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                 style="margin:0 0 18px;background:${MARCA.fondo};border-radius:10px;padding:4px 14px;width:100%;">
+            <tr><td style="padding:8px 14px 2px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                ${filaDato("Ruta", esc(ruta), true)}
+                ${filaDato("Fecha", esc(fecha))}
+                ${filaDato("Despacho", `<span style="font-family:monospace;font-size:11px;">${esc(String(despacho.id))}</span>`)}
+              </table>
+            </td></tr>
+          </table>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                 style="border-collapse:collapse;width:100%;font-size:13px;">
+            <thead><tr style="background:${MARCA.medio};color:${MARCA.blanco};">${ths}</tr></thead>
+            <tbody>${filas}</tbody>
+          </table>
+        </td>
+      </tr>
     </table>
-    <table style="border-collapse:collapse;width:100%;font-size:13px;">
-      <thead>
-        <tr style="background:#2d1578;color:#fff;">${ths}</tr>
-      </thead>
-      <tbody>${filas}</tbody>
-    </table>
-    <p style="margin-top:16px;font-size:12px;color:#94a3b8;">
-      Correo automático del sistema de Traslados — Merkahorro. No responder.
-    </p>
-  </div>`;
+    ${pieMarca()}
+  `);
 }
 
 /** Fila de la tabla del correo de cierre (todos los ítems, no solo faltantes). */
@@ -143,6 +166,9 @@ export async function notificarCierreRecoleccion(despacho) {
       intro: `El despachador cerró la recolección. ${resumen}`,
       filas: filasCierre(items),
       encabezados: ["Ítem", "Producto", "Pedido", "Recolectado", "Estado"],
+      // El color de la banda dice el estado antes de leer: verde salió completo,
+      // ámbar algo quedó faltando.
+      acento: conFaltante.length ? MARCA.ambar : MARCA.verde,
     }),
   });
 }
@@ -168,6 +194,7 @@ export async function notificarFaltantesRecoleccion(despacho) {
       titulo: "Faltantes reportados en recolección",
       intro: `El despachador cerró la recolección con ${items.length} producto(s) marcados con faltante. Detalle:`,
       filas: filasTabla(items),
+      acento: MARCA.ambar,
     }),
   });
 
@@ -182,6 +209,8 @@ export async function notificarFaltantesRecoleccion(despacho) {
         titulo: "Posible inventario inflado",
         intro: `Durante la recolección se detectaron ${inflados.length} producto(s) con inventario que no coincide con la existencia física. Revisar:`,
         filas: filasTabla(inflados),
+        // Rojo: no es un faltante de surtido, es el inventario del ERP mintiendo.
+        acento: MARCA.rojo,
       }),
     });
   }
@@ -360,21 +389,47 @@ function armarHtmlAlerta({ despacho, titulo, queFalta, horas, horasReales }) {
   const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
   const desde = fechaHoraLegible(despacho.disponible_at || despacho.created_at);
 
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;max-width:640px;">
-    <h2 style="color:#b45309;margin-bottom:4px;">⏱ ${esc(titulo)}</h2>
-    <p style="margin:0 0 12px;">${esc(queFalta)}</p>
-    <table style="margin:8px 0 16px;font-size:14px;">
-      <tr><td style="padding:2px 8px;color:#64748b;">Traslado</td><td style="padding:2px 8px;"><b>${esc(String(despacho.id))}</b></td></tr>
-      <tr><td style="padding:2px 8px;color:#64748b;">Ruta</td><td style="padding:2px 8px;">${esc(ruta)}</td></tr>
-      <tr><td style="padding:2px 8px;color:#64748b;">Esperando desde</td><td style="padding:2px 8px;">${esc(desde)}</td></tr>
-      <tr><td style="padding:2px 8px;color:#64748b;">Tiempo sin atender</td><td style="padding:2px 8px;"><b>${esc(horasReales)} h</b> (el aviso está configurado en ${esc(horas)} h)</td></tr>
+  return envolverMarca(`
+    ${encabezadoMarca({ titulo: `⏱ ${titulo}`, acento: MARCA.ambar })}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td style="padding:20px 26px 6px;">
+          <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${MARCA.texto};">${esc(queFalta)}</p>
+
+          <!-- El dato que importa, grande: cuánto lleva parado. Es lo que decide
+               si esto se atiende ahora o después. -->
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                 style="background:#fff8ec;border:1px solid ${MARCA.ambar};border-radius:10px;margin-bottom:18px;">
+            <tr>
+              <td style="padding:14px 18px;">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#9a5b00;">
+                  Tiempo sin atender
+                </div>
+                <div style="margin-top:2px;font-size:26px;font-weight:800;line-height:1.1;color:#9a5b00;">
+                  ${esc(horasReales)} h
+                </div>
+                <div style="margin-top:3px;font-size:12px;color:${MARCA.textoSuave};">
+                  El aviso está configurado en ${esc(horas)} h
+                </div>
+              </td>
+            </tr>
+          </table>
+
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                 style="background:${MARCA.fondo};border-radius:10px;">
+            <tr><td style="padding:12px 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                ${filaDato("Ruta", esc(ruta), true)}
+                ${filaDato("Esperando desde", esc(desde))}
+                ${filaDato("Traslado", `<span style="font-family:monospace;font-size:11px;">${esc(String(despacho.id))}</span>`)}
+              </table>
+            </td></tr>
+          </table>
+        </td>
+      </tr>
     </table>
-    <p style="margin-top:16px;font-size:12px;color:#94a3b8;">
-      Correo automático del sistema de Traslados — Merkahorro. No responder.<br>
-      Las horas de este aviso se configuran en el panel de administración, sección Alertas.
-    </p>
-  </div>`;
+    ${pieMarca("Las horas de este aviso se configuran en el panel de administración, sección Alertas.")}
+  `);
 }
 
 /**
