@@ -23,16 +23,22 @@ import {
    Todas miden `disponible_at` = desde cuándo el traslado espera que alguien lo
    tome (ver migración 013).
 
-     1. recoleccion → 'Creado' vencido                          → correo (una vez)
-     2. auditoria   → 'Recolectado' vencido y SIN empezar a contar → correo (una vez)
-     3. inactivar   → cualquiera de las dos vencida              → marca inactivo
+     1. recoleccion → 'Creado' vencido                        → correo (una vez)
+     2. auditoria   → esperando auditor y SIN nadie atendiéndolo → correo (una vez)
+     3. inactivar   → cualquiera de las dos vencida            → marca inactivo
 
-   El "sin empezar a contar" de la regla 2 sale de `auditoria_iniciada_at`
-   (migración 010), y no del estado: el despacho se queda en 'Recolectado'
-   mientras el auditor cuenta, porque el paso de comparar no cambia el estado. Si
-   miráramos solo el estado, avisaríamos "nadie inició la auditoría" de un traslado
-   que el auditor tiene abierto y a medio contar — la alerta diría una mentira, y
-   una alerta que miente se deja de leer.
+   CÓMO SE SABE QUE "NADIE LO ESTÁ ATENDIENDO"
+   Ni por el estado ni por `auditoria_iniciada_at`. El auditor cuenta TODO en el
+   navegador (localStorage) y no toca el backend hasta que aprieta Comparar, así
+   que durante todo el conteo el traslado se ve exactamente igual a uno abandonado:
+   estado 'Recolectado' y `auditoria_iniciada_at` en NULL. Sin más señal, la regla 3
+   congelaba traslados con el auditor contando, y al firmar se comía un 409.
+
+   La señal es `auditoria_abierta_at` (migración 015), que se re-sella cada vez que
+   el auditor abre o compara. Y se mide su FRESCURA, no su existencia: marcarlo como
+   "ya abierto" para siempre dejaría al que abre y se va inmune a las tres reglas —
+   invisible justo para lo que las alertas existen. Con la ventana de gracia, el que
+   está contando queda protegido y el que abandonó vuelve a la cola.
 
    ORDEN: primero los correos, después la inactivación. Al revés, un traslado que
    cruza los dos umbrales en el mismo barrido se inactivaría antes de avisar y
@@ -54,14 +60,32 @@ const LOCK_TTL_S = 120;
 
 /** Etapas donde el traslado ESPERA a alguien, por tipo de alerta. */
 const ESTADOS_ESPERA_DESPACHADOR = ["Creado"];
-// 'En_recepcion' entra acá porque el auditor puede haberlo abierto sin contar nada;
-// el filtro fino es `auditoria_iniciada_at IS NULL`, no el estado.
+// El flujo real hoy es Recolectado → Auditado/Rechazado/Inconsistencia: NADIE setea
+// 'En_recepcion' (está declarado en las transiciones y en los validators, pero no
+// hay filas en ese estado). Se lo deja listado para que la regla siga valiendo si
+// algún día se usa, pero NO aporta ninguna red de seguridad hoy — quien distingue
+// "lo están atendiendo" de "está abandonado" es `auditoria_abierta_at`, no el estado.
 const ESTADOS_ESPERA_AUDITOR = ["Recolectado", "En_recepcion"];
+
+/**
+ * Ventana de gracia del auditor: cuánto tiempo después de abrir un traslado se lo
+ * considera "en manos de alguien". Un conteo de varios cientos de ítems puede
+ * llevar más de una hora, así que el default es generoso — equivocarse para el
+ * lado de no molestar es barato; equivocarse para el otro traba a una persona con
+ * el conteo hecho.
+ */
+const GRACIA_AUDITOR_H = Number(process.env.ALERTAS_GRACIA_AUDITOR_HORAS) || 4;
 
 const horasDesde = (iso) => (Date.now() - new Date(iso).getTime()) / 36e5;
 
 /** ISO del instante a partir del cual un `disponible_at` se considera vencido. */
 const corteDe = (horas) => new Date(Date.now() - horas * 36e5).toISOString();
+
+/**
+ * ISO del corte de actividad del auditor: si `auditoria_abierta_at` es POSTERIOR a
+ * este instante, hay alguien trabajando y el traslado no se toca.
+ */
+const corteAuditor = () => corteDe(GRACIA_AUDITOR_H);
 
 /**
  * Corre una regla de alerta por correo: busca los vencidos, manda y marca.
@@ -77,7 +101,7 @@ async function correrReglaCorreo({
   estados,
   campoAlerta,
   notificar,
-  auditoriaSinIniciar = false,
+  respetaAuditor = false,
 }) {
   if (!cfg.activa) return { regla, activa: false, vencidos: 0, enviados: 0 };
 
@@ -85,7 +109,7 @@ async function correrReglaCorreo({
     estados,
     corte: corteDe(cfg.horas),
     campoAlerta,
-    auditoriaSinIniciar,
+    auditorInactivoDesde: respetaAuditor ? corteAuditor() : null,
   });
 
   let enviados = 0;
@@ -124,11 +148,13 @@ async function correrReglaInactivar(cfg) {
   const vencidos = await DespachoModel.findEstancados({
     estados: [...ESTADOS_ESPERA_DESPACHADOR, ...ESTADOS_ESPERA_AUDITOR],
     corte: corteDe(cfg.horas),
-    // Solo se congela lo que NADIE empezó a trabajar. Si el auditor ya abrió el
-    // traslado y contó unidades, inactivarlo le borraría el trabajo de la pantalla
-    // a mitad de camino — eso lo decide una persona, no un cron. (Para los que
-    // están en 'Creado' esta condición no cambia nada: nunca tienen auditoría.)
-    auditoriaSinIniciar: true,
+    // Nunca se congela un traslado que un auditor tiene abierto AHORA: le borraría
+    // el trabajo de la pantalla a mitad de conteo y lo dejaría con un 409 al firmar.
+    // Eso lo decide una persona, no un cron. Pero "abierto hace tres días y nunca
+    // confirmado" sí es abandono, y ese vuelve a la cola — por eso es frescura y no
+    // un "ya lo abrieron" permanente. (Para los 'Creado' la condición no cambia
+    // nada: nunca tienen apertura de auditoría.)
+    auditorInactivoDesde: corteAuditor(),
   });
 
   let inactivados = 0;
@@ -197,7 +223,7 @@ export async function barrerAlertas() {
           estados: ESTADOS_ESPERA_AUDITOR,
           campoAlerta: "alerta_auditoria_at",
           notificar: notificarSinIniciarAuditoria,
-          auditoriaSinIniciar: true,
+          respetaAuditor: true,
         }),
       );
     }

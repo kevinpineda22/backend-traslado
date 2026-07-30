@@ -323,6 +323,26 @@ export async function marcarAuditoriaIniciada(id) {
 }
 
 /**
+ * Señal de actividad: "un auditor está trabajando en este traslado AHORA".
+ *
+ * A diferencia de `marcarAuditoriaIniciada`, esta NO es idempotente: se re-sella
+ * en cada toque, a propósito. Lo que interesa no es si alguna vez lo abrieron,
+ * sino hace cuánto — un traslado abierto hace 10 minutos tiene a alguien contando;
+ * uno abierto anteayer y nunca confirmado está abandonado, y ese sí hay que
+ * alertarlo. Ver migración 015.
+ *
+ * Best-effort: la llama una LECTURA (`obtenerDetalle`), así que nunca puede hacer
+ * fallar la respuesta que el auditor está esperando para ponerse a contar.
+ */
+export async function marcarAuditoriaAbierta(id) {
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ auditoria_abierta_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) console.error(`[auditoria] no se pudo marcar actividad en ${id}:`, error.message);
+}
+
+/**
  * Candado de propiedad para las escrituras de recolección (`POST /recolectar`).
  * Verifica que el despacho esté EN recolección y sea del despachador que llama.
  * Impide que un segundo despachador (lista vieja, otra pestaña, el monitor, o el
@@ -899,21 +919,28 @@ export async function setActivo(id, activo, motivo = null) {
  * @param {string|null} [opts.campoAlerta] - columna de la marca de aviso; se pide
  *   `IS NULL` para no volver a avisar. `null` = sin deduplicar (usado por la
  *   inactivación, cuyo "ya se hizo" es la bandera `inactivo` misma).
- * @param {boolean} [opts.auditoriaSinIniciar] - exige `auditoria_iniciada_at IS
- *   NULL`. El estado se queda en "Recolectado" mientras el auditor cuenta (el
- *   comparar no lo cambia), así que sin esta condición avisaríamos de un traslado
- *   que el auditor YA está auditando — la alerta diría una mentira.
+ * @param {string|null} [opts.auditorInactivoDesde] - ISO. Excluye los traslados
+ *   que un auditor abrió DESPUÉS de ese instante, o sea los que alguien está
+ *   atendiendo ahora mismo.
+ *
+ *   POR QUÉ NO ALCANZA EL ESTADO NI `auditoria_iniciada_at`: el auditor cuenta
+ *   entero en el navegador y no toca el backend hasta que aprieta Comparar, así
+ *   que durante todo el conteo el traslado se ve idéntico a uno abandonado. Y
+ *   marcarlo como "ya abierto" para siempre sería peor: el que abre y se va
+ *   quedaría inmune a las tres reglas. Por eso se mide la FRESCURA de la última
+ *   apertura (ver migración 015).
  */
 export async function findEstancados({
   estados,
   corte,
   campoAlerta = null,
-  auditoriaSinIniciar = false,
+  auditorInactivoDesde = null,
 }) {
   let q = supabase
     .from(TABLE)
     .select(
-      "id, origen, destino, estado, created_at, disponible_at, despachador_id, auditoria_iniciada_at",
+      "id, origen, destino, estado, created_at, disponible_at, despachador_id, " +
+        "auditoria_iniciada_at, auditoria_abierta_at",
     )
     .in("estado", estados)
     .eq("inactivo", false)
@@ -924,7 +951,15 @@ export async function findEstancados({
     .lt("disponible_at", corte);
 
   if (campoAlerta) q = q.is(campoAlerta, null);
-  if (auditoriaSinIniciar) q = q.is("auditoria_iniciada_at", null);
+
+  // "Nunca lo abrieron" O "lo abrieron hace rato y lo dejaron". Los dos casos son
+  // desatención; el que queda afuera es el único que importa proteger: el que
+  // alguien tiene abierto ahora.
+  if (auditorInactivoDesde) {
+    q = q.or(
+      `auditoria_abierta_at.is.null,auditoria_abierta_at.lt.${auditorInactivoDesde}`,
+    );
+  }
 
   const { data, error } = await q.order("disponible_at", { ascending: true });
   if (error) throw new Error(`Error al buscar traslados estancados: ${error.message}`);

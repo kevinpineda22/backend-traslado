@@ -328,6 +328,12 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
     console.error("[auditoría] no se pudo marcar inicio:", e.message),
   );
 
+  // Y refresca la señal de actividad para el barrido de alertas: comparar es
+  // trabajo del auditor igual que abrir. Sin esto, un recuento largo entre el
+  // Comparar y el Confirmar podría quedar fuera de la ventana de gracia y el
+  // traslado se inactivaría con la persona todavía contando. Ver migración 015.
+  await DespachoModel.marcarAuditoriaAbierta(despachoId).catch(() => {});
+
   const conteoAuditor = new Map(
     (itemsAuditor || []).map((i) => [i.id, Number(i.cantidad_auditor) || 0]),
   );

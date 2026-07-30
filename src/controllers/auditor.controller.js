@@ -25,6 +25,21 @@ export async function obtenerDetalle(req, res, next) {
 
     if (!despacho) return res.status(404).json({ error: "Despacho no encontrado" });
 
+    // Señal de actividad para el barrido de alertas: desde acá hay un auditor
+    // trabajando en este traslado, aunque el conteo viva en el navegador y no
+    // vuelva al backend hasta el primer Comparar. Sin esta marca, el barrido lo ve
+    // igual que a uno abandonado y la regla de inactivación lo congela a mitad de
+    // conteo — el auditor se come un 409 al firmar.
+    //
+    // Sí, es una escritura dentro de un GET. Se acepta a conciencia: es un
+    // timestamp, no un cambio de estado, y es la ÚNICA vez que el auditor toca el
+    // backend antes de firmar. La pureza REST no vale que quede una persona
+    // trabada en el piso con el conteo hecho.
+    //
+    // Best-effort: si falla, se loguea y la lectura sigue. El auditor tiene que
+    // poder ponerse a contar aunque la marca no se haya podido escribir.
+    DespachoModel.marcarAuditoriaAbierta(req.params.id).catch(() => {});
+
     // Auditoría ciega: ocultar cantidad_despachador y firma del despachador
     const { traslados_firmas, traslados_items, ...cabecera } = despacho;
 
