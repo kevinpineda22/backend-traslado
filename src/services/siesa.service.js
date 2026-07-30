@@ -27,7 +27,9 @@ const PLANES = [
   { id: "004", label: "Marca" },
   { id: "005", label: "Rotación" },
   { id: "007", label: "Negociaciones Puntuales" }, // antes: Temporada
-  { id: "MUA", label: "U. Medida" },
+  // "MUA" (U. Medida) se quitó de los filtros: no se usa en la operación y solo
+  // ocupaba lugar en la barra de criterios. El dato SIGUE guardándose en el
+  // snapshot (criterios.MUA), así que volver a mostrarlo es agregar la línea.
   { id: "TLD", label: "Traslados" }, // antes: Tipo Producto
   { id: "SP", label: "Separata" }, // antes: Segmento
   { id: "TIP", label: "Tipo" }, // DescMayorTIP (ej: "ABARROTES")

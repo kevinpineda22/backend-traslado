@@ -159,14 +159,41 @@ export async function sendEmail({ to, subject, html }) {
   }
 
   try {
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from: `"Traslados Merkahorro" <${process.env.EMAIL_USER}>`,
       to: destinatarios.join(", "),
       subject,
       html,
     });
-    console.log(`[email] ✅ enviado a ${destinatarios.join(", ")} — ${subject}`);
-    return { success: true };
+
+    // Se loguea QUÉ aceptó el servidor, no solo "se envió".
+    //
+    // `sendMail` no lanza cuando el servidor acepta unos destinatarios y rechaza
+    // otros: devuelve las dos listas. Con un log de "✅ enviado" a secas, un
+    // correo rechazado para media oficina se veía idéntico a uno entregado, y la
+    // única forma de enterarse era que alguien avisara que nunca le llegó.
+    //
+    // El `messageId` es lo que permite rastrear el mensaje en el panel de
+    // Office365 cuando el servidor lo aceptó (250 OK) pero el correo terminó en
+    // spam o en cuarentena — el caso típico al enviar entre dominios distintos.
+    const rechazados = info?.rejected || [];
+    if (rechazados.length > 0) {
+      console.error(
+        `[email] ⚠️ "${subject}" — el servidor RECHAZÓ ${rechazados.join(", ")} ` +
+          `(aceptó ${(info.accepted || []).join(", ") || "a nadie"})`,
+      );
+    }
+    console.log(
+      `[email] ✅ aceptado para ${(info?.accepted || destinatarios).join(", ")} — ` +
+        `${subject} [id ${info?.messageId || "s/id"}]`,
+    );
+
+    return {
+      success: (info?.accepted || []).length > 0,
+      messageId: info?.messageId,
+      accepted: info?.accepted || [],
+      rejected: rechazados,
+    };
   } catch (error) {
     console.error(`[email] ❌ error enviando "${subject}":`, error.message);
     return { success: false, error: error.message };

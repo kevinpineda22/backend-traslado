@@ -6,17 +6,11 @@ import { obtenerAlertas, guardarAlertas } from "../models/Config.model.js";
    ============================================= */
 
 /**
- * ¿La llamada al barrido está autorizada?
+ * ¿La llamada del CRON al barrido está autorizada?
  *
  * Si NO hay secreto configurado, se permite: así el cron funciona recién
  * desplegado, igual que `/siesa/requisiciones/reintentar`. Si HAY secreto, se
- * exige — y es lo recomendado, porque este endpoint manda correos a personas de
- * verdad y congela traslados. Vercel manda el cron con
- * `Authorization: Bearer $CRON_SECRET`.
- *
- * Un endpoint sin secreto no es un agujero grave acá (el barrido es idempotente:
- * las marcas `alerta_*_at` impiden repetir el correo), pero sí permitiría a
- * cualquiera adelantar el reloj de las alertas. Por eso la puerta existe.
+ * exige. Vercel manda el cron con `Authorization: Bearer $CRON_SECRET`.
  */
 function barridoAutorizado(req) {
   const secreto = process.env.CRON_SECRET || process.env.REFRESH_TOKEN;
@@ -29,11 +23,23 @@ function barridoAutorizado(req) {
 
 /**
  * GET/POST /api/alertas/barrer
- * Una pasada del barrido. Lo llama el cron de Vercel cada 10 minutos.
+ * Una pasada del barrido. GET lo llama el cron de Vercel cada 10 minutos; POST
+ * es el botón "Probar ahora" del panel.
+ *
+ * POR QUÉ EL POST NO PIDE TOKEN
+ * El panel no puede llevar el secreto: en este frontend cualquier variable
+ * `VITE_*` termina dentro del bundle que se descarga el navegador, o sea que
+ * "protegerlo" así es publicarlo. Y un botón de prueba que siempre responde 401
+ * no sirve para nada, que es justo lo que hace falta para verificar que las
+ * alertas funcionan.
+ *
+ * El riesgo es acotado y conocido: el barrido es idempotente (las marcas
+ * `alerta_*_at` impiden repetir un correo) y el resto de esta API tampoco tiene
+ * autenticación todavía. Cuando entre la auth real, este POST va detrás de ella.
  */
 export async function barrer(req, res, next) {
   try {
-    if (!barridoAutorizado(req)) {
+    if (req.method === "GET" && !barridoAutorizado(req)) {
       return res.status(401).json({ ok: false, error: "No autorizado" });
     }
     const resultado = await AlertasService.barrerAlertas();
