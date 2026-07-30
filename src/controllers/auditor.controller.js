@@ -38,7 +38,19 @@ export async function obtenerDetalle(req, res, next) {
     //
     // Best-effort: si falla, se loguea y la lectura sigue. El auditor tiene que
     // poder ponerse a contar aunque la marca no se haya podido escribir.
-    DespachoModel.marcarAuditoriaAbierta(req.params.id).catch(() => {});
+    //
+    // EL `await` NO ES OPCIONAL, aunque no usemos el resultado. Esto corre en
+    // Vercel: cuando el handler responde, la instancia se puede congelar, y una
+    // promesa que quedó volando no tiene ninguna garantía de completarse. La
+    // escritura es un viaje de red (50-200 ms) y el resto del handler es
+    // síncrono, así que sin `await` la respuesta sale primero y la marca se
+    // pierde SEGUIDO — el barrido vuelve a ver el traslado como abandonado y
+    // reaparece justo el bug que esto arregla.
+    //
+    // Y falla del peor modo: en local el proceso sigue vivo y la escritura
+    // siempre termina, así que anda perfecto; en Vercel falla de a ratos y sin
+    // patrón. Se valida OK y aparece en el piso a la semana.
+    await DespachoModel.marcarAuditoriaAbierta(req.params.id).catch(() => {});
 
     // Auditoría ciega: ocultar cantidad_despachador y firma del despachador
     const { traslados_firmas, traslados_items, ...cabecera } = despacho;

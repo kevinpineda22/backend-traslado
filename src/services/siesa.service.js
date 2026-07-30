@@ -20,6 +20,43 @@ import {
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(v ?? "").trim();
 
+/**
+ * Volumen de UNA UNIDAD BASE del ítem.
+ *
+ * POR QUÉ HAY QUE NORMALIZAR ACÁ
+ * `snapshot.volumen` viene de `t122_mc_items_unidades.f122_volumen`, de la fila de
+ * la UNIDAD DE ORDEN — la misma de la que sale `f122_factor`. O sea: es el volumen
+ * de un PAQUETE de `factor` unidades base, no el de una unidad suelta.
+ *
+ * Pero el panel deja elegir la unidad del renglón, y la que queda por defecto es la
+ * BASE (`buildUnidades` la pone primera, con factor 1). Entonces la cantidad del
+ * carrito casi siempre está en unidades base, no en paquetes. Multiplicar el volumen
+ * del paquete por una cantidad en unidades base infla el total por el `factor`: un
+ * ítem en P48 pediría 48 veces el espacio real.
+ *
+ * Normalizando acá —donde SÍ conocemos el factor de orden del snapshot— el frontend
+ * puede usar una sola fórmula que vale para cualquier unidad elegida:
+ *
+ *     volumen_total = volumen_base × cantidad × factor_de_la_unidad_elegida
+ *
+ * Si el ítem se despacha en la unidad de orden (factor = N), N × volumen_base
+ * reconstruye exactamente el volumen del paquete. Si se despacha en unidades base
+ * (factor = 1), da el volumen de una. Las dos salen bien de la misma cuenta.
+ *
+ * ⚠️ Esto asume que `f122_volumen` es el volumen del paquete de la unidad de orden.
+ * Es lo que sugiere la estructura (la columna vive en la tabla de UNIDADES del ítem,
+ * junto al factor de esa unidad), pero NO está verificado contra datos reales: hasta
+ * hoy el snapshot no tenía la columna. Si al mirar los datos resultara que ya viene
+ * por unidad base, el arreglo es devolver `volumen` sin dividir.
+ */
+function volumenBase(row) {
+  if (row?.volumen == null || row.volumen === "") return null;
+  const v = num(row.volumen);
+  if (!(v > 0)) return v === 0 ? 0 : null;
+  const factorOrden = num(row.factor) || 1;
+  return factorOrden > 0 ? v / factorOrden : v;
+}
+
 const PLANES = [
   { id: "001", label: "Grupo" },
   { id: "002", label: "Subgrupo" },
@@ -140,9 +177,10 @@ export async function getProductosTraslado({ origen, destino }) {
         rotacion: trim(fuente.rotacion) || "N/A",
         unidad_medida: trim(fuente.um),
         unidades: buildUnidades(fuente),
-        // Volumen de la unidad de orden. Viaja como `null` cuando SIESA no lo
-        // tiene, para que el panel distinga "sin dato" de "ocupa cero".
-        volumen: fuente.volumen == null ? null : num(fuente.volumen),
+        // Volumen de UNA UNIDAD BASE (ya normalizado — ver volumenBase). `null`
+        // cuando SIESA no lo tiene, para que el panel distinga "sin dato" de
+        // "ocupa cero".
+        volumen: volumenBase(fuente),
         criterios: fuente.criterios || {},
         inventario_origen: inventarioOrigen,
         disponible_origen: disponibleOrigen,
@@ -283,8 +321,8 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           unidad_medida: v.unidad || trim(fuente.um),
           unidades: unidadesDetalle.map((u) => u.unidad),
           unidadesDetalle,
-          // Volumen de la unidad de orden (ver getProductosTraslado).
-          volumen: fuente.volumen == null ? null : num(fuente.volumen),
+          // Volumen de UNA UNIDAD BASE (ver volumenBase).
+          volumen: volumenBase(fuente),
           criterios: fuente.criterios || {},
           inventario_origen: inventarioOrigen,
           disponible_origen: disponibleOrigen,

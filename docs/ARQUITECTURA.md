@@ -161,6 +161,122 @@ Espejo agregado de SIESA (§4). PK `(bodega, codigo_item)`. Lo llena el cron; lo
 
 ---
 
+## 6.5. Unidades de medida — LEER ANTES DE CRUZAR DOS CANTIDADES
+
+> Esta sección existe porque el mismo error nos mordió **tres veces** en lugares
+> distintos: el cálculo de `diferencia`, la comparación del auditor, y el volumen
+> del traslado. Siempre la misma causa — multiplicar o restar dos números que viven
+> en unidades distintas. Ninguna de las tres se vio en pruebas: los ítems con
+> `factor = 1` (la mayoría) dan igual con la fórmula correcta y con la incorrecta.
+> Se rompen solo en los multi-UM, que es donde nadie mira.
+
+### La regla
+
+> **Toda columna que guarda una cantidad tiene una unidad, y esa unidad no se
+> deduce: se consulta en la tabla de abajo.**
+>
+> **Cruzar dos cantidades de unidades distintas exige pasar por el `factor`. Y la
+> conversión se hace UNA vez, en el borde que conoce el factor — nunca en cada
+> consumidor.**
+
+Lo segundo es tan importante como lo primero. Si cada pantalla se tiene que acordar
+de dividir, alguna se va a olvidar; y la que se olvide va a fallar en silencio,
+porque el resultado sigue siendo un número plausible.
+
+### Qué unidad guarda cada columna
+
+**`traslados_items`** — ⚠️ ojo, la MISMA fila mezcla dos unidades:
+
+| Columna | Unidad | Nota |
+|---|---|---|
+| `unidad_medida` | — | La UM del renglón, la que eligió el admin |
+| `factor` | UND por `unidad_medida` | El puente entre las dos unidades de la fila |
+| `cantidad_admin` | **UM del renglón** | Lo que pidió el admin, en la unidad que eligió |
+| `cantidad_despachador` | **UM del renglón** | `× factor` da el total real en UND |
+| `cantidad_auditor` | **UND** | El auditor siempre cuenta y guarda en base |
+| `diferencia` | **UND** | `cantidad_auditor − (cantidad_despachador × factor)` |
+| `sugerido` | **UM del renglón** | Se divide por el factor al crear el despacho |
+| `stock_origen` | **UND** | ⚠️ NO se convierte |
+| `stock_destino` | **UND** | ⚠️ NO se convierte |
+| `consumo_destino` | **UND** | ⚠️ NO se convierte |
+| `stock_seguridad` | **UND** | ⚠️ NO se convierte |
+
+**El renglón despachado y su contexto de inventario NO están en la misma unidad.**
+`cantidad_admin` y `sugerido` vienen convertidos a la UM del renglón; el snapshot de
+inventario (`stock_*`, `consumo_destino`) queda en UND tal como salió de SIESA. Para
+un ítem en P30, `sugerido: 7` y `stock_destino: 210` están diciendo lo mismo con
+números distintos. Comparar esas dos columnas directamente da cualquier cosa.
+
+**`traslados_snapshot`** — todo en base, salvo lo que describe al paquete:
+
+| Columna | Unidad |
+|---|---|
+| `inventario`, `disponible`, `comprometido` | UND |
+| `consumo_promedio` | UND por día |
+| `um` | La unidad base del ítem |
+| `um_orden` | La unidad de orden (el paquete) |
+| `factor` | UND por `um_orden` |
+| `volumen` | **Volumen de UN paquete de `um_orden`** — no de una UND |
+
+**`traslados_capacidad`** (flujo Llano):
+
+| Columna | Unidad |
+|---|---|
+| `unidad` | La UM de esa fila (`null` = base) |
+| `factor` | UND por `unidad` |
+| `capacidad` | **En `unidad`** — `capacidad × factor` da la capacidad en UND |
+
+**Respuesta de `GET /api/siesa/productos`** — acá ya está todo normalizado a base:
+
+| Campo | Unidad |
+|---|---|
+| `inventario_origen`, `inventario_destino`, `consumo_destino` | UND |
+| `stock_seguridad`, `necesidad`, `faltante`, `sugerido` | UND |
+| `capacidad` (Llano) | UND (ya multiplicada por el factor de su UM) |
+| `volumen` | **UND** — normalizado en el borde, ver abajo |
+| `unidadesDetalle[].factor` | UND por esa unidad |
+
+El frontend divide por el factor de la unidad elegida **al mostrar**, no al recibir.
+
+### El patrón correcto: convertir en el borde
+
+`volumen` es el ejemplo de cómo debe hacerse. SIESA lo entrega por paquete de la
+unidad de orden. En vez de que cada pantalla se acuerde de dividir, se normaliza una
+sola vez en `siesa.service.js`:
+
+```js
+// volumenBase(row) — el borde que conoce el factor de orden del snapshot
+volumen_base = snapshot.volumen / (snapshot.factor || 1)
+```
+
+Y desde ahí adentro **una sola fórmula vale para cualquier unidad elegida**:
+
+```
+volumen_total = volumen_base × cantidad × factor_de_la_unidad_elegida
+```
+
+Porque `cantidad × factor` es siempre el total en unidades base, se despache en
+unidades sueltas (factor 1) o en paquetes (factor N).
+
+> **Contraejemplo real.** Antes de normalizar se usaba `volumen × cantidad × factor`
+> sobre el volumen del paquete. Con un ítem en P48, un renglón de 10 unidades sueltas
+> pedía 48 veces el espacio real. Y la corrección "obvia" —sacar el `× factor`— también
+> fallaba, porque la unidad por defecto del carrito es la BASE, no la de orden: arreglaba
+> el caso raro y dejaba roto el común. El error no estaba en la fórmula sino en que el
+> dato entraba en una unidad que la fórmula no declaraba.
+
+### Antes de tocar un cálculo con cantidades
+
+1. Buscá en las tablas de arriba en qué unidad está **cada** operando.
+2. Si no coinciden, llevá los dos a UND con el `factor` — nunca compares "peras con
+   manzanas" aunque el resultado parezca razonable.
+3. Si estás por escribir una división por `factor` en un componente de UI, preguntate
+   si no debería estar en el borde que sirve el dato.
+4. Probá con un ítem de `factor` alto (huevos P30, bebidas P48). Con `factor = 1` una
+   fórmula mal escrita se ve perfecta.
+
+---
+
 ## 7. Estructura del código
 
 ```
@@ -252,4 +368,9 @@ Frontend: `VITE_TRASLADOS_API_URL=https://backend-traslado.vercel.app/api`
 - Rotación (`DescMayor5`) viene `PARETOS`/`null` → **no** sirve para clasificar; usar `ConsumoPromedio` + `PeriodoCubrimiento`.
 - Strings de SIESA vienen con **espacios al final** → siempre `.trim()`.
 - `CodigoItem` viene como **número**, no string → normalizar a string para las claves.
+- **Las cantidades NO están todas en la misma unidad** → antes de multiplicar, restar o
+  comparar dos de ellas, mirá **§6.5**. Es el error que más veces se repitió en este
+  módulo, y con `factor = 1` (la mayoría de los ítems) siempre se ve bien.
+- Dentro de una misma fila de `traslados_items`, `cantidad_admin` está en la UM del
+  renglón pero `stock_destino` está en UND → compararlas directo da cualquier cosa.
 ```
