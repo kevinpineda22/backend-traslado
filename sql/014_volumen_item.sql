@@ -11,10 +11,18 @@
 -- saber de antemano qué camión hace falta. Hoy eso se calcula a ojo.
 --
 -- POR QUÉ NULLABLE Y SIN DEFAULT 0
--- `NULL` = "SIESA no tiene el volumen de este ítem" y `0` = "ocupa cero", que no
--- es lo mismo. Con un default 0, un ítem sin dato entraría al total como si no
--- ocupara lugar y el camión se planificaría de menos. En NULL, el panel puede
--- avisar "hay N ítems sin volumen cargado" en vez de mentir con un total.
+-- La columna guarda el valor CRUDO de SIESA, tal cual viene, sin interpretarlo.
+--
+-- ⚠️ OJO CON EL 0 — no lo interpretes como "ocupa cero" al consumir esta columna.
+-- Se verificó contra datos reales: en ~65.000 filas del snapshot NO hay un solo
+-- NULL. SIESA nunca manda vacío; cuando el volumen no está cargado en el maestro,
+-- manda `0`. Y esos ceros son toda la categoría de FRESCOS — pollo, huevos, fruta,
+-- justo lo que llena un camión.
+--
+-- Por eso la traducción "0 = sin dato" se hace en el borde que sirve el dato
+-- (`volumenBase` en `siesa.service.js`), que devuelve `null` para que el panel lo
+-- cuente como faltante. Acá se conserva el crudo a propósito: sirve para auditar
+-- el maestro y encontrar qué ítems hay que cargar (ver la consulta al final).
 --
 -- OJO CON LA UNIDAD DEL DATO: `f122_volumen` sale de la fila de
 -- `t122_mc_items_unidades` correspondiente a la UNIDAD DE ORDEN del ítem
@@ -25,3 +33,20 @@
 -- ---------------------------------------------------------------------------
 ALTER TABLE traslados_snapshot
   ADD COLUMN IF NOT EXISTS volumen NUMERIC(14, 6);
+
+-- ---------------------------------------------------------------------------
+-- AUDITORÍA DEL MAESTRO — qué ítems tienen el volumen mal cargado en SIESA.
+-- Corré esto DESPUÉS de refrescar el snapshot. Lo que salga se arregla en SIESA,
+-- no acá: el volumen es un dato del maestro y lo usan otros consumidores además
+-- de este panel.
+--
+-- Dos familias conocidas al momento de escribir esto (53 productos sobre 16.060):
+--   · volumen = 0            → categoría FRESCOS, nunca se le cargó
+--   · volumen/factor < 1     → FARMACIA y CAJA, con un `1` de placeholder
+-- ---------------------------------------------------------------------------
+-- SELECT DISTINCT codigo_item, descripcion, factor, volumen,
+--        ROUND(volumen / NULLIF(factor, 0), 4) AS volumen_unitario
+-- FROM traslados_snapshot
+-- WHERE volumen = 0
+--    OR (volumen > 0 AND volumen / NULLIF(factor, 0) < 1)
+-- ORDER BY volumen_unitario, codigo_item;

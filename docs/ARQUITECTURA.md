@@ -216,7 +216,17 @@ números distintos. Comparar esas dos columnas directamente da cualquier cosa.
 | `um` | La unidad base del ítem |
 | `um_orden` | La unidad de orden (el paquete) |
 | `factor` | UND por `um_orden` |
-| `volumen` | **Volumen de UN paquete de `um_orden`** — no de una UND |
+| `volumen` | **Volumen de UN paquete de `um_orden`** — no de una UND. Valor CRUDO de SIESA (ver abajo) |
+
+> **Verificado con datos, no deducido.** `AZUCAR X 500 GR` tiene `factor = 100` y
+> `volumen = 50.000` = 100 × 500, el contenido exacto del paquete de 100 bolsas.
+> Si el volumen viniera por unidad base, una bolsa de medio kilo ocuparía 50 litros.
+>
+> **Y el `0` de esta columna NO significa "ocupa cero".** En ~65.000 filas del
+> snapshot no hay un solo `NULL`: SIESA nunca manda vacío, manda `0` cuando el dato
+> no está cargado en el maestro. Esos ceros son toda la categoría de **frescos**
+> —pollo, huevos, fruta—, que es justo lo que llena un camión. La traducción
+> `0 → sin dato` se hace en `volumenBase` (§el borde), no en cada consumidor.
 
 **`traslados_capacidad`** (flujo Llano):
 
@@ -264,6 +274,20 @@ unidades sueltas (factor 1) o en paquetes (factor N).
 > fallaba, porque la unidad por defecto del carrito es la BASE, no la de orden: arreglaba
 > el caso raro y dejaba roto el común. El error no estaba en la fórmula sino en que el
 > dato entraba en una unidad que la fórmula no declaraba.
+
+### Corolario: un `0` de un sistema externo casi nunca significa cero
+
+La misma disciplina de "declará la unidad" aplica a **declarar qué significa la
+ausencia**. `volumen = 0` parecía un valor y era un hueco, y el contador de
+faltantes que existía para avisarlo nunca se encendió — no porque estuviera mal
+escrito, sino porque esperaba `NULL` y el `NULL` nunca llegaba.
+
+> Cuando un sistema externo puede expresar "no sé" con un valor del mismo tipo que
+> un dato válido (`0`, `""`, `1900-01-01`), **traducilo a `null` en el borde**. Si
+> entra crudo, cualquier chequeo de completitud río abajo mide otra cosa.
+
+Y el síntoma es traicionero: no rompe nada. Devuelve un número plausible, con el
+cartel de "datos completos" encima.
 
 ### Antes de tocar un cálculo con cantidades
 
