@@ -1,0 +1,42 @@
+-- =============================================================================
+-- Migration 019: elimina la columna muerta `traslados_items.volumen`
+-- Ejecutar en el SQL Editor de Supabase (una sola vez).
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- QUÉ PASÓ
+--
+-- `traslados_items` quedó con DOS columnas para el mismo dato:
+--
+--   · `volumen`        — la creaba una migración 016 que ya se eliminó del repo.
+--   · `peso_unitario`  — la de la migración 017, la que el código usa hoy.
+--
+-- El origen fue un malentendido con el campo de SIESA: `f122_volumen` parecía
+-- volumen y resultó ser PESO EN GRAMOS (AZUCAR X 500 GR con factor 100 trae
+-- 50.000 = 100 bolsas × 500 g). Cuando eso se verificó contra los datos, la
+-- columna pasó a llamarse `peso_unitario`, que es lo que el dato realmente es —
+-- pero la primera columna quedó ahí.
+--
+-- POR QUÉ NO ALCANZA CON IGNORARLA
+-- Una columna muerta con un nombre que suena bien es una trampa: el próximo que
+-- lea la tabla va a encontrar `volumen`, la va a usar, y le va a devolver NULL
+-- siempre. Y por el nombre parecería que el problema es que "falta cargar el
+-- volumen", cuando en realidad el dato está al lado con otro nombre.
+--
+-- SEGURIDAD DE ESTE DROP
+-- Verificado contra la base antes de escribir esta migración: la columna tiene
+-- 0 filas con valor (nada la escribió nunca — el código pasó a `peso_unitario`
+-- antes de que se creara ningún despacho con volumen). No hay dato que perder.
+--
+-- Para confirmarlo de nuevo antes de correr el DROP:
+--
+--   SELECT count(*) AS con_dato
+--   FROM traslados_items
+--   WHERE volumen IS NOT NULL;
+--   -- debe dar 0
+--
+-- `IF EXISTS` para que sea idempotente y para que no falle en un entorno nuevo,
+-- donde la 016 ya no existe y la columna nunca se creó.
+-- ---------------------------------------------------------------------------
+ALTER TABLE traslados_items
+  DROP COLUMN IF EXISTS volumen;

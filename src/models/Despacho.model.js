@@ -776,6 +776,11 @@ export async function agregarItemsBorrador(id, items) {
           stock_destino: item.stock_destino,
           consumo_destino: item.consumo_destino,
           stock_seguridad: item.stock_seguridad,
+          // Igual que el resto del snapshot del ítem: se refresca con el valor de
+          // HOY. Si no se actualizara, un ítem cargado el lunes y re-agregado el
+          // jueves conservaría un peso que puede haber cambiado en el maestro, y
+          // el manifiesto saldría con el número viejo.
+          peso_unitario: item.volumen ?? item.peso_unitario ?? null,
           factor: item.factor ?? 1,
         })
         .eq("id", itemId);

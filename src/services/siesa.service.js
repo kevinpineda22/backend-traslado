@@ -470,6 +470,8 @@ export async function getInventarioSedes() {
           um: trim(r.um),
           um_orden: trim(r.um_orden),
           factor: num(r.factor) || 1,
+          // Volumen por unidad base — el Columnario lo manda al armar el despacho.
+          volumen: volumenBase(r),
           criterios: r.criterios || {},
           inv: {},
           disp: {},
@@ -491,6 +493,7 @@ export async function getInventarioSedes() {
         um_orden: it.um_orden,
         factor: it.factor,
       }),
+      volumen: it.volumen,
       criterios: it.criterios,
       inv: it.inv,
       disp: it.disp,
