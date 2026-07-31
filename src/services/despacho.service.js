@@ -311,10 +311,11 @@ export async function assertPuedeRecolectar(despachoId, despachadorId) {
  * el momento correcto.
  *
  * ORDEN DE LAS OPERACIONES — importa:
- *   1. Guard de estado y propiedad. Va PRIMERO para no dejar un manifiesto
- *      huérfano si el cierre iba a ser rechazado igual (403/409).
+ *   1. Guard: existe, no inactivo, en `Pendiente_carga` y del despachador que
+ *      llama. Va PRIMERO para no dejar un manifiesto huérfano si el cierre iba a
+ *      ser rechazado igual (403/409).
  *   2. Manifiesto.
- *   3. Cierre → `Recolectado`, y con él SIESA y los correos.
+ *   3. Cierre `Pendiente_carga` → `Recolectado`, y con él SIESA y los correos.
  *
  * Si el paso 3 falla (por ejemplo, otro despachador cerró en el medio), el
  * manifiesto ya quedó escrito. Por eso el paso 2 REUSA el existente en vez de
@@ -329,8 +330,8 @@ export async function assertPuedeRecolectar(despachoId, despachadorId) {
  * @returns {Promise<{manifiesto:object, despacho:object}>}
  */
 export async function cargarCamion(despachoId, manifiesto = {}, { despachadorId, firmaData } = {}) {
-  // 1. ¿Puede cerrar? (existe, no está inactivo, está En_recoleccion y es suyo)
-  await DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
+  // 1. ¿Puede cargar? (existe, no inactivo, está Pendiente_carga y es suyo)
+  await DespachoModel.assertPuedeCargar(despachoId, despachadorId);
 
   // 2. Manifiesto — idempotente ante un reintento del cierre.
   let doc = await ManifiestoModel.porDespacho(despachoId);

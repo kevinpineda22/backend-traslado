@@ -409,6 +409,58 @@ export async function assertPuedeRecolectar(id, despachadorId) {
 }
 
 /**
+ * Candado para CARGAR EL CAMIÓN (`POST /cargar`). Hermano de
+ * `assertPuedeRecolectar`, pero exige `Pendiente_carga` en vez de
+ * `En_recoleccion`: cargar es el paso siguiente a haber terminado de contar.
+ *
+ * Se mantiene separado a propósito y no se generaliza el otro: `assertPuedeRecolectar`
+ * está probado en producción y protege otra escritura (`/recolectar`). Un estado
+ * distinto es toda la diferencia, y duplicar 15 líneas es más barato que arriesgar
+ * el guard que ya funciona.
+ *
+ * @throws 404 si no existe, 409 si no está Pendiente_carga (ej: ya se cargó y está
+ *   en Recolectado — un reintento tardío), 403 si no es el dueño.
+ */
+export async function assertPuedeCargar(id, despachadorId) {
+  const { data: d, error } = await supabase
+    .from(TABLE)
+    .select("estado, despachador_id, inactivo")
+    .eq("id", id)
+    .single();
+
+  if (error || !d) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (d.inactivo) {
+    const e = new Error(
+      "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (d.estado !== "Pendiente_carga") {
+    const e = new Error(
+      `No se puede cargar el camión: el despacho está en estado ${d.estado}. ` +
+        "Primero hay que finalizar la recolección.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (despachadorId && d.despachador_id && d.despachador_id !== despachadorId) {
+    const e = new Error("Este despacho lo está gestionando otro despachador");
+    e.statusCode = 403;
+    e.expose = true;
+    throw e;
+  }
+  return d;
+}
+
+/**
  * Iniciar recolección reclamando el despacho (modelo pool).
  * Atómico: solo avanza a "En_recoleccion" si SIGUE en "Creado" (`.eq("estado","Creado")`),
  * así dos despachadores no lo toman a la vez. Setea el despachador que lo reclama.
