@@ -130,8 +130,10 @@ export async function verificarEmail() {
  * @param {string|string[]} mail.to
  * @param {string} mail.subject
  * @param {string} mail.html
+ * @param {Array<object>} [mail.attachments] - adjuntos nodemailer (ej: el PDF del
+ *   manifiesto como { filename, content, encoding: "base64" })
  */
-export async function sendEmail({ to, subject, html }) {
+export async function sendEmail({ to, subject, html, attachments }) {
   let destinatarios = (Array.isArray(to) ? to : [to]).filter(Boolean);
 
   // El desvío va acá, en el ÚNICO punto por el que sale todo correo. Si viviera
@@ -164,6 +166,10 @@ export async function sendEmail({ to, subject, html }) {
       to: destinatarios.join(", "),
       subject,
       html,
+      // Solo se incluye la clave si hay adjuntos: nodemailer trata `undefined` y
+      // `[]` distinto en algunos transportes, y un correo sin adjuntos no debe
+      // arrastrar el campo.
+      ...(attachments?.length ? { attachments } : {}),
     });
 
     // Se loguea QUÉ aceptó el servidor, no solo "se envió".

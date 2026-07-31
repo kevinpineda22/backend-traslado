@@ -513,3 +513,68 @@ export async function notificarRecoleccionCerrada(despacho) {
 
   return { cierre: Boolean(cierre?.success), faltantes: faltantes?.enviados ?? 0 };
 }
+
+/**
+ * Correo con el PDF del MANIFIESTO DE CARGA a inventarios, al cargar el camión.
+ *
+ * El PDF lo genera el frontend (una sola fuente del layout) y lo manda en base64
+ * dentro del request de cierre; acá se adjunta. Best-effort: el despacho YA se
+ * cerró y se subió a SIESA cuando esto corre — si el correo o el adjunto fallan,
+ * se loguea y no se revierte nada.
+ *
+ * Si no llega el PDF (cliente viejo, o falló al generarlo) igual se manda el correo
+ * con los datos del manifiesto: inventarios se entera del despacho aunque falte el
+ * adjunto, que es mejor que un silencio.
+ *
+ * @param {object} despacho   - cabecera del despacho (para la ruta)
+ * @param {object} manifiesto - fila de traslados_manifiestos (datos del camión/conductor)
+ * @param {string} [pdfBase64] - el PDF ya generado, en base64 (sin prefijo data:)
+ */
+export async function enviarManifiestoCarga(despacho, manifiesto, pdfBase64) {
+  if (!emailConfigurado()) {
+    console.error(
+      `[traslados] ⚠️ manifiesto NO enviado (despacho ${despacho?.id}): falta EMAIL_USER/PASS`,
+    );
+    return { success: false };
+  }
+
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const numero = String(manifiesto?.despacho_id || despacho?.id || "").slice(0, 8).toUpperCase();
+  const pesoKg = Number(manifiesto?.peso_kg || 0).toLocaleString("es-CO");
+
+  const html = envolverMarca(`
+    ${encabezadoMarca({ titulo: `Manifiesto de carga — ${esc(ruta)}` })}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr><td style="padding:20px 26px 8px;">
+        <p style="margin:0 0 14px;font-size:14px;color:${MARCA.texto};line-height:1.5;">
+          El camión se cargó y el traslado se subió a SIESA. El manifiesto va adjunto en PDF.
+        </p>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          ${filaDato("Despacho", numero)}
+          ${filaDato("Ruta", ruta)}
+          ${filaDato("Vehículo", `${esc(manifiesto?.placa || "—")}${manifiesto?.marca ? ` · ${esc(manifiesto.marca)}` : ""}`)}
+          ${filaDato("Conductor", esc(manifiesto?.conductor_nombre || "—"))}
+          ${filaDato("Peso total", `${pesoKg} kg`, true)}
+        </table>
+      </td></tr>
+    </table>
+    ${pieMarca("Documento interno — no reemplaza al manifiesto electrónico del RNDC.")}
+  `);
+
+  const attachments = pdfBase64
+    ? [{ filename: `manifiesto-${numero}.pdf`, content: pdfBase64, encoding: "base64" }]
+    : undefined;
+
+  if (!attachments) {
+    console.error(
+      `[traslados] ⚠️ manifiesto ${despacho?.id}: se manda SIN PDF adjunto (no llegó del cliente)`,
+    );
+  }
+
+  return sendEmail({
+    to: DESTINATARIOS.inventarios,
+    subject: `Manifiesto de carga — ${ruta} (despacho ${numero})`,
+    html,
+    attachments,
+  });
+}
