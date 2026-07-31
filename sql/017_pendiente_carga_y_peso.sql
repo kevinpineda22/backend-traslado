@@ -1,0 +1,71 @@
+-- =============================================================================
+-- Migration 017: estado "Pendiente_carga" + peso por ítem en el despacho
+-- Ejecutar en el SQL Editor de Supabase (una sola vez), ANTES de desplegar.
+-- Depende de la 016 (manifiesto).
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- PARTE 1 — El estado intermedio "Pendiente_carga"
+--
+-- Terminar de contar y cargar el camión son dos momentos distintos, y entre uno
+-- y otro puede pasar un rato: el despachador cierra el conteo a las 10, y el
+-- camión llega a las 13. Antes eso no existía — al finalizar se subía a SIESA de
+-- una, o sea que el ERP registraba la salida de mercancía que todavía estaba en
+-- la bodega.
+--
+--   En_recoleccion  →  Pendiente_carga  →  Recolectado  →  auditoría
+--        contando         contado,           el camión
+--                         esperando camión   se fue
+--
+-- QUÉ PASA EN CADA TRANSICIÓN
+--   → Pendiente_carga : se sella `recoleccion_finalizada_at` y, en el flujo llano,
+--                       se auto-clasifican los pendientes. NO se sube nada a SIESA.
+--   → Recolectado     : manifiesto cargado. Recién acá salen los correos, se sube
+--                       el plano a SIESA y arranca el reloj del auditor
+--                       (`disponible_at`).
+--
+-- El despacho sigue viéndose en el panel del despachador mientras está en
+-- `Pendiente_carga`, con el estado distinto — es trabajo suyo que falta terminar,
+-- no algo que ya pasó a otro.
+--
+-- NO hace falta DDL: `estado` es varchar(30) sin CHECK. La máquina de estados
+-- vive en la aplicación (`Despacho.model.updateStatus`). Se documenta acá para
+-- que quien lea las migraciones sepa que el estado existe.
+--
+-- ALERTAS: `Pendiente_carga` NO entra en las listas del barrido (013). Un despacho
+-- esperando camión tiene dueño y no está abandonado, así que no debe dispararle
+-- alerta al que ya lo está trabajando. Si más adelante se quiere avisar de camiones
+-- que nunca llegaron, eso es una regla NUEVA con su propio umbral.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- PARTE 2 — Peso por ítem
+--
+-- El manifiesto necesita el peso total de lo que va en el camión, y ese dato ya
+-- existe: es el `volumen` del snapshot (migración 014).
+--
+-- OJO CON EL NOMBRE: la columna `traslados_snapshot.volumen` guarda
+-- `t122_mc_items_unidades.f122_volumen`, pero los datos dicen que ese campo es
+-- PESO EN GRAMOS, no volumen:
+--   · AZUCAR X 500 GR, factor 100 → 50.000  = 100 bolsas × 500 g = 50 kg
+--   · CALDO X 60 C 630GR, factor 60 → 630   = los 630 g que dice el empaque
+-- Como volumen esos números no cierran; como peso cierran exacto. El nombre
+-- `volumen` quedó de la primera lectura del campo y conviene no propagarlo: acá
+-- la columna se llama `peso_unitario` y dice lo que es.
+--
+-- UNIDAD: gramos por UNIDAD BASE (ya viene normalizado por `volumenBase`, que
+-- divide por el factor de la unidad de orden). El total del manifiesto es
+-- `Σ(peso_unitario × cantidad_despachador × factor) / 1000` → kg.
+--
+-- POR QUÉ SE COPIA AL ÍTEM Y NO SE LEE DEL SNAPSHOT AL CERRAR
+-- Mismo criterio que el resto del snapshot del ítem (`stock_origen`, `factor`,
+-- `categoria`): el snapshot lo pisa el cron cada día. Si el peso se leyera al
+-- cerrar, un despacho de la semana pasada mostraría el peso de hoy. El manifiesto
+-- es un documento: tiene que poder reconstruirse igual dentro de un año.
+--
+-- NULL = SIESA no tiene el peso de ese ítem (ver D1 en `volumenBase`: el 0 del ERP
+-- se traduce a null en el borde). El total del manifiesto avisa cuántos ítems
+-- quedaron sin dato en vez de sumarlos como cero.
+-- ---------------------------------------------------------------------------
+ALTER TABLE traslados_items
+  ADD COLUMN IF NOT EXISTS peso_unitario NUMERIC(14, 6);

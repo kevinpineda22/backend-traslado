@@ -14,6 +14,10 @@ const itemAdminSchema = z.object({
   consumo_destino: z.number().optional(),
   stock_seguridad: z.number().optional(),
   sugerido: z.number().optional(),
+  // Peso de una unidad base en gramos, para el total del manifiesto (017). Viaja
+  // como `volumen` porque así lo devuelve `/siesa/productos`, pero el dato es
+  // peso. `null` = SIESA no lo tiene.
+  volumen: z.number().nullable().optional(),
   cantidad: z.number().positive("cantidad debe ser mayor a 0"),
 });
 
@@ -36,6 +40,8 @@ const crearDespachoSchema = z.object({
 const cambiarEstadoSchema = z.object({
   estado: z.enum([
     "En_recoleccion",
+    // Contado, esperando el camión. Todavía NO se subió nada a SIESA (017).
+    "Pendiente_carga",
     "Recolectado",
     "En_recepcion",
     "Auditado",
@@ -214,8 +220,82 @@ function validate(schema) {
   };
 }
 
+/**
+ * CAMIÓN CARGADO — cierre de la recolección con el manifiesto.
+ *
+ * El vehículo y el conductor se aceptan de DOS formas: por `*_id` (elegidos del
+ * maestro) o a mano (camión de refuerzo, conductor de paso). Zod no puede decidir
+ * cuál corresponde sin conocer el maestro, así que acá todo va opcional y la regla
+ * "elegí uno o escribilo" la valida `Manifiesto.model` — que sí puede consultar.
+ *
+ * Lo único que se exige acá es `peso_kg`: es el dato que no sale de ninguna tabla
+ * y sin el cual el manifiesto no sirve.
+ */
+const cargarCamionSchema = z.object({
+  despachador_id: z.string().optional(),
+  firma_data: z.string().optional(),
+
+  vehiculo_id: z.string().uuid().nullable().optional(),
+  placa: z.string().optional(),
+  marca: z.string().optional(),
+  clase: z.string().optional(),
+  tipo: z.string().optional(),
+  color: z.string().optional(),
+  carroceria: z.string().optional(),
+
+  despachador_ref_id: z.string().uuid().nullable().optional(),
+  despachador_nombre: z.string().optional(),
+  despachador_documento: z.string().optional(),
+  despachador_telefono: z.string().optional(),
+
+  conductor_id: z.string().uuid().nullable().optional(),
+  conductor_nombre: z.string().optional(),
+  conductor_documento: z.string().optional(),
+  conductor_direccion: z.string().optional(),
+  conductor_telefono: z.string().optional(),
+  conductor_licencia: z.string().optional(),
+  conductor_ciudad: z.string().optional(),
+
+  origen_viaje: z.string().optional(),
+  destino_viaje: z.string().optional(),
+  ciudad: z.string().optional(),
+  municipio: z.string().optional(),
+
+  peso_kg: z.coerce.number().positive("El peso total debe ser mayor a 0"),
+  observaciones: z.string().optional(),
+});
+
+/** Alta/edición de los tres maestros del manifiesto. */
+const vehiculoSchema = z.object({
+  placa: z.string().min(1, "La placa es obligatoria"),
+  marca: z.string().optional(),
+  clase: z.string().optional(),
+  tipo: z.string().optional(),
+  color: z.string().optional(),
+  carroceria: z.string().optional(),
+});
+
+const despachadorSchema = z.object({
+  documento: z.string().min(1, "El documento es obligatorio"),
+  nombre: z.string().min(1, "El nombre es obligatorio"),
+  telefono: z.string().optional(),
+});
+
+const conductorSchema = z.object({
+  documento: z.string().min(1, "El documento es obligatorio"),
+  nombre: z.string().min(1, "El nombre es obligatorio"),
+  direccion: z.string().optional(),
+  telefono: z.string().optional(),
+  licencia: z.string().optional(),
+  ciudad: z.string().optional(),
+});
+
 export const validators = {
   crearDespacho: validate(crearDespachoSchema),
+  cargarCamion: validate(cargarCamionSchema),
+  vehiculo: validate(vehiculoSchema),
+  conductor: validate(conductorSchema),
+  despachador: validate(despachadorSchema),
   alertasConfig: validate(alertasConfigSchema),
   cambiarEstado: validate(cambiarEstadoSchema),
   comparar: validate(compararSchema),

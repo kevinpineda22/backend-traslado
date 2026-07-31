@@ -27,6 +27,9 @@ router.patch("/:id/estado", validators.cambiarEstado, DespachoController.cambiar
 router.post("/:id/iniciar", DespachoController.iniciarRecoleccion);
 router.post("/:id/abandonar", DespachoController.abandonar);
 router.post("/:id/recolectar", validators.recolectar, DespachoController.recolectar);
+// Camión cargado: cierra la recolección CON el manifiesto y dispara SIESA.
+router.post("/:id/cargar", validators.cargarCamion, DespachoController.cargarCamion);
+router.get("/:id/manifiesto", DespachoController.obtenerManifiesto);
 router.get("/:id/planilla", DespachoController.planilla);
 
 export default router;

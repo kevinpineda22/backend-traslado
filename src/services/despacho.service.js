@@ -1,6 +1,7 @@
 import * as DespachoModel from "../models/Despacho.model.js";
 import * as ItemModel from "../models/Item.model.js";
 import * as FirmaModel from "../models/Firma.model.js";
+import * as ManifiestoModel from "../models/Manifiesto.model.js";
 import { createError } from "../middleware/errorHandler.js";
 import {
   notificarRecoleccionCerrada,
@@ -137,10 +138,16 @@ export async function descartarListado(id) {
 /**
  * Cambiar estado de un despacho.
  *
- * Al cerrar la recolección (→ Recolectado) pasan tres cosas, en este orden:
- *   1. Se marca el estado. Esto es lo único que puede fallar hacia el usuario.
- *   2. Salen los correos (cierre + faltantes).
- *   3. Se importa la requisición a SIESA.
+ * El cierre son DOS pasos desde la 017, porque contar y cargar el camión ocurren
+ * en momentos distintos:
+ *
+ *   → Pendiente_carga : terminó el conteo. Se sella `recoleccion_finalizada_at` y
+ *                       se auto-clasifican los pendientes del flujo llano. NADA
+ *                       sale todavía: el camión sigue sin cargarse.
+ *   → Recolectado     : el camión se fue (con manifiesto). Recién acá:
+ *                       1. Se marca el estado — lo único que falla hacia el usuario.
+ *                       2. Salen los correos (cierre + faltantes).
+ *                       3. Se importa la requisición a SIESA.
  *
  * 2 y 3 son efectos POSTERIORES y ninguno revierte el cierre: cuando el
  * despachador firma, la mercancía ya salió del camión. El despacho es un hecho
@@ -166,13 +173,19 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
     await FirmaModel.create({ despacho_id: id, rol, firma_data: firmaData });
   }
 
-  if (estado === "Recolectado") {
+  if (estado === "Pendiente_carga") {
     // #4 — Flujo Llano (00301→00401): auto-marcar pendientes como Agotado o
     // Fantasma según el stock en vivo. El despachador NO elige motivos en este
-    // flujo (los oculta el front). Va PRIMERO (antes de notificar y de SIESA) para
-    // que el correo de faltantes/fantasma incluya estos motivos y que SIESA los
-    // excluya (cantidad_despachador queda en 0). Best-effort: si falla, los
-    // pendientes quedan como están y el despacho igual se cierra.
+    // flujo (los oculta el front).
+    //
+    // Corre acá y no en `Recolectado` porque es una consecuencia de HABER
+    // TERMINADO DE CONTAR, no de que el camión se haya ido: lo que quedó pendiente
+    // ya no se va a recolectar. Además se consulta el stock en vivo, y cuanto más
+    // cerca del conteo, más fiel es. Igual queda resuelto antes del cierre, así que
+    // los correos y SIESA lo siguen viendo hecho.
+    //
+    // Best-effort: si falla, los pendientes quedan como están y el despacho igual
+    // avanza.
     try {
       const despacho = await DespachoModel.findById(id);
       if (despacho.flujo === "llano") {
@@ -200,7 +213,9 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
     } catch (err) {
       console.error("[despacho] auto-marcado #4 falló (no bloquea):", err.message);
     }
+  }
 
+  if (estado === "Recolectado") {
     // 1. Avisar que la recolección cerró (ya con los motivos auto-marcados) y que
     //    se puede auditar.
     try {
@@ -278,6 +293,63 @@ export async function abandonarRecoleccion(id, despachadorId) {
  */
 export async function assertPuedeRecolectar(despachoId, despachadorId) {
   return DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
+}
+
+/**
+ * CAMIÓN CARGADO — cierra la recolección con el manifiesto de carga.
+ *
+ * Es el reemplazo del cierre directo: antes el despachador firmaba y el despacho
+ * pasaba a `Recolectado` de una. Ahora primero llena el manifiesto (quién se lleva
+ * la carga, en qué camión, cuánto pesa) y este endpoint hace las dos cosas.
+ *
+ * POR QUÉ ACÁ Y NO EN `cambiarEstado`
+ * El disparo de SIESA NO se movió: sigue colgando de `Recolectado`. Lo que se
+ * movió es CUÁNDO el despacho llega a ese estado — ahora es cuando el camión sale
+ * de verdad, no cuando el despachador terminó de contar. Todo lo que colgaba de
+ * `Recolectado` (correos, auto-clasificación del flujo llano, subida a SIESA, y el
+ * `disponible_at` que arranca el reloj del auditor) sigue igual y ahora ocurre en
+ * el momento correcto.
+ *
+ * ORDEN DE LAS OPERACIONES — importa:
+ *   1. Guard de estado y propiedad. Va PRIMERO para no dejar un manifiesto
+ *      huérfano si el cierre iba a ser rechazado igual (403/409).
+ *   2. Manifiesto.
+ *   3. Cierre → `Recolectado`, y con él SIESA y los correos.
+ *
+ * Si el paso 3 falla (por ejemplo, otro despachador cerró en el medio), el
+ * manifiesto ya quedó escrito. Por eso el paso 2 REUSA el existente en vez de
+ * fallar con "ya tiene manifiesto": un reintento tiene que poder completar el
+ * cierre, no quedar trabado por su propio intento anterior.
+ *
+ * @param {string} despachoId
+ * @param {object} manifiesto - datos del formulario (vehículo, conductor, ruta, peso)
+ * @param {object} opts
+ * @param {string} opts.despachadorId
+ * @param {string} [opts.firmaData] - firma del despachador (base64)
+ * @returns {Promise<{manifiesto:object, despacho:object}>}
+ */
+export async function cargarCamion(despachoId, manifiesto = {}, { despachadorId, firmaData } = {}) {
+  // 1. ¿Puede cerrar? (existe, no está inactivo, está En_recoleccion y es suyo)
+  await DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
+
+  // 2. Manifiesto — idempotente ante un reintento del cierre.
+  let doc = await ManifiestoModel.porDespacho(despachoId);
+  if (!doc) {
+    doc = await ManifiestoModel.crear(despachoId, {
+      ...manifiesto,
+      despachador_id: despachadorId,
+    });
+  }
+
+  // 3. Cierre. Acá se dispara todo lo que cuelga de `Recolectado`.
+  const despacho = await cambiarEstado(despachoId, "Recolectado", firmaData, despachadorId);
+
+  return { manifiesto: doc, despacho };
+}
+
+/** El manifiesto de un despacho (para el panel del admin y el del auditor). */
+export async function obtenerManifiesto(despachoId) {
+  return ManifiestoModel.porDespacho(despachoId);
 }
 
 /**

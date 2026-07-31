@@ -229,6 +229,38 @@ export async function cambiarEstado(req, res, next) {
 }
 
 /**
+ * POST /api/despachos/:id/cargar — CAMIÓN CARGADO
+ *
+ * Cierra la recolección con el manifiesto. Reemplaza al `PATCH /:id/estado` con
+ * "Recolectado" para el despachador: ahora el cierre exige saber quién se lleva la
+ * carga. Al pasar a `Recolectado` se disparan los correos, la auto-clasificación
+ * del flujo llano y la subida a SIESA — o sea, cuando el camión sale de verdad.
+ */
+export async function cargarCamion(req, res, next) {
+  try {
+    const { firma_data, despachador_id, ...manifiesto } = req.body;
+    const data = await DespachoService.cargarCamion(req.params.id, manifiesto, {
+      despachadorId: despachador_id ?? null,
+      firmaData: firma_data,
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/** GET /api/despachos/:id/manifiesto — para el panel del admin y el del auditor. */
+export async function obtenerManifiesto(req, res, next) {
+  try {
+    const data = await DespachoService.obtenerManifiesto(req.params.id);
+    if (!data) return res.status(404).json({ ok: false, error: "Sin manifiesto" });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * POST /api/despachos/:id/iniciar
  * Iniciar recolección reclamando el despacho (modelo pool).
  * Si el despacho se creó sin despachador asignado, se asigna acá atómicamente.

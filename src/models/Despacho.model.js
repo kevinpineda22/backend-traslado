@@ -128,6 +128,12 @@ function aFilaItem(despachoId, item) {
     stock_seguridad: item.stock_seguridad,
     sugerido: item.sugerido,
     cantidad_admin: item.cantidad,
+    // Peso de UNA unidad base, en gramos (migración 017). Llega como `volumen`
+    // porque así se llama la columna del snapshot, pero el dato es peso — ver el
+    // comentario de la 017. Se copia acá, como el resto del snapshot del ítem: el
+    // cron pisa `traslados_snapshot` todos los días, y el manifiesto tiene que
+    // poder reconstruirse igual dentro de un año.
+    peso_unitario: item.volumen ?? item.peso_unitario ?? null,
   };
 }
 
@@ -212,7 +218,12 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
     // "Creado" (finalizar el despacho), y la hace `finalizarBorrador`.
     Borrador: ["Creado"],
     Creado: ["En_recoleccion"],
-    En_recoleccion: ["Recolectado"],
+    // Terminar de contar ya NO cierra el despacho: queda esperando el camión.
+    // Se permite volver a `En_recoleccion` porque finalizar de más es un error
+    // barato de cometer y caro de arreglar: sin la vuelta, un despachador que se
+    // equivocó en una cantidad tendría que abandonar y contar todo de nuevo.
+    En_recoleccion: ["Pendiente_carga"],
+    Pendiente_carga: ["En_recoleccion", "Recolectado"],
     Recolectado: ["En_recepcion", "Auditado", "Rechazado", "Recibido_con_inconsistencia"],
     En_recepcion: ["Auditado", "Rechazado", "Recibido_con_inconsistencia"],
     Auditado: [],
@@ -274,7 +285,13 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   const ahora = new Date().toISOString();
   const patch = { estado: nuevoEstado, updated_at: ahora };
   // Trazabilidad de tiempos (#1): estampamos el hito según el estado destino.
-  if (nuevoEstado === "Recolectado") patch.recoleccion_finalizada_at = ahora;
+  //
+  // `recoleccion_finalizada_at` va en `Pendiente_carga`, NO en `Recolectado`: el
+  // hito es "cuándo terminó de contar", y desde la 017 esas son dos cosas
+  // distintas (contar termina antes; el camión puede llegar horas después). Medir
+  // la recolección hasta la carga del camión inflaría el tiempo del despachador
+  // con la espera del transporte.
+  if (nuevoEstado === "Pendiente_carga") patch.recoleccion_finalizada_at = ahora;
   if (["Auditado", "Rechazado", "Recibido_con_inconsistencia"].includes(nuevoEstado)) {
     patch.auditoria_finalizada_at = ahora;
   }
