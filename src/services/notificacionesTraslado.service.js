@@ -258,7 +258,7 @@ function filasComparativo(items) {
       const dif = contado - enviado;
       const color = noRecibido ? "#b91c1c" : dif === 0 ? "#16a34a" : "#dc2626";
       const extra = [];
-      if (it.agregado_por_auditor) extra.push('agregado en auditoría');
+      if (it.agregado_por_auditor) extra.push('agregado en el recibo');
       if (noRecibido) extra.push('NO RECIBIDO');
       const extraHtml = extra.length
         ? ` <span style="color:#b91c1c;font-size:11px;font-weight:bold;">(${extra.join(', ')})</span>`
@@ -293,11 +293,11 @@ export async function enviarComparativoAuditoria(despacho, decision) {
   const decisionTxt = DECISION_LABEL[decision] || decision || "—";
   return sendEmail({
     to: DESTINATARIOS.inventarios,
-    subject: `Auditoría finalizada — ${ruta} (${decisionTxt})`,
+    subject: `Recibo finalizado — ${ruta} (${decisionTxt})`,
     html: armarHtml({
       despacho,
-      titulo: "Comparativo de auditoría",
-      intro: `El auditor finalizó la revisión (decisión: ${decisionTxt}). Comparativo Enviado vs Contado (UND):`,
+      titulo: "Comparativo de recibo",
+      intro: `Quien recibe finalizó la revisión (decisión: ${decisionTxt}). Comparativo Enviado vs Contado (UND):`,
       filas: filasComparativo(despacho?.traslados_items || []),
       encabezados: ENCABEZADOS_COMPARATIVO,
     }),
@@ -472,13 +472,13 @@ export async function notificarSinIniciarAuditoria(despacho, { horas, horasReale
   const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
   return sendEmail({
     to: destinatariosAlerta(correos),
-    subject: `⏱ Traslado sin auditar hace ${horasReales} h — ${ruta}`,
+    subject: `⏱ Traslado sin recibir hace ${horasReales} h — ${ruta}`,
     html: armarHtmlAlerta({
       despacho,
-      titulo: "Nadie inició la auditoría",
+      titulo: "Nadie inició el recibo",
       queFalta:
-        "La recolección ya cerró y la mercancía está esperando que el auditor de " +
-        "destino la reciba y la cuente. Nadie abrió todavía este traslado en el panel del auditor.",
+        "La recolección ya cerró y la mercancía está esperando que en la sede de " +
+        "destino la reciban y la cuenten. Nadie abrió todavía este traslado en el panel de recibo.",
       horas,
       horasReales,
     }),

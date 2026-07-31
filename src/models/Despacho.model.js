@@ -567,10 +567,15 @@ const ESTADOS_EDITABLES = ["Borrador", "Creado"];
 
 /**
  * Editar los ítems de un despacho — solo mientras nadie recolectó
- * ("Borrador" o "Creado"). Actualiza cantidades y elimina los ítems que ya no
- * vengan en la lista.
+ * ("Borrador" o "Creado"). Hace tres cosas:
+ *   - actualiza la cantidad de los ítems que ya estaban (traen `id`),
+ *   - elimina los que ya no vienen en la lista,
+ *   - INSERTA los ítems nuevos (sin `id` pero con `codigo_item`). Los agrega el
+ *     admin desde el monitor buscando por código, código de barras o descripción.
+ *
  * @param {string} id
- * @param {Array<{id, cantidad}>} items - ítems que quedan (con su cantidad_admin)
+ * @param {Array<object>} items - ítems que quedan. Existentes: { id, cantidad }.
+ *   Nuevos: { codigo_item, descripcion, unidad_medida, factor, cantidad, ... }.
  */
 export async function editarItems(id, items) {
   const { data: cab } = await supabase.from(TABLE).select("estado").eq("id", id).single();
@@ -602,6 +607,7 @@ export async function editarItems(id, items) {
     if (error) throw new Error(`Error al quitar ítems: ${error.message}`);
   }
 
+  // Ítems existentes: solo se toca la cantidad del admin.
   for (const it of items) {
     if (!it.id) continue;
     const { error } = await supabase
@@ -611,7 +617,33 @@ export async function editarItems(id, items) {
     if (error) throw new Error(`Error al actualizar ítem: ${error.message}`);
   }
 
-  return { id, items: items.length };
+  // Ítems nuevos (sin id): se insertan con el snapshot que trae el catálogo. Se
+  // exige codigo_item para no crear filas basura. Mismo shape que `create`.
+  const nuevos = items
+    .filter((it) => !it.id && it.codigo_item != null && String(it.codigo_item).trim() !== "")
+    .map((it) => ({
+      despacho_id: id,
+      codigo_item: String(it.codigo_item).trim(),
+      descripcion: it.descripcion ?? null,
+      unidad_medida: it.unidad_medida ?? "UND",
+      factor: it.factor ?? 1,
+      rotacion: it.rotacion ?? null,
+      grupo: it.grupo ?? null,
+      categoria: it.categoria ?? null,
+      stock_origen: it.stock_origen ?? null,
+      stock_destino: it.stock_destino ?? null,
+      consumo_destino: it.consumo_destino ?? null,
+      stock_seguridad: it.stock_seguridad ?? null,
+      sugerido: it.sugerido ?? null,
+      cantidad_admin: Number(it.cantidad) || 0,
+    }));
+
+  if (nuevos.length) {
+    const { error } = await supabase.from("traslados_items").insert(nuevos);
+    if (error) throw new Error(`Error al agregar ítems: ${error.message}`);
+  }
+
+  return { id, items: items.length, agregados: nuevos.length };
 }
 
 /**
