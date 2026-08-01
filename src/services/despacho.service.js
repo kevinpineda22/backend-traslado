@@ -7,6 +7,7 @@ import {
   notificarRecoleccionCerrada,
   enviarComparativoAuditoria,
   enviarErrorSiesa,
+  enviarManifiestoCarga,
 } from "./notificacionesTraslado.service.js";
 import { enviarRequisicion } from "./requisicion.service.js";
 import { getStockLote } from "./siesaStock.service.js";
@@ -329,7 +330,11 @@ export async function assertPuedeRecolectar(despachoId, despachadorId) {
  * @param {string} [opts.firmaData] - firma del despachador (base64)
  * @returns {Promise<{manifiesto:object, despacho:object}>}
  */
-export async function cargarCamion(despachoId, manifiesto = {}, { despachadorId, firmaData } = {}) {
+export async function cargarCamion(
+  despachoId,
+  manifiesto = {},
+  { despachadorId, firmaData, pdfBase64 } = {},
+) {
   // 1. ¿Puede cargar? (existe, no inactivo, está Pendiente_carga y es suyo)
   await DespachoModel.assertPuedeCargar(despachoId, despachadorId);
 
@@ -344,6 +349,14 @@ export async function cargarCamion(despachoId, manifiesto = {}, { despachadorId,
 
   // 3. Cierre. Acá se dispara todo lo que cuelga de `Recolectado`.
   const despacho = await cambiarEstado(despachoId, "Recolectado", firmaData, despachadorId);
+
+  // 4. Correo a inventarios con el PDF del manifiesto. VA DESPUÉS del cierre y es
+  //    best-effort: la carga ya es un hecho y se subió a SIESA; un fallo de correo
+  //    no puede tumbar el flujo. Por eso no se await-ea dentro de un try que
+  //    propague — se atrapa acá mismo.
+  enviarManifiestoCarga(despacho, doc, pdfBase64).catch((e) =>
+    console.error("[despacho] correo del manifiesto falló:", e.message),
+  );
 
   return { manifiesto: doc, despacho };
 }
