@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { sandboxOn, volcarCorreo } from "../config/sandbox.js";
 
 /* =============================================
    Servicio de correo (SMTP Office365)
@@ -146,6 +147,19 @@ export async function sendEmail({ to, subject, html, attachments }) {
       `[email] 🧪 MODO PRUEBA — "${subject}" se desvía a ${destinatarios.join(", ")} ` +
         `(destinatarios reales: ${reales}). Apagá TRASLADOS_MAIL_MODO_PRUEBA para producción.`,
     );
+  }
+
+  // SANDBOX — se corta acá, en el mismo punto único por el que sale todo correo,
+  // y ANTES de mirar credenciales: en una máquina de pruebas puede no haberlas, y
+  // el resultado tiene que ser "no salió porque estoy probando", no un error de
+  // configuración que hace dudar de si el correo funciona.
+  if (sandboxOn()) {
+    const archivo = volcarCorreo({ to: destinatarios, subject, html, attachments });
+    console.warn(
+      `[email] 🧪 SANDBOX — "${subject}" NO se envió (iba a ${destinatarios.join(", ")}).` +
+        (archivo ? ` Guardado en ${archivo}` : ""),
+    );
+    return { success: true, sandbox: true, archivo };
   }
 
   if (!emailConfigurado()) {

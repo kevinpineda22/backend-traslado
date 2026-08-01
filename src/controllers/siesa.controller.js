@@ -270,7 +270,12 @@ export async function listarSedes(_req, res, next) {
 
 /**
  * GET /api/siesa/codigos-barras/:codigo
- * Resuelve un código de barras a su f120_id y unidad de medida.
+ * Resuelve un código de barras a su f120_id, unidad de medida y descripción.
+ *
+ * La DESCRIPCIÓN se suma sin quitar nada del contrato viejo (los consumidores
+ * existentes leen `f120_id` / `unidades` y siguen igual). La pide el panel del
+ * auditor: cuando agrega mercancía fuera de lista necesita ver QUÉ está agregando
+ * antes de confirmarlo, no solo un número de código.
  */
 export async function resolverCodigoBarrasCtrl(req, res, next) {
   try {
@@ -279,7 +284,8 @@ export async function resolverCodigoBarrasCtrl(req, res, next) {
       return res.status(400).json({ ok: false, error: "El código es requerido" });
     }
     const data = await SiesaService.resolverCodigoBarras(codigo);
-    res.json({ ok: true, data });
+    const ficha = await SiesaService.fichaDeItem(data?.f120_id || codigo);
+    res.json({ ok: true, data: { ...data, descripcion: ficha.descripcion } });
   } catch (error) {
     next(error);
   }

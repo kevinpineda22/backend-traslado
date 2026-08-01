@@ -870,6 +870,12 @@ export async function agregarItemsBorrador(id, items) {
           // el manifiesto saldría con el número viejo.
           peso_unitario: item.volumen ?? item.peso_unitario ?? null,
           factor: item.factor ?? 1,
+          // Grupo/subgrupo del catálogo de HOY, por el mismo motivo que el peso: es
+          // parte del snapshot del ítem. Además repuebla los renglones viejos que
+          // quedaron con `grupo` en null y por eso salían al final de la lista del
+          // despachador, fuera del orden por pasillo.
+          grupo: item.grupo ?? null,
+          categoria: item.categoria ?? null,
         })
         .eq("id", itemId);
       if (error) throw new Error(`Error al actualizar el ítem del listado: ${error.message}`);

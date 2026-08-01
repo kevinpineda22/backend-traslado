@@ -515,6 +515,105 @@ export async function notificarRecoleccionCerrada(despacho) {
 }
 
 /**
+ * HTML del correo del manifiesto. Se exporta aparte de `enviarManifiestoCarga`
+ * para poder verlo sin mandar un correo de verdad: el envío va a inventarios, así
+ * que revisar el maquetado no puede depender de dispararlo.
+ *
+ * El correo lleva TODOS los campos del manifiesto, no un resumen.
+ *
+ * El PDF lo genera el navegador del despachador y puede no llegar (una versión
+ * vieja del front, un error de jsPDF, un cierre desde un equipo raro). Cuando eso
+ * pasa, este correo es el ÚNICO registro que le queda a inventarios de quién se
+ * llevó la carga — y con placa y nombre de pila no se rastrea un camión. Así que
+ * el cuerpo se sostiene solo: el adjunto es la comodidad, no el contenido.
+ *
+ * @param {object} despacho    - cabecera + traslados_items
+ * @param {object} manifiesto  - fila de traslados_manifiestos
+ * @param {boolean} conAdjunto - si el PDF viaja adjunto (cambia el primer párrafo)
+ */
+export function htmlManifiestoCarga(despacho, manifiesto, conAdjunto) {
+  const ruta = `${nombreSede(despacho?.origen)} → ${nombreSede(despacho?.destino)}`;
+  const numero = String(manifiesto?.despacho_id || despacho?.id || "").slice(0, 8).toUpperCase();
+  const pesoKg = Number(manifiesto?.peso_kg || 0).toLocaleString("es-CO");
+  const items = despacho?.traslados_items || [];
+  const renglonesCargados = items.filter((it) => Number(it.cantidad_despachador) > 0).length;
+
+  const bloque = (titulo, filas) => `
+    <p style="margin:18px 0 6px;font-size:11px;font-weight:700;letter-spacing:0.06em;
+              text-transform:uppercase;color:${MARCA.medio};">${esc(titulo)}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+           style="background:${MARCA.fondo};border-radius:10px;">
+      <tr><td style="padding:8px 14px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+          ${filas.join("")}
+        </table>
+      </td></tr>
+    </table>`;
+
+  const dato = (etiqueta, valor, destacado = false) =>
+    filaDato(etiqueta, esc(valor || "—"), destacado);
+
+  // `ruta` va sin escapar acá a propósito: `encabezadoMarca` escapa el título por
+  // su cuenta, y pasárselo ya escapado lo escapaba dos veces.
+  return envolverMarca(`
+    ${encabezadoMarca({ titulo: `Manifiesto de carga — ${ruta}` })}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr><td style="padding:20px 26px 8px;">
+        <p style="margin:0 0 4px;font-size:14px;color:${MARCA.texto};line-height:1.5;">
+          El camión se cargó y el traslado se subió a SIESA.
+          ${
+            conAdjunto
+              ? "El manifiesto va adjunto en PDF; abajo están los mismos datos."
+              : `<b style="color:${MARCA.rojo};">El PDF no se pudo adjuntar</b>, así que el detalle completo va en este cuerpo.`
+          }
+        </p>
+
+        ${bloque("Despacho", [
+          dato("Nº de despacho", numero, true),
+          dato("Ruta", ruta),
+          dato("Fecha de carga", fechaHoraLegible(manifiesto?.created_at || Date.now())),
+          dato("Renglones cargados", `${renglonesCargados} de ${items.length}`),
+        ])}
+
+        ${bloque("Viaje", [
+          dato("Origen", manifiesto?.origen_viaje || nombreSede(despacho.origen)),
+          dato("Destino", manifiesto?.destino_viaje || nombreSede(despacho.destino)),
+          dato("Ciudad", manifiesto?.ciudad),
+          dato("Municipio", manifiesto?.municipio),
+          dato("Peso total declarado", `${pesoKg} kg`, true),
+          ...(manifiesto?.observaciones ? [dato("Observaciones", manifiesto.observaciones)] : []),
+        ])}
+
+        ${bloque("Vehículo", [
+          dato("Placa", manifiesto?.placa, true),
+          dato("Marca", manifiesto?.marca),
+          dato("Clase", manifiesto?.clase),
+          dato("Tipo", manifiesto?.tipo),
+          dato("Color", manifiesto?.color),
+          dato("Carrocería", manifiesto?.carroceria),
+        ])}
+
+        ${bloque("Conductor", [
+          dato("Nombre", manifiesto?.conductor_nombre, true),
+          dato("Cédula", manifiesto?.conductor_documento),
+          dato("Licencia", manifiesto?.conductor_licencia),
+          dato("Teléfono", manifiesto?.conductor_telefono),
+          dato("Ciudad", manifiesto?.conductor_ciudad),
+          dato("Dirección", manifiesto?.conductor_direccion),
+        ])}
+
+        ${bloque("Despachador (quien entrega)", [
+          dato("Nombre", manifiesto?.despachador_nombre, true),
+          dato("Cédula", manifiesto?.despachador_documento),
+          dato("Teléfono", manifiesto?.despachador_telefono),
+        ])}
+      </td></tr>
+    </table>
+    ${pieMarca("Documento interno — no reemplaza al manifiesto electrónico del RNDC.")}
+  `);
+}
+
+/**
  * Correo con el PDF del MANIFIESTO DE CARGA a inventarios, al cargar el camión.
  *
  * El PDF lo genera el frontend (una sola fuente del layout) y lo manda en base64
@@ -522,12 +621,8 @@ export async function notificarRecoleccionCerrada(despacho) {
  * cerró y se subió a SIESA cuando esto corre — si el correo o el adjunto fallan,
  * se loguea y no se revierte nada.
  *
- * Si no llega el PDF (cliente viejo, o falló al generarlo) igual se manda el correo
- * con los datos del manifiesto: inventarios se entera del despacho aunque falte el
- * adjunto, que es mejor que un silencio.
- *
- * @param {object} despacho   - cabecera del despacho (para la ruta)
- * @param {object} manifiesto - fila de traslados_manifiestos (datos del camión/conductor)
+ * @param {object} despacho    - cabecera + traslados_items (ruta y conteo de renglones)
+ * @param {object} manifiesto  - fila de traslados_manifiestos (camión / conductor / viaje)
  * @param {string} [pdfBase64] - el PDF ya generado, en base64 (sin prefijo data:)
  */
 export async function enviarManifiestoCarga(despacho, manifiesto, pdfBase64) {
@@ -538,28 +633,8 @@ export async function enviarManifiestoCarga(despacho, manifiesto, pdfBase64) {
     return { success: false };
   }
 
-  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const ruta = `${nombreSede(despacho?.origen)} → ${nombreSede(despacho?.destino)}`;
   const numero = String(manifiesto?.despacho_id || despacho?.id || "").slice(0, 8).toUpperCase();
-  const pesoKg = Number(manifiesto?.peso_kg || 0).toLocaleString("es-CO");
-
-  const html = envolverMarca(`
-    ${encabezadoMarca({ titulo: `Manifiesto de carga — ${esc(ruta)}` })}
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-      <tr><td style="padding:20px 26px 8px;">
-        <p style="margin:0 0 14px;font-size:14px;color:${MARCA.texto};line-height:1.5;">
-          El camión se cargó y el traslado se subió a SIESA. El manifiesto va adjunto en PDF.
-        </p>
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-          ${filaDato("Despacho", numero)}
-          ${filaDato("Ruta", ruta)}
-          ${filaDato("Vehículo", `${esc(manifiesto?.placa || "—")}${manifiesto?.marca ? ` · ${esc(manifiesto.marca)}` : ""}`)}
-          ${filaDato("Conductor", esc(manifiesto?.conductor_nombre || "—"))}
-          ${filaDato("Peso total", `${pesoKg} kg`, true)}
-        </table>
-      </td></tr>
-    </table>
-    ${pieMarca("Documento interno — no reemplaza al manifiesto electrónico del RNDC.")}
-  `);
 
   const attachments = pdfBase64
     ? [{ filename: `manifiesto-${numero}.pdf`, content: pdfBase64, encoding: "base64" }]
@@ -574,7 +649,7 @@ export async function enviarManifiestoCarga(despacho, manifiesto, pdfBase64) {
   return sendEmail({
     to: DESTINATARIOS.inventarios,
     subject: `Manifiesto de carga — ${ruta} (despacho ${numero})`,
-    html,
+    html: htmlManifiestoCarga(despacho, manifiesto, Boolean(attachments)),
     attachments,
   });
 }

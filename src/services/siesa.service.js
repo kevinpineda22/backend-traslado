@@ -665,6 +665,59 @@ export async function resolverCodigoBarras(codigo) {
   }
 }
 
+/**
+ * Ficha mínima de un ítem a partir de lo que se escaneó: código SIESA real,
+ * descripción y unidad base.
+ *
+ * PARA QUÉ — el auditor puede recibir mercancía que no venía en la lista del
+ * despachador y la agrega escaneándola. Si el lector devuelve un EAN
+ * (`75011257166531`) y nadie lo traduce, el renglón se guardaba con ese número
+ * como código y sin descripción: en la comparativa y en el correo salía una fila
+ * anónima, y la imagen tampoco cargaba porque el catálogo de fotos se busca por
+ * código SIESA, no por código de barras.
+ *
+ * Dos pasos, los dos best-effort:
+ *   1. EAN → `f120_id` (tabla `siesa_codigos_barras`).
+ *   2. `f120_id` → descripción y UM del snapshot (cualquier bodega: la ficha del
+ *      ítem es la misma en todas, lo que cambia entre bodegas son las cantidades).
+ *
+ * Nunca lanza: si SIESA no lo conoce, devuelve el código tal cual llegó y sin
+ * descripción. Un ítem sin ficha es peor que uno con ficha, pero mucho mejor que
+ * un 500 en medio de un cierre de auditoría.
+ *
+ * @param {string} codigo - lo que se escaneó (EAN o código SIESA)
+ * @returns {Promise<{codigo_item:string, descripcion:string|null, unidad_medida:string|null}>}
+ */
+export async function fichaDeItem(codigo) {
+  const crudo = String(codigo ?? "").trim();
+  if (!crudo) return { codigo_item: "", descripcion: null, unidad_medida: null };
+
+  let codigoItem = crudo;
+  try {
+    const resuelto = await resolverCodigoBarras(crudo);
+    if (resuelto?.f120_id) codigoItem = String(resuelto.f120_id).trim();
+  } catch {
+    // Se sigue con el código crudo: el paso 2 igual puede reconocerlo.
+  }
+
+  try {
+    const { data } = await supabase
+      .from("traslados_snapshot")
+      .select("descripcion, um")
+      .eq("codigo_item", codigoItem)
+      .limit(1)
+      .maybeSingle();
+
+    return {
+      codigo_item: codigoItem,
+      descripcion: trim(data?.descripcion) || null,
+      unidad_medida: trim(data?.um) || null,
+    };
+  } catch {
+    return { codigo_item: codigoItem, descripcion: null, unidad_medida: null };
+  }
+}
+
 export { getFlujoPorDestino };
 
 

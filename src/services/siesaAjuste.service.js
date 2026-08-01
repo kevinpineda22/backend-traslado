@@ -2,6 +2,7 @@ import axios from "axios";
 import "dotenv/config";
 import { ejecutarConsulta } from "../config/connekta.js";
 import { resolverCO, fechaSiesa } from "./siesaRequisicion.service.js";
+import { sandboxOn } from "../config/sandbox.js";
 
 /* =============================================
    Ajuste de inventario a SIESA (/conectoresimportar, conector 250295
@@ -490,6 +491,19 @@ export async function importarAjuste(despacho, faltantes) {
     fecha: fechaSiesa(new Date()),
     lineas,
   });
+
+  // SANDBOX — igual que la requisición: se arma el payload (con costos y unidad
+  // de negocio reales, que es lo delicado de este conector) y se corta antes del
+  // POST. Este documento ENTRA CONTABILIZADO en el ERP; no es algo que se pruebe
+  // "a ver qué pasa".
+  if (sandboxOn()) {
+    const docto = `SANDBOX-AJ-${String(despacho?.id || "").slice(0, 8).toUpperCase()}`;
+    console.warn(
+      `[siesa] 🧪 SANDBOX — ajuste de inventario del despacho ${despacho?.id} NO se importó. ` +
+        `${lineas.length} línea(s) simuladas como ${docto}.`,
+    );
+    return { ok: true, sandbox: true, docto, respuesta: { sandbox: true }, payload };
+  }
 
   const { data, status } = await axios.post(cfg.url(), payload, {
     params: {

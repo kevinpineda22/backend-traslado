@@ -11,6 +11,7 @@ import {
 } from "./notificacionesTraslado.service.js";
 import { enviarRequisicion } from "./requisicion.service.js";
 import { getStockLote } from "./siesaStock.service.js";
+import { fichaDeItem } from "./siesa.service.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
 import ExcelJS from "exceljs";
 
@@ -175,9 +176,11 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
   }
 
   if (estado === "Pendiente_carga") {
-    // #4 — Flujo Llano (00301→00401): auto-marcar pendientes como Agotado o
-    // Fantasma según el stock en vivo. El despachador NO elige motivos en este
-    // flujo (los oculta el front).
+    // #4 — Flujo Llano (00301→00401): el despachador NO elige motivos (el front le
+    // oculta el selector), así que los pone el sistema. Los tres del maestro:
+    //   · no se recolectó y no hay stock  → Agotado (sin_stock)
+    //   · no se recolectó pero HAY stock  → Inventario Fantasma (inventario_inflado)
+    //   · se recolectó menos de lo pedido → Surtido parcial (surtido_parcial)
     //
     // Corre acá y no en `Recolectado` porque es una consecuencia de HABER
     // TERMINADO DE CONTAR, no de que el camión se haya ido: lo que quedó pendiente
@@ -190,9 +193,44 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
     try {
       const despacho = await DespachoModel.findById(id);
       if (despacho.flujo === "llano") {
+        // QUÉ CUENTA COMO PENDIENTE — no alcanza con `cantidad_despachador == null`.
+        //
+        // El front, un paso antes de este cambio de estado, llama a /recolectar con
+        // TODOS los renglones del despacho, incluidos los que nadie tocó, y esos
+        // viajan en 0. O sea: para cuando corre esta clasificación ya no queda un
+        // solo `null` y el filtro viejo encontraba SIEMPRE cero pendientes. Por eso
+        // no aparecía ni un motivo automático — ni Agotado ni Inventario Fantasma.
+        //
+        // Un 0 SIN motivo y sin `agotado` es exactamente lo mismo que un null: nadie
+        // recolectó ese ítem. Un 0 CON motivo ya lo clasificó una persona y no se
+        // toca — la decisión del despachador manda sobre la automática.
         const pendientes = (despacho.traslados_items || []).filter(
-          (it) => it.cantidad_despachador == null,
+          (it) =>
+            !it.motivo &&
+            !it.agotado &&
+            (it.cantidad_despachador == null || Number(it.cantidad_despachador) === 0),
         );
+        // El tercer motivo del maestro: se recolectó ALGO, pero menos de lo pedido.
+        // No depende del stock en vivo (por definición había algo en la góndola), así
+        // que se resuelve sin consultar SIESA. Sin esta rama, el flujo llano solo
+        // sabía marcar los faltantes totales y los renglones a medias quedaban sin
+        // motivo — que es la mitad de los faltantes que ve compras.
+        const parciales = (despacho.traslados_items || []).filter((it) => {
+          if (it.motivo || it.agotado) return false;
+          const recogido = Number(it.cantidad_despachador);
+          const pedido = Number(it.cantidad_admin) || 0;
+          return recogido > 0 && pedido > 0 && recogido < pedido;
+        });
+
+        for (const item of parciales) {
+          await ItemModel.updateCantidadDespachador(
+            item.id,
+            Number(item.cantidad_despachador),
+            false,
+            "surtido_parcial",
+          );
+        }
+
         if (pendientes.length > 0) {
           const stock = await getStockLote({
             sede: despacho.origen,
@@ -210,6 +248,11 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
             }
           }
         }
+
+        console.log(
+          `[despacho] llano ${id}: auto-clasificados ${pendientes.length} faltante(s) total(es) ` +
+            `y ${parciales.length} parcial(es)`,
+        );
       }
     } catch (err) {
       console.error("[despacho] auto-marcado #4 falló (no bloquea):", err.message);
@@ -354,9 +397,13 @@ export async function cargarCamion(
   //    best-effort: la carga ya es un hecho y se subió a SIESA; un fallo de correo
   //    no puede tumbar el flujo. Por eso no se await-ea dentro de un try que
   //    propague — se atrapa acá mismo.
-  enviarManifiestoCarga(despacho, doc, pdfBase64).catch((e) =>
-    console.error("[despacho] correo del manifiesto falló:", e.message),
-  );
+  //    Se relee el despacho COMPLETO en vez de reusar el que devuelve el cierre:
+  //    `updateStatus` devuelve la cabecera sola, sin `traslados_items`, y el correo
+  //    informa cuántos renglones salieron. Con la cabecera pelada ese conteo decía
+  //    siempre "0 de 0".
+  DespachoModel.findById(despachoId)
+    .then((completo) => enviarManifiestoCarga(completo || despacho, doc, pdfBase64))
+    .catch((e) => console.error("[despacho] correo del manifiesto falló:", e.message));
 
   return { manifiesto: doc, despacho };
 }
@@ -456,6 +503,31 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
 }
 
 /**
+ * Completa código, descripción y UM de un ítem que el auditor agregó fuera de
+ * lista, consultando SIESA por lo que se escaneó.
+ *
+ * Best-effort a propósito: si la consulta falla, se inserta lo que mandó el front.
+ * Un renglón sin descripción es un problema de lectura; perder el conteo del
+ * auditor por un timeout de SIESA es un problema de inventario.
+ */
+async function completarFichaItem(item) {
+  if (item?.descripcion && String(item.descripcion).trim()) return item;
+
+  try {
+    const ficha = await fichaDeItem(item?.codigo_item);
+    return {
+      ...item,
+      codigo_item: ficha.codigo_item || item?.codigo_item,
+      descripcion: ficha.descripcion || item?.descripcion || null,
+      unidad_medida: item?.unidad_medida || ficha.unidad_medida || "UND",
+    };
+  } catch (err) {
+    console.error("[auditoria] no se pudo completar la ficha del ítem:", err.message);
+    return item;
+  }
+}
+
+/**
  * Auditoría — Paso 2: CONFIRMAR (decisión + firma, finaliza el despacho).
  * Persiste cantidad_auditor y diferencia por item, la firma del auditor y el
  * auditor_id, y avanza el estado según la decisión.
@@ -485,7 +557,12 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
   //  - Existentes (traen `id`)  → se actualiza cantidad_auditor + diferencia.
   for (const item of items) {
     if (item?.nuevo || item?.id == null) {
-      await ItemModel.insertItemAuditor(despachoId, item);
+      // Se completa la ficha ANTES de insertar. El auditor agrega escaneando, y lo
+      // que devuelve el lector suele ser un EAN sin descripción: guardarlo crudo
+      // deja un renglón sin nombre en la comparativa, sin nombre en el correo y sin
+      // imagen (el catálogo de fotos se busca por código SIESA). Lo que el front ya
+      // resolvió tiene prioridad; esto solo rellena lo que llegó vacío.
+      await ItemModel.insertItemAuditor(despachoId, await completarFichaItem(item));
     } else if (item?.no_recibido) {
       await ItemModel.marcarNoRecibido(item.id);
     } else {

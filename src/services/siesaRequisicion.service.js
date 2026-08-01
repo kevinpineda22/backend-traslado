@@ -2,6 +2,7 @@ import axios from "axios";
 import "dotenv/config";
 import { centroOperacionDeSede } from "../config/flujos.js";
 import { fechaCompacta } from "../config/tiempo.js";
+import { sandboxOn } from "../config/sandbox.js";
 
 /* =============================================
    Importar requisición a SIESA (/conectoresimportar, conector 249486
@@ -285,6 +286,20 @@ export async function importarRequisicion(despacho) {
   if (payload.Movimientos.length === 0) {
     // Nada salió del camión: no hay requisición que importar. No es un error.
     return { ok: true, vacio: true, docto: null, respuesta: null };
+  }
+
+  // SANDBOX — se corta JUSTO ANTES del POST y DESPUÉS de armar el payload: así el
+  // armado (que es donde viven los bugs de C.O., bodegas y unidades) se ejercita
+  // igual y queda guardado en `siesa_payload` para revisarlo. Lo único que no
+  // pasa es el viaje al ERP. El docto simulado deja el despacho en el camino
+  // feliz: probar el cierre no debería obligar a probar también el de error.
+  if (sandboxOn()) {
+    const docto = `SANDBOX-${String(despacho?.id || "").slice(0, 8).toUpperCase()}`;
+    console.warn(
+      `[siesa] 🧪 SANDBOX — requisición del despacho ${despacho?.id} NO se importó. ` +
+        `${payload.Movimientos.length} movimiento(s) simulados como ${docto}.`,
+    );
+    return { ok: true, sandbox: true, docto, respuesta: { sandbox: true }, payload };
   }
 
   const { data, status } = await axios.post(cfg.url(), payload, {

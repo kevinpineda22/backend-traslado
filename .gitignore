@@ -5,3 +5,7 @@ node_modules/
 
 .vercel
 .env*
+
+# Correos volcados por el modo sandbox (TRASLADOS_SANDBOX). Son copias de
+# correos reales: llevan destinatarios y datos de despachos, no van al repo.
+cache-data/sandbox/

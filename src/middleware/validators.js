@@ -278,10 +278,22 @@ const vehiculoSchema = z.object({
   carroceria: z.string().optional(),
 });
 
+/**
+ * Despachador. OJO con lo que NO está acá: Zod descarta las claves que el esquema
+ * no declara (`req.body = result.data`), así que un campo omitido no "pasa igual"
+ * — se borra antes de llegar al modelo. Eso fue exactamente el bug del `correo`:
+ * el panel lo mandaba, el esquema no lo nombraba, y el modelo respondía "el correo
+ * es obligatorio" sobre un formulario que lo tenía escrito.
+ *
+ * `documento` es OPCIONAL desde la migración 021 (el modelo lo guarda `null`);
+ * `correo` es lo único que el maestro exige además del nombre, porque es con lo
+ * que la persona inicia sesión y con lo que se le asignan los despachos.
+ */
 const despachadorSchema = z.object({
-  documento: z.string().min(1, "El documento es obligatorio"),
+  documento: z.string().optional(),
   nombre: z.string().min(1, "El nombre es obligatorio"),
   telefono: z.string().optional(),
+  correo: z.string().min(1, "El correo es obligatorio"),
 });
 
 const conductorSchema = z.object({

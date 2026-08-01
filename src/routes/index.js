@@ -7,6 +7,7 @@ import configRoutes from "./config.routes.js";
 import alertasRoutes from "./alertas.routes.js";
 import flotaRoutes from "./flota.routes.js";
 import { verificarEmail } from "../services/email.service.js";
+import { sandboxOn } from "../config/sandbox.js";
 
 const router = Router();
 
@@ -18,13 +19,18 @@ router.use("/config", configRoutes);
 router.use("/alertas", alertasRoutes);
 router.use("/flota", flotaRoutes);
 
-// Health check
+// Health check.
+//
+// `sandbox` va acá y no en un endpoint aparte porque es la primera pregunta de
+// quien va a probar —"¿esto sale de mi máquina?"— y tiene que contestarse con el
+// mismo GET que ya se usa para ver si el backend está vivo.
 router.get("/health", (_req, res) => {
   res.json({
     ok: true,
     nombre: "Backend Traslados — Merkahorro",
     version: "1.0.0",
     entorno: process.env.NODE_ENV || "development",
+    sandbox: sandboxOn(),
   });
 });
 

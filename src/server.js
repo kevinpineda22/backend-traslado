@@ -5,6 +5,7 @@ import morgan from "morgan";
 import "dotenv/config";
 
 import routes from "./routes/index.js";
+import { sandboxOn } from "./config/sandbox.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
 const app = express();
@@ -58,6 +59,17 @@ if (process.env.NODE_ENV !== "production") {
 ║  Modo:   ${(process.env.NODE_ENV || "development").padEnd(33)}║
 ╚══════════════════════════════════════════╝
     `);
+
+    // El estado del sandbox se dice SIEMPRE, prendido o apagado. Un aviso que
+    // solo aparece en un caso enseña a no buscarlo, y el día que importa —el que
+    // se cierra un despacho de verdad creyendo que era una prueba— no está.
+    console.log(
+      sandboxOn()
+        ? "🧪 SANDBOX ON — no sale ni un correo ni un documento a SIESA. " +
+            "Los correos se guardan en cache-data/sandbox/."
+        : "🚨 SANDBOX OFF — los correos salen a compras/inventarios y las " +
+            "requisiciones se importan a SIESA de verdad. (TRASLADOS_SANDBOX=true para probar)",
+    );
   });
 }
 
