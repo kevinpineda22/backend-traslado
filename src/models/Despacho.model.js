@@ -635,6 +635,10 @@ export async function editarItems(id, items) {
       consumo_destino: it.consumo_destino ?? null,
       stock_seguridad: it.stock_seguridad ?? null,
       sugerido: it.sugerido ?? null,
+      // Peso de UNA unidad base, en gramos (migración 017). Llega como `volumen`
+      // desde el catálogo (herencia del nombre en SIESA). Sin esto el ítem agregado
+      // desde el monitor sale "sin dato" en la columna Peso.
+      peso_unitario: it.volumen ?? it.peso_unitario ?? null,
       cantidad_admin: Number(it.cantidad) || 0,
     }));
 
