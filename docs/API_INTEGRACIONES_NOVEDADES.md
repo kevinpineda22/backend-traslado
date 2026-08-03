@@ -9,10 +9,20 @@ Es una superficie **solo lectura y versionada**: ningún consumidor externo pued
 ## Ruta base
 
 ```
-https://<host-del-backend-traslados>/api/integraciones
+https://backend-traslado.vercel.app/api/integraciones
 ```
 
 Toda petición requiere el header `X-API-Key` con la clave entregada a su área.
+
+> **En los ejemplos de este documento, donde dice `SU_CLAVE` va la clave que le entregaron por mensaje aparte.** La clave no viene escrita acá a propósito: las instrucciones y el secreto viajan por canales distintos, de modo que reenviar este documento nunca comparta el acceso.
+
+> ### ⚠️ No se puede probar pegando la dirección en el navegador
+>
+> Si abre la dirección en Chrome verá `{"ok": false, "error": "Falta el header X-API-Key."}`. **Eso no es un error de configuración: es la respuesta correcta.** El navegador, al escribir una dirección en la barra, no tiene forma de enviar la clave — y sin clave, la API responde exactamente eso.
+>
+> Para consultar la API necesita una herramienta que sí pueda enviar el header: **Postman**, PowerShell, Excel (Power Query), o el lenguaje con el que vaya a construir su integración. Los pasos con Postman están al final de este documento.
+>
+> La clave **no** se puede pasar en la dirección (por ejemplo `?api_key=...`) y no está previsto habilitarlo: las direcciones quedan guardadas en el historial del navegador y en los registros de todos los servidores intermedios, así que una clave ahí deja de ser secreta.
 
 > **Si prueba desde PowerShell:** escriba `curl.exe`, no `curl`. En PowerShell, `curl` es un alias de `Invoke-WebRequest`, que no acepta los parámetros `-s` ni `-H` y devuelve un error de argumentos que no tiene nada que ver con esta API. Los ejemplos de abajo usan `curl.exe`, que funciona igual en PowerShell, en CMD y en Git Bash.
 
@@ -21,13 +31,13 @@ Toda petición requiere el header `X-API-Key` con la clave entregada a su área.
 1. Verifique que su clave quedó bien configurada:
 
 ```bash
-curl.exe -H "X-API-Key: SU_CLAVE" https://<host>/api/integraciones/ping
+curl.exe -H "X-API-Key: 1c113f5ee8905b7f9125e1ee18804bc582750a18a68e0eec5529ebc2858a1b20" https://backend-traslado.vercel.app/api/integraciones/ping
 ```
 
 2. Traiga las novedades del mes:
 
 ```bash
-curl.exe -H "X-API-Key: SU_CLAVE" "https://<host>/api/integraciones/v1/novedades?fecha_desde=2026-08-01&limit=100"
+curl.exe -H "X-API-Key: 1c113f5ee8905b7f9125e1ee18804bc582750a18a68e0eec5529ebc2858a1b20" "https://backend-traslado.vercel.app/api/integraciones/v1/novedades?fecha_desde=2026-08-01&limit=100"
 ```
 
 3. Confirme el resultado: la respuesta trae `paginacion.total` con el número de novedades que cumplen el filtro, y `paginacion.hay_mas` en `true` si falta traer páginas.
@@ -211,6 +221,54 @@ Si `INTEGRACIONES_API_KEYS` no está configurada, estos endpoints responden `503
 
 El resto del backend (`/api/despachos`, `/api/auditor`, …) sigue **sin autenticación**. Esta migración no lo resuelve — solo evita que la integración nueva amplíe el problema. Ver `docs/PENDIENTES_BACKEND.md`.
 
-## Siguiente paso
+---
+
+## Anexo: primera consulta con Postman
+
+Postman es una aplicación gratuita para consultar APIs. Es la vía más simple si no va a escribir código todavía. Descarga: `postman.com/downloads`.
+
+1. Abra Postman y presione **New → HTTP Request**.
+2. Deje el método en **GET** y pegue esta dirección en la barra:
+
+```
+https://backend-traslado.vercel.app/api/integraciones/ping
+```
+
+3. Abra la pestaña **Headers** (debajo de la barra de dirección).
+4. En la primera fila vacía escriba:
+
+| Key | Value |
+|-----|-------|
+| `X-API-Key` | *la clave que le entregaron* |
+
+5. Presione **Send**.
+
+Debe ver:
+
+```json
+{ "ok": true, "consumidor": "inventarios", "ts": "..." }
+```
+
+Si ve `"Falta el header X-API-Key"`, revise que el nombre esté escrito exacto —`X-API-Key`— y que la casilla de esa fila esté marcada. Si ve `"API key inválida"`, el header llegó bien pero la clave no coincide: verifique que la copió completa, sin espacios al inicio ni al final.
+
+### Consultar novedades
+
+Con el mismo header ya cargado, cambie la dirección por:
+
+```
+https://backend-traslado.vercel.app/api/integraciones/v1/novedades?limit=10
+```
+
+Los filtros se agregan a la dirección después del `?`, separados por `&`. Por ejemplo, inventario fantasma de Girardota Llano desde el primero de agosto:
+
+```
+https://backend-traslado.vercel.app/api/integraciones/v1/novedades?tipo=INVENTARIO_FANTASMA&destino=00401&fecha_desde=2026-08-01
+```
+
+También puede usar la pestaña **Params** de Postman, que arma esa dirección por usted a partir de una tabla de nombre y valor.
+
+---
+
+## Siguiente paso (equipo de Traslados)
 
 Ejecute `sql/022_index_novedades.sql` en Supabase antes de habilitar el primer consumidor: sin esos índices, cada consulta recorre la tabla completa de ítems.
