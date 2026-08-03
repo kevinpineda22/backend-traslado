@@ -13,6 +13,7 @@ import { enviarRequisicion } from "./requisicion.service.js";
 import { getStockLote } from "./siesaStock.service.js";
 import { fichaDeItem } from "./siesa.service.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
+import { analitica as calcularAnalitica } from "./analitica.service.js";
 import ExcelJS from "exceljs";
 
 /**
@@ -36,6 +37,11 @@ export async function listarConResumen(filters = {}) {
 /** Estadísticas de motivos de faltante (para el dashboard). */
 export function estadisticasMotivos() {
   return ItemModel.estadisticasMotivos();
+}
+
+/** Analítica agregada para el Dashboard (ver analitica.service). */
+export function analitica(opts) {
+  return calcularAnalitica(opts);
 }
 
 /** Ítems en despachos activos (para avisar de traslados en curso). */

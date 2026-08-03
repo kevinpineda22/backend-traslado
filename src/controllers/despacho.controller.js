@@ -19,6 +19,24 @@ export async function estadisticasMotivos(_req, res, next) {
 }
 
 /**
+ * GET /api/despachos/analitica?dias=30
+ * Agregación completa para el Dashboard. Todo se calcula en el servidor: lo que
+ * vale para decidir vive a nivel de renglón, y traer esas filas al navegador para
+ * sumarlas ahí deja de funcionar apenas el módulo entre en régimen.
+ */
+export async function analiticaCtrl(req, res, next) {
+  try {
+    const dias = Number(req.query.dias);
+    const data = await DespachoService.analitica({
+      dias: Number.isFinite(dias) && dias > 0 ? dias : undefined,
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * GET /api/despachos/activos/items
  * Ítems que están en despachos activos (no finalizados), para avisar de
  * traslados en curso del mismo ítem+origen.

@@ -6,6 +6,7 @@ const router = Router();
 
 router.get("/", DespachoController.listar);
 router.get("/estadisticas/motivos", DespachoController.estadisticasMotivos);
+router.get("/analitica", DespachoController.analiticaCtrl);
 router.get("/activos/items", DespachoController.itemsActivos);
 
 // Listado semanal (borrador) del flujo General.
