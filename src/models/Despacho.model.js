@@ -911,7 +911,7 @@ export async function agregarItemsBorrador(id, items) {
           // Grupo/subgrupo del catálogo de HOY, por el mismo motivo que el peso: es
           // parte del snapshot del ítem. Además repuebla los renglones viejos que
           // quedaron con `grupo` en null y por eso salían al final de la lista del
-          // despachador, fuera del orden por pasillo.
+          // despachador, fuera del orden por grupo.
           grupo: item.grupo ?? null,
           categoria: item.categoria ?? null,
         })
