@@ -127,8 +127,13 @@ export async function getCriterios(origen = "PV001") {
  */
 export async function getProductosTraslado({ origen, destino }) {
   try {
-    const [rows, config] = await Promise.all([
+    const [rows, capacidades, config] = await Promise.all([
       leerBodegas([origen, destino]),
+      // Las UM cargadas en Capacidad·Llano se usan TAMBIÉN acá para partir el ítem
+      // en una fila por unidad. Lo que NO cruza es la `capacidad` en sí: ese número
+      // alimenta el sugerido A/B/C y es exclusivo de Llano — General calcula por
+      // stock de seguridad. De esa tabla solo se toman `unidad` y `factor`.
+      mapaCapacidades(),
       obtenerConfig(),
     ]);
     // Override global del período de cubrimiento (si se configuró en el admin);
@@ -186,28 +191,55 @@ export async function getProductosTraslado({ origen, destino }) {
       // Ítem que no está en el origen: solo tiene sentido si el destino lo necesita.
       if (!o && necesidad <= 0) continue;
 
-      productos.push({
-        codigo_item: codigo,
-        descripcion: trim(fuente.descripcion),
-        rotacion: trim(fuente.rotacion) || "N/A",
-        unidad_medida: trim(fuente.um),
-        unidades: buildUnidades(fuente),
-        // Volumen de UNA UNIDAD BASE (ya normalizado — ver volumenBase). `null`
-        // cuando SIESA no lo tiene, para que el panel distinga "sin dato" de
-        // "ocupa cero".
-        volumen: volumenBase(fuente),
-        criterios: fuente.criterios || {},
-        inventario_origen: inventarioOrigen,
-        disponible_origen: disponibleOrigen,
-        inventario_destino: inventarioDestino,
-        consumo_destino: consumoDestino,
-        periodo_cubrimiento: periodoCubrimiento,
-        stock_seguridad: stockSeguridad,
-        dias_inventario: diasInventario,
-        necesidad,
-        faltante,
-        sugerido,
-      });
+      // Variantes a emitir — mismo criterio que Llano: si el ítem tiene UM
+      // asignadas en Capacidad, va UNA FILA POR UM; si no, la fila base.
+      //
+      // OJO CON LA DIFERENCIA RESPECTO DE LLANO: allá cada UM trae su propia
+      // capacidad, así que cada fila tiene un sugerido DISTINTO. Acá el sugerido
+      // sale del stock de seguridad, que es el mismo para el ítem sin importar el
+      // empaque: las filas muestran LA MISMA necesidad expresada en otra unidad
+      // (60 UND = 10 P6). Son dos formas de mandar lo mismo, no dos pedidos.
+      const capRows = capacidades.get(codigo) || [];
+      const umRows = capRows.filter((r) => r.unidad && r.factor);
+      const variantes =
+        umRows.length > 0
+          ? umRows.map((r) => ({ unidad: r.unidad, factor: r.factor }))
+          : [{ unidad: null, factor: 1 }];
+
+      for (const v of variantes) {
+        // Con UM asignada la fila va fija en esa unidad (sin selector), igual que
+        // en Llano. Si no, se ofrecen las de SIESA (base + unidad de orden).
+        const unidadesDetalle = v.unidad
+          ? [{ unidad: v.unidad, factor: v.factor }]
+          : buildUnidades(fuente);
+
+        productos.push({
+          codigo_item: codigo,
+          // Identidad de la fila cuando el ítem se parte por UM. Sin esto, dos
+          // filas del mismo ítem compartirían clave en el carrito y se pisarían.
+          rowKey: v.unidad ? `${codigo}|${v.unidad}` : codigo,
+          descripcion: trim(fuente.descripcion),
+          rotacion: trim(fuente.rotacion) || "N/A",
+          unidad_medida: v.unidad || trim(fuente.um),
+          unidades: unidadesDetalle.map((u) => u.unidad),
+          unidadesDetalle,
+          // Volumen de UNA UNIDAD BASE (ya normalizado — ver volumenBase). `null`
+          // cuando SIESA no lo tiene, para que el panel distinga "sin dato" de
+          // "ocupa cero".
+          volumen: volumenBase(fuente),
+          criterios: fuente.criterios || {},
+          inventario_origen: inventarioOrigen,
+          disponible_origen: disponibleOrigen,
+          inventario_destino: inventarioDestino,
+          consumo_destino: consumoDestino,
+          periodo_cubrimiento: periodoCubrimiento,
+          stock_seguridad: stockSeguridad,
+          dias_inventario: diasInventario,
+          necesidad,
+          faltante,
+          sugerido,
+        });
+      }
     }
 
     return { data: productos };
