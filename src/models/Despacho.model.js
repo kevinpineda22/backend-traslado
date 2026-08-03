@@ -951,6 +951,117 @@ export async function finalizarBorrador(id, { despachadorId } = {}) {
   return data;
 }
 
+/**
+ * Reabre un despacho: "Creado" → "Borrador". El inverso exacto de
+ * `finalizarBorrador` — deshace lo que hizo "Enviar a despacho" para que el admin
+ * pueda seguir sumándole productos al listado.
+ *
+ * SOLO DESDE "Creado", y no es un detalle: en "Creado" nadie tocó la mercancía.
+ * Desde `En_recoleccion` en adelante hay un despachador contando con el celular en
+ * la mano, y sacarle el despacho de la pantalla a mitad del recorrido le borra el
+ * trabajo hecho. Por eso el guard no es "no está cerrado" sino "está exactamente
+ * en Creado".
+ *
+ * EL CHOQUE CON EL LISTADO ABIERTO — la parte que no es obvia.
+ * Hay un índice único parcial `(origen, destino) WHERE estado='Borrador'` (migración
+ * 013): una ruta puede tener UN solo listado abierto a la vez. Si alguien ya empezó
+ * un listado nuevo para esa misma ruta, reabrir este chocaría contra el índice y la
+ * base devolvería un 23505 ilegible. Se chequea antes y se explica en castellano,
+ * y además se atrapa el 23505 por si otro admin abre un listado en el medio.
+ *
+ * Se revierten también los campos que selló el envío: `disponible_at` (el reloj de
+ * "nadie inició la recolección"), su marca de alerta, y el despachador asignado —
+ * un listado en armado no está asignado a nadie. Los hitos de trazabilidad no se
+ * tocan: reabrir no cambia el pasado.
+ */
+export async function reabrirBorrador(id) {
+  const { data: cab } = await supabase
+    .from(TABLE)
+    .select("estado, origen, destino, inactivo, flujo")
+    .eq("id", id)
+    .single();
+
+  if (!cab) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  // El listado es una función del flujo General y nada más: el panel de armado lo
+  // oculta cuando el destino es Llano (`usaListado = !esLlano`). Un Llano devuelto
+  // a Borrador quedaría en un estado que ninguna pantalla sabe atender — no
+  // aparecería en el panel donde se agregan productos, que es justo para lo que
+  // sirve reabrir. Y no hace falta: en Llano los ítems ya se editan en "Creado"
+  // desde el Monitor.
+  if ((cab.flujo || "general") !== "general") {
+    const e = new Error(
+      "El listado es del flujo General. En Llano los productos se editan directo desde el Monitor, sin reabrir.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (cab.inactivo) {
+    const e = new Error(
+      "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (cab.estado !== "Creado") {
+    const e = new Error(
+      cab.estado === "Borrador"
+        ? "Este despacho ya es un listado sin enviar"
+        : `No se puede volver a listado: el despacho está en ${cab.estado} y ya hay trabajo de recolección hecho`,
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  const abierto = await findBorrador(cab.origen, cab.destino);
+  if (abierto) {
+    const e = new Error(
+      "Esa ruta ya tiene un listado sin enviar. Enviá o descartá ese listado antes de reabrir este despacho.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  const ahora = new Date().toISOString();
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({
+      estado: "Borrador",
+      disponible_at: null,
+      alerta_recoleccion_at: null,
+      despachador_id: null,
+      updated_at: ahora,
+    })
+    .eq("id", id)
+    .eq("estado", "Creado")
+    .select()
+    .single();
+
+  if (error?.code === "23505") {
+    const e = new Error(
+      "Otro listado sin enviar se abrió para esa ruta en este momento. Volvé a intentar.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (error || !data) {
+    const e = new Error("El despacho ya no está en Creado: alguien lo movió mientras tanto");
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  return data;
+}
+
 /** Descarta un borrador entero (ítems por cascade). Solo si sigue en Borrador. */
 export async function descartarBorrador(id) {
   const { data, error } = await supabase

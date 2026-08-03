@@ -15,6 +15,9 @@ router.get("/activos/items", DespachoController.itemsActivos);
 router.get("/listado", DespachoController.obtenerListado);
 router.post("/listado", validators.crearDespacho, DespachoController.agregarAlListado);
 router.post("/listado/:id/finalizar", DespachoController.finalizarListado);
+// Inverso de finalizar: devuelve un "Creado" a "Borrador" para seguir sumándole
+// productos. Solo mientras nadie empezó a recolectar.
+router.post("/listado/:id/reabrir", DespachoController.reabrirListado);
 router.delete("/listado/:id", DespachoController.descartarListado);
 // Editar cantidades / quitar ítems del listado usa el mismo PUT /:id/items que un
 // despacho en Creado: `editarItems` ya acepta ambos estados.

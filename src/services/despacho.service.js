@@ -138,6 +138,15 @@ export async function finalizarListado(id, despachadorId = null) {
   return DespachoModel.finalizarBorrador(id, { despachadorId });
 }
 
+/**
+ * Reabrir el listado: "Creado" → "Borrador". Deshace el envío a despacho para que
+ * se le puedan seguir agregando productos. Solo vale mientras nadie empezó a
+ * recolectar — el modelo es el que lo verifica.
+ */
+export async function reabrirListado(id) {
+  return DespachoModel.reabrirBorrador(id);
+}
+
 /** Descartar un listado completo sin despacharlo. */
 export async function descartarListado(id) {
   return DespachoModel.descartarBorrador(id);

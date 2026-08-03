@@ -214,6 +214,21 @@ export async function finalizarListado(req, res, next) {
 }
 
 /**
+ * POST /api/despachos/listado/:id/reabrir
+ * Devuelve un despacho "Creado" a "Borrador" para seguir agregándole productos.
+ * Inverso de `finalizarListado`. Responde 409 si alguien ya empezó a recolectar o
+ * si esa ruta ya tiene otro listado sin enviar.
+ */
+export async function reabrirListado(req, res, next) {
+  try {
+    const data = await DespachoService.reabrirListado(req.params.id);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * DELETE /api/despachos/listado/:id
  * Descarta el listado entero sin despacharlo.
  */
