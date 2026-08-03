@@ -432,8 +432,8 @@ export async function obtenerManifiesto(despachoId) {
  * Registrar cantidad recolectada por el despachador para un item.
  * `motivo` (opcional): motivo del faltante — ver ItemModel.MOTIVOS_FALTANTE.
  */
-export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null) {
-  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor);
+export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null) {
+  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor);
 }
 
 /**

@@ -345,28 +345,47 @@ export async function recolectar(req, res, next) {
   try {
     const { items, despachador_id } = req.body;
 
-    // Candado de propiedad: el despacho debe estar En_recoleccion y ser de quien
-    // llama. Una sola verificación por lote (todos los ítems son del mismo
-    // despacho), ANTES de escribir nada — así un segundo despachador no pisa
-    // cantidades. Lanza 403/409/404 si no corresponde.
+    // Guarda del despacho: que exista, no esté inactivo y esté En_recoleccion.
+    // Ya NO valida propiedad — el despacho es compartido (migración 023) y el
+    // candado bajó al renglón. Va antes de escribir nada: si el despacho no admite
+    // recolección, no tiene sentido intentar ítem por ítem.
     await DespachoService.assertPuedeRecolectar(req.params.id, despachador_id ?? null);
 
     const resultados = [];
+    const conflictos = [];
 
+    // UN RENGLÓN AJENO NO PUEDE TUMBAR EL LOTE.
+    //
+    // El front sincroniza de a tandas (ver useRecoleccionOffline). Si un solo ítem
+    // choca con el candado de otra persona y se propaga la excepción, se pierden
+    // las escrituras de TODOS los demás — y como el syncer reintenta el mismo lote,
+    // vuelve a chocar en el mismo ítem para siempre: la tanda queda trabada y la
+    // persona sigue contando sin que se guarde nada.
+    //
+    // Así que cada ítem va por su cuenta: los que entran, entran; los que chocan
+    // se devuelven aparte para que el front los marque como ajenos y deje de
+    // reintentarlos. Cualquier otro error (red, 422 de tope) sí se propaga: ese no
+    // es un choque esperable y esconderlo sería el mismo error de siempre.
     for (const item of items) {
-      const actualizado = await DespachoService.registrarRecoleccion(
-        item.id,
-        item.cantidad,
-        item.agotado,
-        item.motivo,
-        item.nueva_unidad_medida,
-        item.nueva_cantidad_admin,
-        item.nuevo_factor
-      );
-      resultados.push(actualizado);
+      try {
+        const actualizado = await DespachoService.registrarRecoleccion(
+          item.id,
+          item.cantidad,
+          item.agotado,
+          item.motivo,
+          item.nueva_unidad_medida,
+          item.nueva_cantidad_admin,
+          item.nuevo_factor,
+          despachador_id ?? null,
+        );
+        resultados.push(actualizado);
+      } catch (err) {
+        if (err?.codigo !== "RENGLON_TOMADO") throw err;
+        conflictos.push({ item_id: item.id, dueno: err.dueno, error: err.message });
+      }
     }
 
-    res.json({ ok: true, data: resultados });
+    res.json({ ok: true, data: resultados, conflictos });
   } catch (error) {
     next(error);
   }

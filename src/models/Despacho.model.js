@@ -360,17 +360,17 @@ export async function marcarAuditoriaAbierta(id) {
 }
 
 /**
- * Candado de propiedad para las escrituras de recolección (`POST /recolectar`).
- * Verifica que el despacho esté EN recolección y sea del despachador que llama.
- * Impide que un segundo despachador (lista vieja, otra pestaña, el monitor, o el
- * syncer offline de otra sesión) pise las cantidades de un despacho que no reclamó.
+ * Guarda de las escrituras de recolección (`POST /recolectar`): verifica que el
+ * despacho exista, no esté inactivo y esté En_recoleccion.
  *
- * Mismo alcance que updateStatus: frena el choque accidental entre despachadores
- * legítimos; el spoofing lo cubre la auth real cuando llegue.
+ * NO valida propiedad. Desde la 023 el despacho es COMPARTIDO: cualquier cantidad
+ * de personas puede recolectarlo a la vez. Quién puede escribir cada producto lo
+ * decide el candado por renglón (`ItemModel.updateCantidadDespachador`), no esta
+ * función. Ver el comentario al final del cuerpo.
  *
  * @param {string} id
- * @param {string} [despachadorId] - dueño esperado (correo del despachador)
- * @throws 404 si no existe, 409 si no está En_recoleccion, 403 si no es el dueño
+ * @param {string} [despachadorId] - se acepta por compatibilidad; ya no se usa acá
+ * @throws 404 si no existe, 409 si está inactivo o no está En_recoleccion
  */
 export async function assertPuedeRecolectar(id, despachadorId) {
   const { data: d, error } = await supabase
@@ -399,12 +399,18 @@ export async function assertPuedeRecolectar(id, despachadorId) {
     e.expose = true;
     throw e;
   }
-  if (despachadorId && d.despachador_id && d.despachador_id !== despachadorId) {
-    const e = new Error("Este despacho lo está recolectando otro despachador");
-    e.statusCode = 403;
-    e.expose = true;
-    throw e;
-  }
+  // ACÁ YA NO HAY CANDADO DE PROPIEDAD (migración 023).
+  //
+  // Hasta la 022 esto devolvía 403 si el despacho era de otro despachador. Un
+  // traslado grande no lo cuenta una persona sola, y ese 403 dejaba al segundo sin
+  // poder ni escanear: la operación lo resolvía compartiendo un mismo usuario, y
+  // con eso se perdía quién contó qué.
+  //
+  // El candado no se quitó, se BAJÓ DE NIVEL: ahora vive en el renglón
+  // (`traslados_items.recolectado_por`, ver `ItemModel.updateCantidadDespachador`).
+  // El despacho es compartido; el producto es de quien lo contó primero. Lo que
+  // esta función protege sigue igual de firme: que exista, que no esté inactivo y
+  // que esté En_recoleccion.
   return d;
 }
 
@@ -419,7 +425,7 @@ export async function assertPuedeRecolectar(id, despachadorId) {
  * el guard que ya funciona.
  *
  * @throws 404 si no existe, 409 si no está Pendiente_carga (ej: ya se cargó y está
- *   en Recolectado — un reintento tardío), 403 si no es el dueño.
+ *   en Recolectado — un reintento tardío).
  */
 export async function assertPuedeCargar(id, despachadorId) {
   const { data: d, error } = await supabase
@@ -451,19 +457,26 @@ export async function assertPuedeCargar(id, despachadorId) {
     e.expose = true;
     throw e;
   }
-  if (despachadorId && d.despachador_id && d.despachador_id !== despachadorId) {
-    const e = new Error("Este despacho lo está gestionando otro despachador");
-    e.statusCode = 403;
-    e.expose = true;
-    throw e;
-  }
+  // Sin candado de propiedad, por lo mismo que `assertPuedeRecolectar` (023): si
+  // el despacho lo contaron tres personas, cargar el camión le toca a la que esté
+  // cuando llega el camión, no necesariamente a la que apretó "Iniciar" primero.
+  //
+  // Que dos lo cierren a la vez ya lo impide el estado: el primero lo mueve a
+  // `Recolectado` y el segundo choca contra el 409 de arriba. El manifiesto además
+  // es idempotente (`cargarCamion` reusa el existente).
   return d;
 }
 
 /**
- * Iniciar recolección reclamando el despacho (modelo pool).
- * Atómico: solo avanza a "En_recoleccion" si SIGUE en "Creado" (`.eq("estado","Creado")`),
- * así dos despachadores no lo toman a la vez. Setea el despachador que lo reclama.
+ * Iniciar recolección — o SUMARSE a una ya empezada (modelo pool + multiusuario).
+ *
+ * Dos caminos, y el segundo es nuevo desde la 023:
+ *   · `Creado`        → se reclama con un UPDATE atómico (`.eq("estado","Creado")`)
+ *                       y queda como `despachador_id` quien lo arrancó.
+ *   · `En_recoleccion`→ ya lo empezó un compañero: se entra igual, sin pisar nada.
+ *
+ * Solo lanza cuando entrar NO tiene sentido: el despacho se inactivó o ya avanzó
+ * más allá de la recolección.
  */
 export async function iniciarRecoleccion(id, despachadorId) {
   const patch = {
@@ -484,13 +497,38 @@ export async function iniciarRecoleccion(id, despachadorId) {
     .select()
     .single();
 
-  if (error || !data) {
-    const err = new Error("El despacho ya fue tomado, se inactivó o cambió de estado");
-    err.statusCode = 409;
-    err.expose = true;
-    return Promise.reject(err);
+  if (data) return data;
+
+  // NO SE PUDO RECLAMAR — falta distinguir dos casos que hasta la 022 eran uno.
+  //
+  // El UPDATE exige `estado = 'Creado'`, así que no haber podido significa que
+  // alguien ya lo movió. Antes eso era siempre un 409 ("ya fue tomado"), y estaba
+  // bien cuando el despacho tenía un solo dueño posible. Con la recolección
+  // multiusuario (023) el caso más común pasó a ser el contrario: el compañero ya
+  // lo inició y esta persona viene a SUMARSE, no a reclamarlo.
+  //
+  // Así que se relee: si está `En_recoleccion` y activo, entrar es legítimo y se
+  // devuelve el despacho tal cual — sin pisar `despachador_id` (queda quien lo
+  // inició, que es el dato honesto) ni `recoleccion_iniciada_at` (el hito es el
+  // arranque real, no cuándo se sumó el tercero).
+  const { data: actual } = await supabase
+    .from(TABLE)
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (actual && actual.estado === "En_recoleccion" && !actual.inactivo) {
+    return actual;
   }
-  return data;
+
+  const err = new Error(
+    actual?.inactivo
+      ? "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar."
+      : `El despacho ya no se puede tomar: está en estado ${actual?.estado || "desconocido"}`,
+  );
+  err.statusCode = 409;
+  err.expose = true;
+  return Promise.reject(err);
 }
 
 /**
@@ -873,7 +911,7 @@ export async function agregarItemsBorrador(id, items) {
           // Grupo/subgrupo del catálogo de HOY, por el mismo motivo que el peso: es
           // parte del snapshot del ítem. Además repuebla los renglones viejos que
           // quedaron con `grupo` en null y por eso salían al final de la lista del
-          // despachador, fuera del orden por pasillo.
+          // despachador, fuera del orden por grupo.
           grupo: item.grupo ?? null,
           categoria: item.categoria ?? null,
         })

@@ -71,6 +71,15 @@ export async function obtenerDetalle(req, res, next) {
         // del producto, NO revela cuánto despachó nadie: no rompe la ceguera.
         factor: item.factor,
         cantidad_admin: item.cantidad_admin,
+        // grupo: la familia del producto (ACEITES, GRANOS…). Sin esto el auditor
+        // recibía los ítems ORDENADOS por grupo pero sin el campo, así que su
+        // lista no podía ni agrupar ni filtrar: el orden se leía como alfabético.
+        // `categoria` es el campo legacy y hoy viene casi siempre en null — se
+        // mantiene por los despachos viejos que solo tienen ese.
+        //
+        // No rompe la auditoría ciega, por el mismo motivo que `factor`: dice QUÉ
+        // es el producto, nunca cuánto se pidió ni cuánto despachó nadie.
+        grupo: item.grupo,
         categoria: item.categoria,
         no_recibido: item.no_recibido || false,
         // NOTA: cantidad_despachador y diferencia se ocultan intencionalmente
