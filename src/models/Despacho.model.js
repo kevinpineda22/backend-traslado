@@ -360,17 +360,17 @@ export async function marcarAuditoriaAbierta(id) {
 }
 
 /**
- * Candado de propiedad para las escrituras de recolección (`POST /recolectar`).
- * Verifica que el despacho esté EN recolección y sea del despachador que llama.
- * Impide que un segundo despachador (lista vieja, otra pestaña, el monitor, o el
- * syncer offline de otra sesión) pise las cantidades de un despacho que no reclamó.
+ * Guarda de las escrituras de recolección (`POST /recolectar`): verifica que el
+ * despacho exista, no esté inactivo y esté En_recoleccion.
  *
- * Mismo alcance que updateStatus: frena el choque accidental entre despachadores
- * legítimos; el spoofing lo cubre la auth real cuando llegue.
+ * NO valida propiedad. Desde la 023 el despacho es COMPARTIDO: cualquier cantidad
+ * de personas puede recolectarlo a la vez. Quién puede escribir cada producto lo
+ * decide el candado por renglón (`ItemModel.updateCantidadDespachador`), no esta
+ * función. Ver el comentario al final del cuerpo.
  *
  * @param {string} id
- * @param {string} [despachadorId] - dueño esperado (correo del despachador)
- * @throws 404 si no existe, 409 si no está En_recoleccion, 403 si no es el dueño
+ * @param {string} [despachadorId] - se acepta por compatibilidad; ya no se usa acá
+ * @throws 404 si no existe, 409 si está inactivo o no está En_recoleccion
  */
 export async function assertPuedeRecolectar(id, despachadorId) {
   const { data: d, error } = await supabase
