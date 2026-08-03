@@ -100,20 +100,54 @@ export async function estadisticasMotivos() {
  * Persiste la cantidad real, si quedó agotado y el motivo del faltante (si lo hay).
  * Tope duro: la cantidad recolectada NO puede superar la pedida por el admin.
  *
+ * CANDADO POR RENGLÓN (migración 023)
+ * Desde que un despacho lo pueden recolectar VARIAS personas a la vez, el renglón
+ * queda de quien lo contó primero: `recolectado_por` se sella en la primera
+ * escritura y, a partir de ahí, cualquier otra persona recibe 409. Sin esto, dos
+ * personas que cuentan el mismo producto se pisan la cantidad y gana el último
+ * POST — que es exactamente el accidente que el candado viejo (a nivel despacho)
+ * evitaba a costa de dejar trabajar a uno solo.
+ *
+ * `recolectadoPor` NULO = escritura del SISTEMA, no de una persona: la
+ * auto-clasificación del flujo llano marca motivos sobre renglones que nadie tocó.
+ * En ese caso NO se valida el dueño y NO se sella ninguno — un renglón que resolvió
+ * el sistema no es de nadie, y sellarlo dejaría al despachador sin poder corregirlo.
+ *
  * @param {string} itemId
  * @param {number} cantidad  - Cantidad real recolectada
  * @param {boolean} [agotado] - true si no hubo stock suficiente en bodega
  * @param {string|null} [motivo] - motivo del faltante: uno de MOTIVOS_FALTANTE, o null
+ * @param {string|null} [recolectadoPor] - correo de quien cuenta; null = el sistema
+ * @throws 409 si el renglón ya lo está contando otra persona
  */
-export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null) {
+export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null) {
   // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
   const { data: item, error: errGet } = await supabase
     .from(TABLE)
-    .select("cantidad_admin, unidad_medida")
+    .select("cantidad_admin, unidad_medida, recolectado_por")
     .eq("id", itemId)
     .single();
 
   if (errGet || !item) throw createError(404, "Item no encontrado");
+
+  // El dueño del renglón se compara normalizado: el correo puede venir con otra
+  // capitalización según de dónde salga la sesión, y un "Luis@" contra un "luis@"
+  // trabaría a la persona sobre su propio conteo.
+  const mismoDueno = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
+  if (recolectadoPor && item.recolectado_por && !mismoDueno(item.recolectado_por, recolectadoPor)) {
+    const e = createError(
+      409,
+      `Este producto lo está contando ${item.recolectado_por}. Elegí otro para no pisar su conteo.`,
+    );
+    // El front necesita distinguir este choque de un error de red para poder
+    // marcar el renglón como ajeno en vez de reintentarlo para siempre.
+    e.codigo = "RENGLON_TOMADO";
+    e.item_id = itemId;
+    e.dueno = item.recolectado_por;
+    throw e;
+  }
 
   const cant = Number(cantidad) || 0;
   const pedido = nueva_cant_admin !== null && nueva_cant_admin !== undefined 
@@ -134,6 +168,10 @@ export async function updateCantidadDespachador(itemId, cantidad, agotado = fals
     agotado: !!agotado,
     motivo: motivoLimpio,
   };
+
+  // Se sella al dueño solo cuando cuenta una PERSONA. El sistema no reclama nada
+  // (ver el bloque de arriba), y una re-escritura del mismo dueño no cambia nada.
+  if (recolectadoPor) updatePayload.recolectado_por = recolectadoPor;
 
   // Si envían una unidad nueva y es distinta a la actual, la mutamos
   if (nueva_um && nueva_um !== item.unidad_medida) {
@@ -164,7 +202,11 @@ export async function updateCantidadDespachador(itemId, cantidad, agotado = fals
 export async function resetRecoleccionByDespacho(despachoId) {
   const { error } = await supabase
     .from(TABLE)
-    .update({ cantidad_despachador: null, agotado: false, motivo: null })
+    // `recolectado_por` se limpia con el resto: si se vuelve a contar todo desde
+    // cero, los renglones tienen que quedar libres para que los tome quien esté
+    // recolectando ahora. Si no, un despacho recontado quedaría trabado por los
+    // dueños de la vuelta anterior — gente que quizá ni está en el turno.
+    .update({ cantidad_despachador: null, agotado: false, motivo: null, recolectado_por: null })
     .eq("despacho_id", despachoId);
   if (error) throw new Error(`Error al resetear la recolección: ${error.message}`);
 }
