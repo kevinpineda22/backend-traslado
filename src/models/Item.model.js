@@ -232,6 +232,12 @@ export async function insertItemAuditor(despachoId, item) {
       codigo_item: String(item.codigo_item || "").trim() || "S/COD",
       descripcion: item.descripcion || null,
       unidad_medida: item.unidad_medida || null,
+      // Grupo y subgrupo del catálogo (los completa `completarFichaItem`). Sin
+      // esto el ítem agregado cae al final de la lista, en la bolsa de "Sin
+      // grupo", justo donde nadie lo busca: es mercancía que llegó de sorpresa y
+      // lo que se quiere es verla junto a sus pares al recorrer el pasillo.
+      grupo: item.grupo || null,
+      categoria: item.categoria || null,
       cantidad_admin: 0,
       cantidad_despachador: 0,
       cantidad_auditor: cantidadAuditor,

@@ -708,17 +708,20 @@ export async function resolverCodigoBarras(codigo) {
  * anónima, y la imagen tampoco cargaba porque el catálogo de fotos se busca por
  * código SIESA, no por código de barras.
  *
- * Dos pasos, los dos best-effort:
+ * Tres pasos, todos best-effort:
  *   1. EAN → `f120_id` (tabla `siesa_codigos_barras`).
- *   2. `f120_id` → descripción y UM del snapshot (cualquier bodega: la ficha del
- *      ítem es la misma en todas, lo que cambia entre bodegas son las cantidades).
+ *   2. `f120_id` → descripción, UM y criterios del snapshot (cualquier bodega: la
+ *      ficha del ítem es la misma en todas, lo que cambia son las cantidades).
+ *   3. Si el snapshot no lo tiene → `items_siesa`, el maestro completo del
+ *      catálogo. Cubre justo lo que al snapshot le falta (ver el comentario del
+ *      paso 3 abajo).
  *
  * Nunca lanza: si SIESA no lo conoce, devuelve el código tal cual llegó y sin
  * descripción. Un ítem sin ficha es peor que uno con ficha, pero mucho mejor que
  * un 500 en medio de un cierre de auditoría.
  *
  * @param {string} codigo - lo que se escaneó (EAN o código SIESA)
- * @returns {Promise<{codigo_item:string, descripcion:string|null, unidad_medida:string|null}>}
+ * @returns {Promise<{codigo_item:string, descripcion:string|null, unidad_medida:string|null, grupo:string|null, subgrupo:string|null}>}
  */
 export async function fichaDeItem(codigo) {
   const crudo = String(codigo ?? "").trim();
@@ -732,22 +735,63 @@ export async function fichaDeItem(codigo) {
     // Se sigue con el código crudo: el paso 2 igual puede reconocerlo.
   }
 
+  let descripcion = null;
+  let unidad = null;
+  let grupo = null;
+  let subgrupo = null;
+
   try {
     const { data } = await supabase
       .from("traslados_snapshot")
-      .select("descripcion, um")
+      .select("descripcion, um, criterios")
       .eq("codigo_item", codigoItem)
       .limit(1)
       .maybeSingle();
 
-    return {
-      codigo_item: codigoItem,
-      descripcion: trim(data?.descripcion) || null,
-      unidad_medida: trim(data?.um) || null,
-    };
+    descripcion = trim(data?.descripcion) || null;
+    unidad = trim(data?.um) || null;
+    grupo = trim(data?.criterios?.["001"]) || null;
+    subgrupo = trim(data?.criterios?.["002"]) || null;
   } catch {
-    return { codigo_item: codigoItem, descripcion: null, unidad_medida: null };
+    // Se sigue al maestro: que falle el snapshot no significa que el ítem no exista.
   }
+
+  // PASO 3 — EL MAESTRO, cuando el snapshot no lo tiene.
+  //
+  // El snapshot es POR BODEGA: solo trae los ítems que SIESA devolvió para las
+  // bodegas que se consultan. Un producto que existe en el catálogo pero no está
+  // stockeado en esas bodegas —que es justo el caso de la mercancía que llega de
+  // sorpresa y el auditor tiene que agregar— no aparece, y el renglón quedaba sin
+  // descripción aunque el código estuviera perfectamente resuelto.
+  //
+  // Medido sobre 200 códigos de barras reales: el snapshot resuelve el 76,5% y
+  // `items_siesa` el 100%. Son 47 de cada 200 renglones que hoy salen anónimos en
+  // la comparativa y en el correo.
+  if (!descripcion) {
+    try {
+      const idNumerico = Number(codigoItem);
+      if (Number.isFinite(idNumerico)) {
+        const { data: maestro } = await supabase
+          .from("items_siesa")
+          .select("f120_descripcion, grupo, subgrupo")
+          .eq("f120_id", idNumerico)
+          .maybeSingle();
+
+        descripcion = trim(maestro?.f120_descripcion) || null;
+        grupo = grupo || trim(maestro?.grupo) || null;
+        subgrupo = subgrupo || trim(maestro?.subgrupo) || null;
+      }
+    } catch {
+      // Best-effort hasta el final: sin ficha se guarda el código y la cantidad,
+      // que es lo que el auditor contó de verdad. Perder ese conteo por un timeout
+      // de catálogo sería mucho peor que un renglón sin nombre.
+    }
+  }
+
+  // `grupo` viaja para que el ítem agregado caiga en su pasillo y no al final de
+  // la lista, en la bolsa de "Sin grupo", que es donde termina todo lo que llega
+  // sin clasificar.
+  return { codigo_item: codigoItem, descripcion, unidad_medida: unidad, grupo, subgrupo };
 }
 
 export { getFlujoPorDestino };

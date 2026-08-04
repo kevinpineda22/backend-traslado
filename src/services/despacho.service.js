@@ -526,15 +526,24 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
  * auditor por un timeout de SIESA es un problema de inventario.
  */
 async function completarFichaItem(item) {
-  if (item?.descripcion && String(item.descripcion).trim()) return item;
-
+  // Se consulta SIEMPRE, aunque el front ya haya mandado descripción. Antes se
+  // salía temprano en ese caso, y con eso se perdían dos cosas que el front NO
+  // tiene: el `grupo` (para que el ítem caiga en su pasillo y no en "Sin grupo")
+  // y la traducción del código de barras al código SIESA — que es lo que hace que
+  // la FOTO cargue, porque el catálogo de imágenes se busca por código SIESA.
   try {
     const ficha = await fichaDeItem(item?.codigo_item);
     return {
       ...item,
+      // El código resuelto manda sobre el escaneado: si el lector devolvió un EAN,
+      // guardarlo crudo deja el renglón sin imagen para siempre.
       codigo_item: ficha.codigo_item || item?.codigo_item,
-      descripcion: ficha.descripcion || item?.descripcion || null,
+      // La descripción del front gana: puede ser la que el auditor escribió a mano
+      // para algo que ningún catálogo conoce.
+      descripcion: item?.descripcion || ficha.descripcion || null,
       unidad_medida: item?.unidad_medida || ficha.unidad_medida || "UND",
+      grupo: item?.grupo || ficha.grupo || null,
+      categoria: item?.categoria || ficha.subgrupo || null,
     };
   } catch (err) {
     console.error("[auditoria] no se pudo completar la ficha del ítem:", err.message);
