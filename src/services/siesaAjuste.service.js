@@ -40,7 +40,24 @@ import { sandboxOn } from "../config/sandbox.js";
      C.O MOVIMIENTO   resolverCO(origen)
      ITEM / CANTIDAD  del faltante que reportó SIESA (registro 470)
      COSTO_PROMEDIO   consulta `merkahorro_costo_promedio_dev` → CostoPromInst
-     UNIDAD_NEGOCIO   MISMA fila de esa consulta → IdInstalacion (001/002/003)
+     UNIDAD_NEGOCIO   FIJA en 001 (confirmado con contabilidad, 2026-08-04)
+
+   ── POR QUÉ LA U.N. YA NO SALE DE LA CONSULTA DE COSTO ──
+   Salía del `IdInstalacion` de la fila de MAYOR costo, y eso estaba mal de raíz:
+   `IdInstalacion` NO es una unidad de negocio, es el centro de operación de una
+   sede (001 Copacabana, 002 Villahermosa, 003 Girardota Parque, 004 Llano,
+   006 Vegas, 007 Barbosa, 008 San Juan — los mismos de CENTROS_OPERACION).
+
+   Como se elegía por costo máximo, un ajuste que entraba en Girardota Parque
+   podía declarar la U.N. de Barbosa porque esa sede tenía el promedio 40 centavos
+   más alto. SIESA lo rechazaba con "60504-La unidad de negocio no existe".
+   Medido sobre la consulta real: 4.369 de 21.862 ítems (20%) mandaban una U.N.
+   inválida.
+
+   El costo SÍ sigue saliendo del máximo entre instalaciones (valuación
+   conservadora); lo que se rompió es el acople entre las dos cosas. El costo es
+   una valuación, la U.N. es una dimensión contable: no tienen por qué viajar
+   juntas, y hacerlo fue el error.
 
    Config (.env):
      SIESA_AJUSTE_AUTO            "1" para habilitar el disparo automático
@@ -48,7 +65,7 @@ import { sandboxOn } from "../config/sandbox.js";
      SIESA_AJUSTE_NOMBRE_DOCUMENTO default AJUSTE_DESARROLLO_REQUISICIONES
      SIESA_AJUSTE_ID_SISTEMA      default 1 (cae a SIESA_IMPORTAR_ID_SISTEMA)
      SIESA_AJUSTE_UNIDAD_MEDIDA   default UND
-     SIESA_AJUSTE_UNIDAD_NEGOCIO  override fijo (si NO querés que salga de IdInstalacion)
+     SIESA_AJUSTE_UNIDAD_NEGOCIO  override; el default 001 ya es el valor correcto
      SIESA_AJUSTE_CONSULTA_COSTO  default merkahorro_costo_promedio_dev
      SIESA_AJUSTE_PARAM_ITEM      default v121_id_item (parámetro de la consulta)
      SIESA_AJUSTE_COSTO_DEFAULT   costo de respaldo si la consulta no trae el ítem
@@ -68,7 +85,11 @@ const cfg = {
   key: () => process.env.CONNEKTA_KEY || process.env.CONNI_KEY || "",
   token: () => process.env.CONNEKTA_TOKEN || process.env.CONNI_TOKEN || "",
   unidadMedida: () => process.env.SIESA_AJUSTE_UNIDAD_MEDIDA || "UND",
-  unidadNegocioFija: () => String(process.env.SIESA_AJUSTE_UNIDAD_NEGOCIO || "").trim(),
+  // Default 001, no cadena vacía: si mañana la env var no queda atada a un
+  // deployment, el ajuste tiene que seguir mandando la U.N. correcta en vez de
+  // volver silenciosamente a derivarla mal. Una config faltante no debe poder
+  // resucitar el bug.
+  unidadNegocio: () => String(process.env.SIESA_AJUSTE_UNIDAD_NEGOCIO || "001").trim(),
   consultaCosto: () =>
     process.env.SIESA_AJUSTE_CONSULTA_COSTO || "merkahorro_costo_promedio_dev",
   paramItem: () => process.env.SIESA_AJUSTE_PARAM_ITEM || "v121_id_item",
@@ -103,7 +124,11 @@ export function estadoAjusteConfig(sede = "PV001") {
     nombreDocumento: cfg.nombreDocumento(),
     idSistema: cfg.idSistema(),
     unidadMedida: cfg.unidadMedida(),
-    unidadNegocioFija: cfg.unidadNegocioFija() || null,
+    // El valor EFECTIVO, no el crudo del env: lo que importa saber en producción
+    // es qué U.N. va a viajar en el payload. `envRaw` en null significa que corre
+    // con el default, que ya es el correcto.
+    unidadNegocio: cfg.unidadNegocio(),
+    envUnidadNegocioRaw: process.env.SIESA_AJUSTE_UNIDAD_NEGOCIO ?? null,
     consultaCosto: cfg.consultaCosto(),
     paramItem: cfg.paramItem(),
     configFalta: configAjusteFaltante(sede),
@@ -130,7 +155,7 @@ export async function probarConsultaCosto(item) {
   const codigo = trim(item);
   try {
     const cache = await refrescarMapaCostos();
-    const hit = cache.mapa.get(normItem(codigo)) || null;
+    const costo = cache.mapa.get(normItem(codigo));
 
     return {
       ok: true,
@@ -142,7 +167,9 @@ export async function probarConsultaCosto(item) {
       itemsEnMapa: cache.mapa.size,
       item: codigo,
       claveNormalizada: normItem(codigo),
-      encontrado: hit,
+      // Se arma igual que en `getDatosItems` para que el probe muestre EXACTAMENTE
+      // lo que se le va a mandar al conector, no una versión parecida.
+      encontrado: costo == null ? null : { costo, unidadNegocio: cfg.unidadNegocio() },
     };
   } catch (e) {
     return {
@@ -266,8 +293,11 @@ function acumularFaltante(porItem, { item, bodega, cantidad }) {
    `merkahorro_costo_promedio_dev` es una consulta DINÁMICA (la crearon ellos),
    y las dinámicas NO aceptan parámetros por ítem: devuelven el dataset entero
    paginado (ver docs/ARQUITECTURA.md y config/connekta.js). Así que traemos TODO
-   una vez, armamos un mapa item→{costo, unidadNegocio} y lo cacheamos. Los ajustes
-   son raros y el costo cambia lento, así que un TTL largo alcanza y sobra. */
+   una vez, armamos un mapa item→costo y lo cacheamos. Los ajustes son raros y el
+   costo cambia lento, así que un TTL largo alcanza y sobra.
+
+   Solo el COSTO: la unidad de negocio es fija (001) y no depende del ítem, así
+   que meterla acá era lo que la ataba a la instalación equivocada. */
 const COSTO_TTL_MS = Number(process.env.SIESA_AJUSTE_COSTO_TTL_MS) || 6 * 60 * 60 * 1000;
 const COSTO_TAM_PAG = Number(process.env.SIESA_AJUSTE_COSTO_TAMPAG) || 1000;
 const COSTO_MAX_PAGINAS = Number(process.env.SIESA_AJUSTE_COSTO_MAX_PAGINAS) || 300;
@@ -275,12 +305,16 @@ const COSTO_MAX_PAGINAS = Number(process.env.SIESA_AJUSTE_COSTO_MAX_PAGINAS) || 
 let _costoCache = { mapa: null, time: 0, total: 0, filas: 0, paginas: 0 };
 
 /**
- * Acumula filas al mapa item→{costo, unidadNegocio}. La consulta trae una fila por
- * INSTALACIÓN, y acá la instalación (`IdInstalacion` = 001/002/003) ES la unidad de
- * negocio → costo y unidad de negocio salen de la MISMA fila. Si un ítem tiene
- * varias instalaciones, nos quedamos con la de MAYOR costo (valuación conservadora).
+ * Acumula filas al mapa item→costo. La consulta trae una fila por INSTALACIÓN y nos
+ * quedamos con la de MAYOR costo (valuación conservadora: si vamos a inventar
+ * stock, que no quede subvaluado).
+ *
+ * `IdInstalacion` se IGNORA a propósito. Antes se guardaba como unidad de negocio
+ * y era la causa del rechazo 60504 — ver el encabezado del archivo. Si alguien lo
+ * vuelve a necesitar, que salga de una tabla de negocio, no de cuál sede tenía el
+ * promedio más alto ese día.
  */
-function acumularCostos(mapa, rows, fija) {
+function acumularCostos(mapa, rows) {
   let n = 0;
   for (const r of rows || []) {
     const item = normItem(r.IdItem);
@@ -288,9 +322,7 @@ function acumularCostos(mapa, rows, fija) {
     if (!item || !Number.isFinite(costo)) continue;
     n += 1;
     const prev = mapa.get(item);
-    if (!prev || costo > prev.costo) {
-      mapa.set(item, { costo, unidadNegocio: fija || trim(r.IdInstalacion) });
-    }
+    if (prev == null || costo > prev) mapa.set(item, costo);
   }
   return n;
 }
@@ -303,17 +335,16 @@ async function cargarMapaCostos({ force = false } = {}) {
   if (!force && _costoCache.mapa && Date.now() - _costoCache.time < COSTO_TTL_MS) {
     return _costoCache;
   }
-  const fija = cfg.unidadNegocioFija();
   const mapa = new Map();
   let filas = 0;
 
   const primera = await ejecutarConsulta(cfg.consultaCosto(), 1, COSTO_TAM_PAG);
-  filas += acumularCostos(mapa, primera.datos, fija);
+  filas += acumularCostos(mapa, primera.datos);
 
   const limite = Math.min(primera.totalPaginas || 1, COSTO_MAX_PAGINAS);
   for (let pag = 2; pag <= limite; pag++) {
     const page = await ejecutarConsulta(cfg.consultaCosto(), pag, COSTO_TAM_PAG);
-    filas += acumularCostos(mapa, page.datos, fija);
+    filas += acumularCostos(mapa, page.datos);
   }
 
   _costoCache = {
@@ -332,7 +363,10 @@ export async function refrescarMapaCostos() {
 }
 
 /**
- * Costo + unidad de negocio de cada ítem, del mapa cacheado de la consulta dinámica.
+ * Costo + unidad de negocio de cada ítem. El costo sale del mapa cacheado de la
+ * consulta dinámica; la U.N. es la MISMA para todos (001) y no depende del ítem
+ * ni de la sede — por eso ya no viaja dentro del mapa.
+ *
  * Si un ítem no está en el mapa, usa `SIESA_AJUSTE_COSTO_DEFAULT` si está configurado;
  * si no, lanza (no inventamos un costo para escribir en el ERP).
  *
@@ -341,7 +375,7 @@ export async function refrescarMapaCostos() {
  */
 export async function getDatosItems(items) {
   const unicos = [...new Set((items || []).map(trim).filter(Boolean))];
-  const fija = cfg.unidadNegocioFija();
+  const unidadNegocio = cfg.unidadNegocio();
   const porDefecto = cfg.costoDefault();
 
   let mapa;
@@ -353,11 +387,11 @@ export async function getDatosItems(items) {
 
   const out = {};
   for (const item of unicos) {
-    const hit = mapa.get(normItem(item));
-    if (hit) {
-      out[item] = hit;
+    const costo = mapa.get(normItem(item));
+    if (costo != null) {
+      out[item] = { costo, unidadNegocio };
     } else if (porDefecto != null) {
-      out[item] = { costo: porDefecto, unidadNegocio: fija };
+      out[item] = { costo: porDefecto, unidadNegocio };
     } else {
       throw new Error(
         `Sin costo promedio para el ítem ${item} en ${cfg.consultaCosto()}. ` +
@@ -482,7 +516,9 @@ export async function importarAjuste(despacho, faltantes) {
     item: f.item,
     cantidad: f.cantidad,
     costo: datos[f.item]?.costo ?? 0,
-    unidadNegocio: datos[f.item]?.unidadNegocio ?? "",
+    // Respaldo a la U.N. de config, no a "": una unidad de negocio vacía es un
+    // rechazo seguro de SIESA, y este `??` solo se activa si algo raro pasó.
+    unidadNegocio: datos[f.item]?.unidadNegocio || cfg.unidadNegocio(),
   }));
 
   const payload = armarPayloadAjuste({
