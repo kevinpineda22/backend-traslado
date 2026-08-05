@@ -77,11 +77,20 @@ export async function findAll(filters = {}) {
 
   query = aplicarFiltroInactivo(query, filters);
 
-  // Sede de quien consulta (migración 025): despachar es sobre el ORIGEN — solo
-  // se ve lo que sale de la propia bodega. Lo resuelve el controlador desde el
-  // correo, nunca lo manda el cliente. Sin sede no filtra: es el comportamiento
-  // previo, y el de quien tiene alcance sobre todas las bodegas.
-  if (filters.sede_origen) query = query.eq("origen", filters.sede_origen);
+  // Sede de quien consulta (migración 025). Sale TODO lo que menciona a esa
+  // bodega, sea como origen o como destino — no solo lo que arranca ahí.
+  //
+  // La primera versión miraba solo el `origen`, razonando que despachar es sacar
+  // mercancía de la propia bodega. Pero eso dejaba a Llano con el panel vacío
+  // aunque tuviera un traslado en camino, y no ver lo que te van a mandar es peor
+  // que verlo de más: el traslado te concierne igual.
+  //
+  // Lo resuelve el controlador desde el correo, nunca lo manda el cliente. Sin
+  // sede no filtra: ese es el alcance de quien las ve todas.
+  if (filters.sede_origen) {
+    const s = filters.sede_origen;
+    query = query.or(`origen.eq.${s},destino.eq.${s}`);
+  }
 
   if (filters.sin_asignar) {
     query = query.is("despachador_id", null);
@@ -746,11 +755,20 @@ export async function findAllWithResumen(filters = {}) {
 
   query = aplicarFiltroInactivo(query, filters);
 
-  // Sede de quien consulta (migración 025): despachar es sobre el ORIGEN — solo
-  // se ve lo que sale de la propia bodega. Lo resuelve el controlador desde el
-  // correo, nunca lo manda el cliente. Sin sede no filtra: es el comportamiento
-  // previo, y el de quien tiene alcance sobre todas las bodegas.
-  if (filters.sede_origen) query = query.eq("origen", filters.sede_origen);
+  // Sede de quien consulta (migración 025). Sale TODO lo que menciona a esa
+  // bodega, sea como origen o como destino — no solo lo que arranca ahí.
+  //
+  // La primera versión miraba solo el `origen`, razonando que despachar es sacar
+  // mercancía de la propia bodega. Pero eso dejaba a Llano con el panel vacío
+  // aunque tuviera un traslado en camino, y no ver lo que te van a mandar es peor
+  // que verlo de más: el traslado te concierne igual.
+  //
+  // Lo resuelve el controlador desde el correo, nunca lo manda el cliente. Sin
+  // sede no filtra: ese es el alcance de quien las ve todas.
+  if (filters.sede_origen) {
+    const s = filters.sede_origen;
+    query = query.or(`origen.eq.${s},destino.eq.${s}`);
+  }
 
   if (filters.sin_asignar) {
     query = query.is("despachador_id", null);
@@ -826,8 +844,13 @@ export async function findForAuditor({ sede } = {}) {
     // Los inactivos desaparecen también del auditor (ver aplicarFiltroInactivo).
     .eq("inactivo", false);
 
-  // Recibir es sobre el DESTINO: a esta bodega es donde llega la mercancía.
-  if (sede) query = query.eq("destino", sede);
+  // Sale todo lo que menciona a la bodega, de los dos lados: lo que llega ACÁ y
+  // lo que salió DE ACÁ. Mismo criterio que en `findAll`.
+  //
+  // Que Girardota Parque vea en esta lista el traslado que él mismo despachó a
+  // Llano es a propósito: le sirve para saber si ya lo recibieron. Confirmarlo
+  // sigue siendo del destino — el botón de confirmar no cambia por esto.
+  if (sede) query = query.or(`origen.eq.${sede},destino.eq.${sede}`);
 
   const { data, error } = await query;
 
