@@ -44,6 +44,44 @@ export async function obtener(id) {
 }
 
 /**
+ * Sede de una persona, buscada por su correo de sesión. `null` = sin sede
+ * cargada, o sea sin restricción: ve todas las bodegas (migración 025).
+ *
+ * LA RESUELVE EL SERVIDOR, no el cliente. El panel manda "soy este correo" y acá
+ * se decide qué puede ver; si el front mandara la sede directamente, cambiarla
+ * sería cuestión de editar la URL. No es una barrera real —este backend todavía
+ * no autentica a nadie— pero es la forma correcta, y el día que haya auth el
+ * filtro ya está del lado que corresponde.
+ *
+ * Un correo que no está en el maestro también devuelve `null`: no se le esconde
+ * nada a alguien solo por no estar cargado, que dejaría a una persona nueva
+ * mirando una pantalla vacía sin explicación.
+ *
+ * @param {string} correo
+ * @returns {Promise<string|null>} código de bodega (PV001, 00201, …) o null
+ */
+export async function sedeDe(correo) {
+  const clave = normalizarCorreo(correo);
+  if (!clave) return null;
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("sede")
+    .eq("correo", clave)
+    .eq("activo", true)
+    .maybeSingle();
+
+  if (error) {
+    // No se propaga: quedarse sin sede degrada a "ve todo", que es el
+    // comportamiento previo. Tumbar el panel entero por no poder acotarlo sería
+    // peor que mostrarlo completo.
+    console.error(`[traslados] no se pudo resolver la sede de ${clave}:`, error.message);
+    return null;
+  }
+  return data?.sede || null;
+}
+
+/**
  * El correo va en MINÚSCULAS y sin espacios, siempre.
  *
  * No es cosmética: este valor se compara contra el correo de la sesión para
@@ -58,7 +96,16 @@ const normalizarCorreo = (v) => {
 
 const CORREO_VALIDO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Bodega donde trabaja la persona. Vacío → `null`, nunca "": el filtro compara
+ * contra `despachos.origen` / `despachos.destino`, y una cadena vacía no
+ * matchearía nada, dejando el panel en blanco en vez de sin restricción.
+ */
+const normalizarSede = (v) => String(v ?? "").trim().toUpperCase() || null;
+
 const normalizar = (d) => ({
+  // Sede opcional (migración 025). NULL = ve todas las bodegas.
+  sede: normalizarSede(d.sede),
   // Cédula OPCIONAL desde la 021: va `null` y no "" cuando está vacía, porque el
   // índice único trata cada NULL como distinto pero dos cadenas vacías chocarían
   // entre sí — el segundo despachador sin cédula fallaría con un "duplicado" que
@@ -120,6 +167,16 @@ export async function crear(payload) {
 export async function actualizar(id, payload) {
   const fila = { ...normalizar(payload), updated_at: new Date().toISOString() };
   validar(fila);
+
+  // Si el que llama NO mandó `sede`, no se toca la que ya está guardada.
+  //
+  // `normalizar` siempre produce la clave, y un `undefined` se convierte en
+  // `null`: sin esto, cualquier cliente que no conozca el campo BORRA la sede al
+  // guardar. El caso concreto no es hipotético — apenas se despliega, las
+  // pestañas abiertas siguen con el bundle viejo, que manda el formulario sin
+  // `sede`; la primera edición de un despachador desde una de esas pestañas
+  // dejaría a esa persona viendo todas las bodegas otra vez, sin ningún error.
+  if (!Object.prototype.hasOwnProperty.call(payload, "sede")) delete fila.sede;
 
   const { data, error } = await supabase
     .from(TABLE)

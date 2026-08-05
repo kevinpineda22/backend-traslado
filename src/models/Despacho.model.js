@@ -77,6 +77,12 @@ export async function findAll(filters = {}) {
 
   query = aplicarFiltroInactivo(query, filters);
 
+  // Sede de quien consulta (migración 025): despachar es sobre el ORIGEN — solo
+  // se ve lo que sale de la propia bodega. Lo resuelve el controlador desde el
+  // correo, nunca lo manda el cliente. Sin sede no filtra: es el comportamiento
+  // previo, y el de quien tiene alcance sobre todas las bodegas.
+  if (filters.sede_origen) query = query.eq("origen", filters.sede_origen);
+
   if (filters.sin_asignar) {
     query = query.is("despachador_id", null);
   } else if (filters.despachador_id) {
@@ -740,6 +746,12 @@ export async function findAllWithResumen(filters = {}) {
 
   query = aplicarFiltroInactivo(query, filters);
 
+  // Sede de quien consulta (migración 025): despachar es sobre el ORIGEN — solo
+  // se ve lo que sale de la propia bodega. Lo resuelve el controlador desde el
+  // correo, nunca lo manda el cliente. Sin sede no filtra: es el comportamiento
+  // previo, y el de quien tiene alcance sobre todas las bodegas.
+  if (filters.sede_origen) query = query.eq("origen", filters.sede_origen);
+
   if (filters.sin_asignar) {
     query = query.is("despachador_id", null);
   } else if (filters.despachador_id) {
@@ -797,13 +809,27 @@ export async function findAllWithResumen(filters = {}) {
  * ocultaron — o sea, cuáles mandó el despachador en cero. Un dato que no viaja
  * es el único que no se puede espiar.
  */
-export async function findForAuditor() {
-  const { data, error } = await supabase
+/**
+ * Despachos esperando recibo.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.sede] - bodega de quien mira: solo lo que llega ACÁ.
+ *   Sin sede (los usuarios previos, o alguien fuera del maestro) se ve todo,
+ *   que es el comportamiento anterior a la 025 — nadie se queda sin panel por
+ *   no tener el dato cargado.
+ */
+export async function findForAuditor({ sede } = {}) {
+  let query = supabase
     .from(TABLE)
     .select("id, origen, destino, estado, created_at, updated_at")
     .in("estado", ["Recolectado", "En_recepcion"])
     // Los inactivos desaparecen también del auditor (ver aplicarFiltroInactivo).
     .eq("inactivo", false);
+
+  // Recibir es sobre el DESTINO: a esta bodega es donde llega la mercancía.
+  if (sede) query = query.eq("destino", sede);
+
+  const { data, error } = await query;
 
   if (error) throw new Error(`Error al listar despachos para auditoría: ${error.message}`);
   return data;

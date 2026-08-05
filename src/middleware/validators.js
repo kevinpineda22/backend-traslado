@@ -292,12 +292,19 @@ const vehiculoSchema = z.object({
  * `documento` es OPCIONAL desde la migración 021 (el modelo lo guarda `null`);
  * `correo` es lo único que el maestro exige además del nombre, porque es con lo
  * que la persona inicia sesión y con lo que se le asignan los despachos.
+ *
+ * Y volvió a pasar con `sede` (migración 025): el selector la mandaba, el esquema
+ * no la nombraba, Zod la descartaba y guardar parecía no hacer nada — sin error,
+ * sin pista. El aviso de arriba estaba escrito justamente para esto.
  */
 const despachadorSchema = z.object({
   documento: z.string().optional(),
   nombre: z.string().min(1, "El nombre es obligatorio"),
   telefono: z.string().optional(),
   correo: z.string().min(1, "El correo es obligatorio"),
+  // Bodega de la persona. Cadena vacía = "todas las sedes", que es lo que manda
+  // el selector cuando no se elige ninguna; el modelo la convierte a NULL.
+  sede: z.string().nullable().optional(),
 });
 
 const conductorSchema = z.object({

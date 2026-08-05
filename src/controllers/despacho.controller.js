@@ -1,4 +1,5 @@
 import * as DespachoService from "../services/despacho.service.js";
+import * as DespachadorModel from "../models/Despachador.model.js";
 
 /**
  * GET /api/despachos
@@ -52,11 +53,19 @@ export async function itemsActivos(_req, res, next) {
 
 export async function listar(req, res, next) {
   try {
-    const { estado, despachador_id, sin_asignar, resumen, incluir_inactivos } = req.query;
+    const { estado, despachador_id, sin_asignar, resumen, incluir_inactivos, sede_de } = req.query;
+
+    // `sede_de` es un CORREO, no una sede: el panel dice quién pregunta y el
+    // servidor resuelve qué bodega le corresponde. Aceptar la sede directamente
+    // dejaría que cambiarla fuera editar la URL. Sin sede cargada no se filtra
+    // nada, que es como funcionaba antes de la 025.
+    const sedeOrigen = sede_de ? await DespachadorModel.sedeDe(sede_de) : null;
+
     const filters = {
       estado,
       despachador_id,
       sin_asignar,
+      sede_origen: sedeOrigen,
       // Los inactivos se ocultan por defecto (ver Despacho.model). El monitor del
       // admin puede pedirlos explícitamente para ver el panorama completo.
       incluir_inactivos: incluir_inactivos === "true",
