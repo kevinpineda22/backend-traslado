@@ -168,6 +168,16 @@ export async function actualizar(id, payload) {
   const fila = { ...normalizar(payload), updated_at: new Date().toISOString() };
   validar(fila);
 
+  // Si el que llama NO mandó `sede`, no se toca la que ya está guardada.
+  //
+  // `normalizar` siempre produce la clave, y un `undefined` se convierte en
+  // `null`: sin esto, cualquier cliente que no conozca el campo BORRA la sede al
+  // guardar. El caso concreto no es hipotético — apenas se despliega, las
+  // pestañas abiertas siguen con el bundle viejo, que manda el formulario sin
+  // `sede`; la primera edición de un despachador desde una de esas pestañas
+  // dejaría a esa persona viendo todas las bodegas otra vez, sin ningún error.
+  if (!Object.prototype.hasOwnProperty.call(payload, "sede")) delete fila.sede;
+
   const { data, error } = await supabase
     .from(TABLE)
     .update(fila)
