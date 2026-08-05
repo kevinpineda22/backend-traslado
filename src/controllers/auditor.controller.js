@@ -1,5 +1,6 @@
 import * as DespachoService from "../services/despacho.service.js";
 import * as DespachoModel from "../models/Despacho.model.js";
+import * as DespachadorModel from "../models/Despachador.model.js";
 
 /**
  * GET /api/auditor/despachos
@@ -8,7 +9,11 @@ import * as DespachoModel from "../models/Despacho.model.js";
  */
 export async function listarPendientes(req, res, next) {
   try {
-    const data = await DespachoModel.findForAuditor();
+    // La sede se resuelve ACÁ desde el correo, no se acepta del cliente: el panel
+    // dice quién es y el servidor decide qué puede ver. Sin sede cargada se ve
+    // todo, igual que antes de la 025.
+    const sede = await DespachadorModel.sedeDe(req.query.correo);
+    const data = await DespachoModel.findForAuditor({ sede });
     res.json({ ok: true, data });
   } catch (error) {
     next(error);
