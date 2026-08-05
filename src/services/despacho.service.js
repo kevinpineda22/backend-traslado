@@ -391,7 +391,7 @@ export async function assertPuedeRecolectar(despachoId, despachadorId) {
 export async function cargarCamion(
   despachoId,
   manifiesto = {},
-  { despachadorId, firmaData, pdfBase64 } = {},
+  { despachadorId, firmaData, firmaConductor, pdfBase64 } = {},
 ) {
   // 1. ¿Puede cargar? (existe, no inactivo, está Pendiente_carga y es suyo)
   await DespachoModel.assertPuedeCargar(despachoId, despachadorId);
@@ -406,7 +406,24 @@ export async function cargarCamion(
   }
 
   // 3. Cierre. Acá se dispara todo lo que cuelga de `Recolectado`.
+  //    `cambiarEstado` persiste la firma del DESPACHADOR (rol 'despachador').
   const despacho = await cambiarEstado(despachoId, "Recolectado", firmaData, despachadorId);
+
+  // 3b. Firma del CONDUCTOR — se guarda junto a la del despachador para que la
+  //     reimpresión del manifiesto pueda re-estampar ambas. Va DESPUÉS del cierre
+  //     (que ya validó propiedad y transición) y es best-effort: el camión ya
+  //     salió, un fallo al guardar la firma no puede tumbar el cierre.
+  if (firmaConductor) {
+    try {
+      await FirmaModel.create({
+        despacho_id: despachoId,
+        rol: "conductor",
+        firma_data: firmaConductor,
+      });
+    } catch (e) {
+      console.error("[despacho] no se pudo guardar la firma del conductor:", e.message);
+    }
+  }
 
   // 4. Correo a inventarios con el PDF del manifiesto. VA DESPUÉS del cierre y es
   //    best-effort: la carga ya es un hecho y se subió a SIESA; un fallo de correo
@@ -425,7 +442,26 @@ export async function cargarCamion(
 
 /** El manifiesto de un despacho (para el panel del admin y el del auditor). */
 export async function obtenerManifiesto(despachoId) {
-  return ManifiestoModel.porDespacho(despachoId);
+  const doc = await ManifiestoModel.porDespacho(despachoId);
+  if (!doc) return null;
+
+  // Adjuntamos las firmas del DESPACHADOR y el CONDUCTOR para que la reimpresión
+  // del manifiesto (front) las re-estampe en el PDF. La del AUDITOR queda afuera a
+  // propósito: no pertenece al manifiesto, vive solo en la zona de auditoría.
+  // Best-effort: si la lectura falla, el manifiesto igual se devuelve (la
+  // reimpresión saldrá sin firmas, como antes de esto).
+  const firmas = {};
+  try {
+    const registros = await FirmaModel.findByDespacho(despachoId);
+    for (const f of registros || []) {
+      // `findByDespacho` viene ordenada asc por fecha: la última de cada rol gana.
+      if (f.rol === "despachador" || f.rol === "conductor") firmas[f.rol] = f.firma_data;
+    }
+  } catch (e) {
+    console.error("[despacho] no se pudieron leer las firmas del manifiesto:", e.message);
+  }
+
+  return { ...doc, firmas };
 }
 
 /**

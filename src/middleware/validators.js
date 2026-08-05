@@ -234,6 +234,10 @@ function validate(schema) {
 const cargarCamionSchema = z.object({
   despachador_id: z.string().optional(),
   firma_data: z.string().optional(),
+  // Firma del conductor (base64 PNG). Se guarda junto a la del despachador en
+  // traslados_firmas (rol 'conductor') para que la reimpresión del manifiesto
+  // pueda re-estamparla. DEBE declararse acá: el schema descarta lo no declarado.
+  firma_conductor: z.string().optional(),
   // PDF del manifiesto (base64) que el front genera para adjuntar al correo de
   // inventarios. Opcional: si no llega, el correo sale sin adjunto.
   manifiesto_pdf_base64: z.string().optional(),

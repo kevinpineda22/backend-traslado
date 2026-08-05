@@ -274,10 +274,12 @@ export async function cargarCamion(req, res, next) {
     // `manifiesto_pdf_base64` se saca del resto: NO es un campo del manifiesto (no
     // va a la tabla), es el PDF que el front generó para adjuntar al correo de
     // inventarios. Si quedara en `...manifiesto` se intentaría guardar como columna.
-    const { firma_data, despachador_id, manifiesto_pdf_base64, ...manifiesto } = req.body;
+    const { firma_data, firma_conductor, despachador_id, manifiesto_pdf_base64, ...manifiesto } =
+      req.body;
     const data = await DespachoService.cargarCamion(req.params.id, manifiesto, {
       despachadorId: despachador_id ?? null,
       firmaData: firma_data,
+      firmaConductor: firma_conductor,
       pdfBase64: manifiesto_pdf_base64,
     });
     res.json({ ok: true, data });
