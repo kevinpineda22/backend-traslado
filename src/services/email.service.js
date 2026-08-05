@@ -14,11 +14,18 @@ import { sandboxOn, volcarCorreo } from "../config/sandbox.js";
      EMAIL_USER=<cuenta emisora @merkahorrosas.com>
      EMAIL_PASS=<contraseña de la cuenta>
 
-   Destinatarios (overridables por env, con default a los correos pedidos):
+   Destinatarios (overridables por env, con default a los correos pedidos).
+   Todas aceptan varios correos separados por coma:
+
      TRASLADOS_MAIL_COMPRAS      → todos los motivos de faltante
-     TRASLADOS_MAIL_INVENTARIOS  → solo el motivo "inventario inflado"
+     TRASLADOS_MAIL_INVENTARIOS  → inventario inflado, comparativo del recibo y
+                                    errores al subir a SIESA
      TRASLADOS_MAIL_DESPACHOS    → cierre de recolección (SIEMPRE, haya o no
                                     faltantes). Default: la lista de compras.
+     TRASLADOS_MAIL_MANIFIESTO   → manifiesto de carga. Default: la lista de
+                                    inventarios + los extra. Está separada para
+                                    poder sumar a alguien al manifiesto sin
+                                    suscribirlo a las alertas técnicas.
    ============================================= */
 
 const transporter = nodemailer.createTransport({
@@ -32,22 +39,58 @@ const transporter = nodemailer.createTransport({
   tls: { ciphers: "TLSv1.2" },
 });
 
-const lista = (valor, porDefecto) =>
-  String(valor || porDefecto)
+/**
+ * Parsea una lista de correos separados por coma.
+ *
+ * Deduplica sin distinguir mayúsculas (conservando la primera forma escrita):
+ * estas listas se componen entre sí —la del manifiesto arranca de la de
+ * inventarios— y sin esto un correo que esté en las dos entra dos veces al `to`,
+ * y a esa persona le llega el mismo mail duplicado.
+ */
+const lista = (valor, porDefecto) => {
+  const vistos = new Set();
+  return String(valor || porDefecto)
     .split(",")
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((correo) => {
+      const clave = correo.toLowerCase();
+      if (vistos.has(clave)) return false;
+      vistos.add(clave);
+      return true;
+    });
+};
 
 const COMPRAS_DEFAULT = "lidercompras@merkahorrosas.com,compras@merkahorrosas.com";
 
+const INVENTARIOS = lista(
+  process.env.TRASLADOS_MAIL_INVENTARIOS,
+  "Inventarios@merkahorrosas.com",
+);
+
 export const DESTINATARIOS = {
   compras: lista(process.env.TRASLADOS_MAIL_COMPRAS, COMPRAS_DEFAULT),
-  inventarios: lista(process.env.TRASLADOS_MAIL_INVENTARIOS, "Inventarios@merkahorrosas.com"),
+  inventarios: INVENTARIOS,
   // Cierre de despacho. Sin env propia cae en la lista de compras, que es quien
   // hoy recibe todo lo de traslados.
   despachos: lista(
     process.env.TRASLADOS_MAIL_DESPACHOS,
     process.env.TRASLADOS_MAIL_COMPRAS || COMPRAS_DEFAULT,
+  ),
+
+  // MANIFIESTO DE CARGA — lista propia, y no es un capricho.
+  //
+  // `inventarios` alimenta OTROS TRES correos además del manifiesto: la alerta de
+  // inventario inflado, el comparativo del recibo y el aviso de error al subir a
+  // SIESA. Sumar a alguien ahí "para que reciba el manifiesto" lo suscribía a los
+  // cuatro, incluidos los avisos técnicos que no le sirven de nada — y el que
+  // recibe correos que no le importan termina ignorando también los que sí.
+  //
+  // Arranca de la lista de inventarios para que nadie deje de recibir lo que ya
+  // recibía, y se le suman los que solo deben ver el manifiesto.
+  manifiesto: lista(
+    process.env.TRASLADOS_MAIL_MANIFIESTO,
+    [...INVENTARIOS, "Sgdanilo16@gmail.com"].join(","),
   ),
 };
 

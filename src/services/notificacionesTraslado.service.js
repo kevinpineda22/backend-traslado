@@ -647,7 +647,9 @@ export async function enviarManifiestoCarga(despacho, manifiesto, pdfBase64) {
   }
 
   return sendEmail({
-    to: DESTINATARIOS.inventarios,
+    // Lista propia del manifiesto: incluye a inventarios y a quien además deba
+    // tener el documento, sin sumarlo a las alertas técnicas. Ver DESTINATARIOS.
+    to: DESTINATARIOS.manifiesto,
     subject: `Manifiesto de carga — ${ruta} (despacho ${numero})`,
     html: htmlManifiestoCarga(despacho, manifiesto, Boolean(attachments)),
     attachments,
