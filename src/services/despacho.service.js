@@ -173,16 +173,28 @@ export async function descartarListado(id) {
  * se queda trabada esperando a SIESA.
  */
 export async function cambiarEstado(id, estado, firmaData, despachadorId = null) {
-  // Candado de propiedad SOLO al cerrar la recolección (→ Recolectado): ese cierre
-  // es del despachador y dispara el envío a SIESA, así que no puede cerrarlo quien
-  // no reclamó el despacho. El resto de transiciones (auditor/admin) pasan sin el
-  // opt y conservan el comportamiento previo.
-  const ownerGuard = estado === "Recolectado" ? { despachadorId } : {};
-
-  // `updateStatus` valida la transición (En_recoleccion → Recolectado) y, con el
-  // ownerGuard, la propiedad — ANTES de guardar la firma, para no dejar una firma
-  // huérfana si el cierre es rechazado (403/409).
-  const actualizado = await DespachoModel.updateStatus(id, estado, ownerGuard);
+  // SIN candado de propiedad, ni siquiera al cerrar (→ Recolectado).
+  //
+  // Antes el cierre exigía ser el dueño, y eso CONTRADECÍA a `assertPuedeCargar`,
+  // que desde la recolección multiusuario (023) deja cargar el camión a cualquiera
+  // ("le toca a la que esté cuando llega el camión, no a la que apretó Iniciar").
+  // Las dos validaciones corren en el mismo cierre: la primera dejaba pasar y la
+  // segunda tiraba 403 — pero recién DESPUÉS de que la persona llenó el manifiesto
+  // y firmó dos veces. El panel lo tapaba porque tampoco le mostraba el despacho a
+  // quien no era el dueño; en cuanto se muestra (que es lo que se pide), el 403
+  // aparece. Política confirmada: cargar el camión es de cualquier despachador.
+  //
+  // Lo que impide un cierre doble NO es la propiedad sino el estado: `updateStatus`
+  // ata el UPDATE al estado leído, así que de dos cierres simultáneos el segundo se
+  // lleva un 409.
+  //
+  // `despachadorId` queda en la firma de la función para no tocar a los llamadores,
+  // pero acá ya no se usa. La trazabilidad de QUIÉN cargó no se pierde: vive en el
+  // manifiesto, que `cargarCamion` arma aparte con su propio `despachador_id`.
+  //
+  // La transición se valida ANTES de guardar la firma, para no dejar una firma
+  // huérfana si el cierre es rechazado (409).
+  const actualizado = await DespachoModel.updateStatus(id, estado);
 
   // Recién con el estado ya avanzado, persistimos la firma.
   if (firmaData) {
