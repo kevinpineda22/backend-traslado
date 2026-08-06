@@ -30,6 +30,25 @@ export async function subir(req, res, next) {
  * PATCH /api/capacidad/:codigo
  * Edita la capacidad de un ítem. Body: { capacidad }
  */
+/**
+ * PATCH /api/capacidad/:codigo/multi-um
+ * Marca si el ítem se puede pedir en varias UM a la vez sin que el panel avise.
+ * Body: { multi_um: boolean }
+ *
+ * Ruta aparte de `actualizarUno` a propósito: ese endpoint escribe UNA fila
+ * (ítem + UM) y este escribe TODAS las del ítem, porque la marca es del producto.
+ * Mezclarlos haría que guardar la capacidad de una UM tocara filas que el usuario
+ * no estaba editando.
+ */
+export async function marcarMultiUm(req, res, next) {
+  try {
+    const data = await CapacidadModel.setMultiUm(req.params.codigo, req.body?.multi_um);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function actualizarUno(req, res, next) {
   try {
     const data = await CapacidadModel.actualizar(

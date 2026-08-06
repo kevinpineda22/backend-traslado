@@ -218,6 +218,9 @@ export async function getProductosTraslado({ origen, destino }) {
           // Identidad de la fila cuando el ítem se parte por UM. Sin esto, dos
           // filas del mismo ítem compartirían clave en el carrito y se pisarían.
           rowKey: v.unidad ? `${codigo}|${v.unidad}` : codigo,
+          // ¿Se puede pedir en varias UM a la vez sin que el panel avise? Es
+          // propiedad del ÍTEM, así que se lee con OR sobre sus filas (026).
+          multi_um: capRows.some((r) => r.multi_um),
           descripcion: trim(fuente.descripcion),
           rotacion: trim(fuente.rotacion) || "N/A",
           unidad_medida: v.unidad || trim(fuente.um),
@@ -360,6 +363,9 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         productos.push({
           codigo_item: codigo,
           rowKey: v.unidad ? `${codigo}|${v.unidad}` : codigo, // identidad única de la fila
+          // ¿Se puede pedir en varias UM a la vez sin que el panel avise? Es
+          // propiedad del ÍTEM, así que se lee con OR sobre sus filas (026).
+          multi_um: capRows.some((r) => r.multi_um),
           descripcion: trim(fuente.descripcion),
           clase,
           capacidad: v.capacidadUM,

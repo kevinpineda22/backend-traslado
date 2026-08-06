@@ -55,6 +55,10 @@ export async function mapaCapacidades() {
       capacidad: num(r.capacidad),
       unidad: r.unidad ? String(r.unidad).trim() : "",
       factor: r.factor != null ? num(r.factor) || null : null,
+      // Propiedad del ÍTEM guardada en cada fila (migración 026): el ítem lo
+      // permite si CUALQUIERA de sus filas lo tiene. Ver el comentario de la
+      // migración para el porqué de replicarlo.
+      multi_um: r.multi_um === true,
     });
   }
   return mapa;
@@ -161,6 +165,30 @@ export async function actualizar(codigoItem, capacidad, descripcion, unidad, fac
     .single();
   if (error) throw new Error(`Error al actualizar capacidad: ${error.message}`);
   return data;
+}
+
+/**
+ * Marca (o desmarca) que un ítem se puede pedir en VARIAS UM a la vez.
+ *
+ * Escribe en TODAS las filas del ítem, no en una: el dato es del producto y la
+ * lectura es un OR sobre sus filas (ver migración 026). Si se guardara en una
+ * sola, agregarle una UM nueva al ítem crearía una fila en `false` y el estado
+ * quedaría dependiendo de cuál fila mire cada consulta.
+ *
+ * @param {string} codigoItem
+ * @param {boolean} permitido
+ * @returns {Promise<{codigo_item:string, multi_um:boolean, filas:number}>}
+ */
+export async function setMultiUm(codigoItem, permitido) {
+  const codigo = normCodigo(codigoItem);
+  const { data, error } = await supabase
+    .from(TABLE)
+    .update({ multi_um: !!permitido, updated_at: new Date().toISOString() })
+    .eq("codigo_item", codigo)
+    .select("codigo_item");
+
+  if (error) throw new Error(`Error al marcar multi UM: ${error.message}`);
+  return { codigo_item: codigo, multi_um: !!permitido, filas: data?.length || 0 };
 }
 
 /** Elimina una fila (ítem + UM). `unidad` "" = la fila base. */
