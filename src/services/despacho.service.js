@@ -158,13 +158,15 @@ export async function descartarListado(id) {
  * El cierre son DOS pasos desde la 017, porque contar y cargar el camión ocurren
  * en momentos distintos:
  *
- *   → Pendiente_carga : terminó el conteo. Se sella `recoleccion_finalizada_at` y
- *                       se auto-clasifican los pendientes del flujo llano. NADA
- *                       sale todavía: el camión sigue sin cargarse.
+ *   → Pendiente_carga : terminó el conteo. Se sella `recoleccion_finalizada_at`,
+ *                       se auto-clasifican los pendientes del flujo llano y SALEN
+ *                       los correos de cierre (cierre + faltantes). El camión sigue
+ *                       sin cargarse, pero compras/inventarios ya se enteran de los
+ *                       faltantes sin esperar al transporte.
  *   → Recolectado     : el camión se fue (con manifiesto). Recién acá:
  *                       1. Se marca el estado — lo único que falla hacia el usuario.
- *                       2. Salen los correos (cierre + faltantes).
- *                       3. Se importa la requisición a SIESA.
+ *                       2. Se importa la requisición a SIESA.
+ *                       3. Sale el correo del manifiesto (PDF) — ver cargarCamion.
  *
  * 2 y 3 son efectos POSTERIORES y ninguno revierte el cierre: cuando el
  * despachador firma, la mercancía ya salió del camión. El despacho es un hecho
@@ -284,20 +286,33 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
     } catch (err) {
       console.error("[despacho] auto-marcado #4 falló (no bloquea):", err.message);
     }
-  }
 
-  if (estado === "Recolectado") {
-    // 1. Avisar que la recolección cerró (ya con los motivos auto-marcados) y que
-    //    se puede auditar.
+    // Correo de cierre de recolección (cierre + faltantes + inflado): sale ACÁ, al
+    // TERMINAR DE CONTAR, no al cargar el camión. Antes esperaba a `Recolectado` y
+    // compras/inventarios se enteraban de los faltantes recién cuando el transporte
+    // llegaba —horas después—; moverlo acá los avisa apenas cierra la recolección.
+    //
+    // Va DESPUÉS de la auto-clasificación del flujo llano (arriba) para que los
+    // motivos automáticos ya estén puestos y el correo los muestre. Se relee el
+    // despacho para tomar esos motivos recién escritos.
+    //
+    // SIESA y el correo del manifiesto (PDF) NO se movieron: siguen colgando de
+    // `Recolectado` (subir camión), porque reflejan que la mercancía salió DE
+    // VERDAD en el camión. Best-effort: nunca revierte el cierre del conteo.
+    //
+    // Se REENVÍA si el despachador vuelve a recolección y re-finaliza: el correo
+    // lleva siempre el estado más reciente del conteo (decisión de negocio).
     try {
       const despacho = await DespachoModel.findById(id);
       await notificarRecoleccionCerrada(despacho);
     } catch (err) {
-      // El cierre YA ocurrió y no se toca; el correo es un efecto posterior.
       console.error("[despacho] notificación de cierre falló:", err.message);
     }
+  }
 
-    // 2. Subir a SIESA con las cantidades del DESPACHADOR. La palabra la tiene el
+  if (estado === "Recolectado") {
+    // El correo de cierre YA salió al finalizar la recolección (Pendiente_carga).
+    // Acá queda subir a SIESA con las cantidades del DESPACHADOR. La palabra la tiene el
     //    despachador: SIESA refleja lo que salió del camión. El auditor ya NO sube
     //    a SIESA — solo verifica y manda el correo comparativo (ver
     //    confirmarAuditoria). Patrón resiliente: marcar 'pendiente' ANTES de
