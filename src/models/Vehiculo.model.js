@@ -1,5 +1,6 @@
 import { supabase } from "../config/supabase.js";
 import { createError } from "../middleware/errorHandler.js";
+import { PLACA_MAX, ERROR_PLACA_LARGA, normalizarPlaca } from "../config/placa.js";
 
 const TABLE = "traslados_vehiculos";
 
@@ -52,7 +53,8 @@ export async function obtener(id) {
 const normalizar = (v) => ({
   // La placa se guarda en mayúsculas: el índice único es sobre `upper(placa)`, así
   // que "gtx 302" y "GTX 302" son el mismo camión y no se puede dar de alta dos veces.
-  placa: String(v.placa || "").trim().toUpperCase().replace(/\s+/g, " "),
+  // La regla vive en config/placa.js porque el manifiesto la necesita igual.
+  placa: normalizarPlaca(v.placa),
   marca: v.marca?.trim() || null,
   clase: v.clase?.trim() || null,           // Camión, Camioneta
   tipo: v.tipo?.trim()?.toUpperCase() || null, // NQR, FRR, NHR
@@ -63,6 +65,7 @@ const normalizar = (v) => ({
 export async function crear(payload) {
   const fila = normalizar(payload);
   if (!fila.placa) throw createError(422, "La placa es obligatoria");
+  if (fila.placa.length > PLACA_MAX) throw createError(422, ERROR_PLACA_LARGA);
 
   const { data, error } = await supabase.from(TABLE).insert(fila).select().single();
 
@@ -78,6 +81,7 @@ export async function crear(payload) {
 export async function actualizar(id, payload) {
   const fila = { ...normalizar(payload), updated_at: new Date().toISOString() };
   if (!fila.placa) throw createError(422, "La placa es obligatoria");
+  if (fila.placa.length > PLACA_MAX) throw createError(422, ERROR_PLACA_LARGA);
 
   const { data, error } = await supabase
     .from(TABLE)

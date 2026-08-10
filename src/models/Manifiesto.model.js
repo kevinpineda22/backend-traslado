@@ -3,6 +3,7 @@ import { createError } from "../middleware/errorHandler.js";
 import * as VehiculoModel from "./Vehiculo.model.js";
 import * as ConductorModel from "./Conductor.model.js";
 import * as DespachadorModel from "./Despachador.model.js";
+import { PLACA_MAX, ERROR_PLACA_LARGA, normalizarPlaca } from "../config/placa.js";
 
 const TABLE = "traslados_manifiestos";
 
@@ -42,8 +43,13 @@ async function resolverVehiculo(payload) {
     };
   }
 
-  const placa = String(payload.placa || "").trim().toUpperCase();
+  const placa = normalizarPlaca(payload.placa);
   if (!placa) throw createError(422, "Elegí un vehículo o escribí la placa");
+  // El validador ya cortó esto en la puerta HTTP, pero el modelo no puede confiar
+  // en que siempre lo llamen desde ahí: sin este chequeo, un exceso vuelve a ser un
+  // 500 crudo de Postgres ("value too long for type character varying") en vez de
+  // un mensaje que el despachador pueda corregir.
+  if (placa.length > PLACA_MAX) throw createError(422, ERROR_PLACA_LARGA);
   return {
     vehiculo_id: null,
     placa,

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PLACA_MAX, ERROR_PLACA_LARGA } from "../config/placa.js";
 
 // Ítem tal como lo manda el admin al crear un despacho o al engordar un borrador.
 const itemAdminSchema = z.object({
@@ -243,7 +244,11 @@ const cargarCamionSchema = z.object({
   manifiesto_pdf_base64: z.string().optional(),
 
   vehiculo_id: z.string().uuid().nullable().optional(),
-  placa: z.string().optional(),
+  // El límite NO es decorativo: `placa` es varchar(20) en la base (migración 027).
+  // Sin este `.max()` el exceso viajaba hasta Postgres y volvía como 500 con
+  // "value too long for type character varying" — un error de tipeo disfrazado de
+  // falla del servidor. Si la base tiene un límite, la validación lo conoce.
+  placa: z.string().trim().max(PLACA_MAX, ERROR_PLACA_LARGA).optional(),
   marca: z.string().optional(),
   clase: z.string().optional(),
   tipo: z.string().optional(),
@@ -274,7 +279,9 @@ const cargarCamionSchema = z.object({
 
 /** Alta/edición de los tres maestros del manifiesto. */
 const vehiculoSchema = z.object({
-  placa: z.string().min(1, "La placa es obligatoria"),
+  // Mismo límite que en el manifiesto: si el maestro aceptara placas más largas,
+  // el alta del vehículo fallaría con el mismo 500 en la pantalla de al lado.
+  placa: z.string().trim().min(1, "La placa es obligatoria").max(PLACA_MAX, ERROR_PLACA_LARGA),
   marca: z.string().optional(),
   clase: z.string().optional(),
   tipo: z.string().optional(),
