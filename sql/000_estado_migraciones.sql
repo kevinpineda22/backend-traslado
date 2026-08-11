@@ -61,6 +61,18 @@ SELECT * FROM (
     4
 
   UNION ALL
+  -- 026 — marca "varias UM" en capacidad. Sin ella, la casilla de Capacidad no
+  -- guarda y el aviso de ítem pedido en dos unidades sale también en huevos y
+  -- frijol, que es justo donde se lo quería callar.
+  SELECT
+    '026_capacidad_multi_um_permitido',
+    CASE WHEN NOT EXISTS (
+      SELECT 1 FROM col WHERE table_name='traslados_capacidad' AND column_name='multi_um'
+    ) THEN '❌ FALTA' ELSE '✅ ok' END,
+    'traslados_capacidad.multi_um debe existir',
+    5
+
+  UNION ALL
   -- 027 — placa a varchar(20). ROMPE "Camión cargado" con un 500 de Postgres
   -- ("value too long for type character varying(10)") en cuanto alguien escribe
   -- una placa a mano que pase de 10 caracteres.
@@ -73,7 +85,7 @@ SELECT * FROM (
          AND character_maximum_length < 20
     ) THEN '❌ FALTA — ROMPE CAMIÓN CARGADO' ELSE '✅ ok' END,
     'placa debe ser varchar(20) en vehículos y manifiestos',
-    5
+    6
 
   UNION ALL
   -- 012 — recalcula `diferencia` en unidades base. La condición es la misma que
@@ -100,7 +112,7 @@ SELECT * FROM (
              )
     ) || ' filas con la diferencia mal calculada' ELSE '✅ nada pendiente' END,
     'diferencia = cantidad_auditor − (despachador × factor)',
-    6
+    7
 
   UNION ALL
   -- 024 — backfill del grupo de los ítems (ordena la lista del despachador)
@@ -111,7 +123,7 @@ SELECT * FROM (
               || ' ítems sin grupo'
          ELSE '✅ nada pendiente' END,
     'ítems con grupo en NULL (salen al final de la lista)',
-    7
+    8
 ) t
 ORDER BY orden;
 
