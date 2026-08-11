@@ -61,6 +61,21 @@ SELECT * FROM (
     4
 
   UNION ALL
+  -- 027 — placa a varchar(20). ROMPE "Camión cargado" con un 500 de Postgres
+  -- ("value too long for type character varying(10)") en cuanto alguien escribe
+  -- una placa a mano que pase de 10 caracteres.
+  SELECT
+    '027_placa_20',
+    CASE WHEN EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND column_name='placa'
+         AND table_name IN ('traslados_vehiculos','traslados_manifiestos')
+         AND character_maximum_length < 20
+    ) THEN '❌ FALTA — ROMPE CAMIÓN CARGADO' ELSE '✅ ok' END,
+    'placa debe ser varchar(20) en vehículos y manifiestos',
+    5
+
+  UNION ALL
   -- 012 — recalcula `diferencia` en unidades base. La condición es la misma que
   -- usa la propia migración: no alcanza con buscar NULLs, porque el valor viejo
   -- podía estar escrito y mal (sin aplicar el factor de la UM).
@@ -85,7 +100,7 @@ SELECT * FROM (
              )
     ) || ' filas con la diferencia mal calculada' ELSE '✅ nada pendiente' END,
     'diferencia = cantidad_auditor − (despachador × factor)',
-    5
+    6
 
   UNION ALL
   -- 024 — backfill del grupo de los ítems (ordena la lista del despachador)
@@ -96,7 +111,7 @@ SELECT * FROM (
               || ' ítems sin grupo'
          ELSE '✅ nada pendiente' END,
     'ítems con grupo en NULL (salen al final de la lista)',
-    6
+    7
 ) t
 ORDER BY orden;
 
