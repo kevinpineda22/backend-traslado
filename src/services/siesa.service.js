@@ -263,6 +263,31 @@ function claseDeCategoria(cat) {
 }
 
 /**
+ * ¿El ítem está descodificado? (criterio CAT = "DESCODIFICADOS").
+ *
+ * SOLO SE EXCLUYE EN LLANO. Un descodificado es un producto que se deja de
+ * manejar: no tiene sentido reponer Girardota Llano con algo que sale del
+ * surtido. Pero en el flujo General sí hay que verlo — es justamente el
+ * inventario que conviene sacar del CEDI hacia las tiendas antes de que quede
+ * muerto en la bodega.
+ *
+ * ANTES ESTO SE FILTRABA EN EL QUERY DE SIESA, y por eso no se podía distinguir
+ * por flujo: lo que no entra al snapshot no lo ve nadie. El filtro tenía que
+ * bajar al backend, donde sí se sabe para qué flujo se está pidiendo.
+ *
+ * La comparación normaliza mayúsculas y tildes: el valor viene de una
+ * descripción escrita a mano en el maestro del ERP, y un "Descodificados" con
+ * otra caja dejaría pasar todo sin que nadie lo note.
+ */
+function esDescodificado(cat) {
+  return String(cat ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .trim()
+    .toUpperCase() === "DESCODIFICADOS";
+}
+
+/**
  * Productos del flujo Llano — facetado (todos los ítems del origen, como
  * General) con sugerido A/B/C. La clase sale del criterio CAT del DESTINO
  * (Girardota Llano, 00401) y la capacidad de la tabla `traslados_capacidad`.
@@ -311,6 +336,11 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // así que da igual leerlo del destino o del origen.
       const catLlano = trim(d?.criterios?.CAT || o?.criterios?.CAT);
       if (!catLlano) continue;
+      // Descodificados fuera, PERO SOLO ACÁ: reponer Llano con algo que sale del
+      // surtido no tiene sentido. En General sí se muestran, que es donde hay que
+      // sacar ese inventario del CEDI antes de que quede muerto. Ver
+      // `esDescodificado` para por qué el filtro dejó de estar en el query.
+      if (esDescodificado(catLlano)) continue;
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
       // Ojo: CantidadDisponible puede venir NEGATIVA (cuando cant_pos_1 > existencia).
