@@ -177,14 +177,31 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
   });
 
   const acumular = (mapa, clave, it) => {
-    if (!mapa.has(clave)) mapa.set(clave, { pedido: 0, despachado: 0, lineas: 0, incumplidas: 0 });
+    if (!mapa.has(clave)) {
+      mapa.set(clave, {
+        pedido: 0,
+        despachado: 0,
+        lineas: 0,
+        incumplidas: 0,
+        // Productos DISTINTOS del grupo. Contra el total de líneas dice si el
+        // faltante son muchos productos fallando una vez o unos pocos fallando
+        // siempre — que piden cosas opuestas: revisar el surtido o revisar a un
+        // proveedor. Sin esto, 144 líneas puede ser cualquiera de las dos.
+        items: new Set(),
+        itemsIncumplidos: new Set(),
+      });
+    }
     const a = mapa.get(clave);
     const ped = pedidoEnUnd(it);
     const des = despachadoEnUnd(it);
     a.pedido += ped;
     a.despachado += des;
     a.lineas += 1;
-    if (des < ped) a.incumplidas += 1;
+    a.items.add(String(it.codigo_item));
+    if (des < ped) {
+      a.incumplidas += 1;
+      a.itemsIncumplidos.add(String(it.codigo_item));
+    }
   };
 
   const global = { pedido: 0, despachado: 0, lineas: 0, incumplidas: 0 };
@@ -223,6 +240,10 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
         nivel_servicio: tasa(a),
         lineas: a.lineas,
         lineas_incumplidas: a.incumplidas,
+        // `items` son productos distintos; `lineas` son veces que se pidieron.
+        // La diferencia entre los dos ES la repetición.
+        items: a.items?.size ?? 0,
+        items_incumplidos: a.itemsIncumplidos?.size ?? 0,
       }))
       .sort((x, y) => y.faltante_und - x.faltante_und);
 
