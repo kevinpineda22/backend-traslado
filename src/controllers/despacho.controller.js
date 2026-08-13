@@ -1,5 +1,6 @@
 import * as DespachoService from "../services/despacho.service.js";
 import * as DespachadorModel from "../models/Despachador.model.js";
+import { SEDES } from "../config/flujos.js";
 
 /**
  * GET /api/despachos
@@ -28,8 +29,21 @@ export async function estadisticasMotivos(_req, res, next) {
 export async function analiticaCtrl(req, res, next) {
   try {
     const dias = Number(req.query.dias);
+    const { desde, hasta, sede } = req.query;
+
+    // Las fechas se validan con forma, no se pasan crudas: van a una consulta y
+    // un valor raro devolvería un error de Postgres en vez de un mensaje útil.
+    const fecha = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? v : undefined);
+    // La sede se acota al maestro de bodegas: llega a un `.or()` construido por
+    // interpolación, y aceptar cualquier texto sería dejar que el cliente escriba
+    // parte del filtro.
+    const sedeValida = SEDES[String(sede || "").trim()] ? String(sede).trim() : undefined;
+
     const data = await DespachoService.analitica({
       dias: Number.isFinite(dias) && dias > 0 ? dias : undefined,
+      desde: fecha(desde),
+      hasta: fecha(hasta),
+      sede: sedeValida,
     });
     res.json({ ok: true, data });
   } catch (error) {

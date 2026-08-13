@@ -101,27 +101,60 @@ function horas(desde, hasta) {
 }
 
 /**
+ * Fin del día de una fecha `YYYY-MM-DD`.
+ *
+ * Un `hasta` crudo se interpreta como medianoche, así que filtrar "hasta el 12"
+ * dejaba afuera TODO lo del día 12 — el usuario elige un rango y el último día no
+ * aparece, que es el bug clásico de los filtros de fecha.
+ */
+function finDelDia(fecha) {
+  if (!fecha) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(fecha) ? `${fecha}T23:59:59.999Z` : fecha;
+}
+
+/**
  * Analítica completa para el Dashboard.
  *
  * @param {object} [opts]
- * @param {number} [opts.dias] - ventana hacia atrás. Sin esto, todo el histórico.
+ * @param {number} [opts.dias]  - ventana hacia atrás. Sin esto, todo el histórico.
+ * @param {string} [opts.desde] - fecha YYYY-MM-DD. Pisa a `dias` si viene.
+ * @param {string} [opts.hasta] - fecha YYYY-MM-DD, inclusive.
+ * @param {string} [opts.sede]  - código de bodega. Filtra los traslados donde esa
+ *   sede participa, como ORIGEN o como DESTINO — mismo criterio que el Monitor:
+ *   preguntar por una bodega incluye lo que le llega y lo que sale de ella.
  */
-export async function analitica({ dias } = {}) {
-  const desdeISO = dias ? new Date(Date.now() - dias * 864e5).toISOString() : null;
+export async function analitica({ dias, desde, hasta, sede } = {}) {
+  // Un rango explícito manda sobre `dias`: si el usuario eligió fechas, eso es lo
+  // que quiere ver, y aplicar las dos cosas daría una ventana que no pidió nadie.
+  const usaRango = Boolean(desde || hasta);
+  const desdeISO = usaRango
+    ? desde || null
+    : dias
+      ? new Date(Date.now() - dias * 864e5).toISOString()
+      : null;
+  const hastaISO = usaRango ? finDelDia(hasta) : null;
 
   const despachos = await leerTodo(
     "traslados_despachos",
     "id, origen, destino, flujo, estado, inactivo, created_at, disponible_at, " +
       "recoleccion_iniciada_at, recoleccion_finalizada_at, auditoria_iniciada_at, " +
       "auditoria_finalizada_at, siesa_estado",
-    (q) => (desdeISO ? q.gte("created_at", desdeISO) : q),
+    (q) => {
+      let out = q;
+      if (desdeISO) out = out.gte("created_at", desdeISO);
+      if (hastaISO) out = out.lte("created_at", hastaISO);
+      // Origen O destino, como en el Monitor. La sede llega ya validada por el
+      // controlador contra el maestro de bodegas.
+      if (sede) out = out.or(`origen.eq.${sede},destino.eq.${sede}`);
+      return out;
+    },
   );
 
   const porId = new Map(despachos.map((d) => [d.id, d]));
 
   const items = await leerTodo(
     "traslados_items",
-    "id, despacho_id, codigo_item, descripcion, categoria, unidad_medida, factor, " +
+    "id, despacho_id, codigo_item, descripcion, grupo, categoria, unidad_medida, factor, " +
       "cantidad_admin, cantidad_despachador, cantidad_auditor, diferencia, motivo, " +
       "agotado, no_recibido, peso_unitario, agregado_por_auditor",
   );
@@ -156,6 +189,11 @@ export async function analitica({ dias } = {}) {
 
   const global = { pedido: 0, despachado: 0, lineas: 0, incumplidas: 0 };
   const porSede = new Map();
+  // OJO con los nombres de las columnas: `traslados_items.grupo` es el criterio
+  // 001 (Grupo) y `traslados_items.categoria` es el 002 (Subgrupo). El nombre de
+  // la columna no coincide con el del negocio — se copiaron así desde el carrito
+  // del admin (ver `construirItem`) y renombrarlas ahora obligaría a migrar datos.
+  const porGrupo = new Map();
   const porCategoria = new Map();
   const porFlujo = new Map();
 
@@ -168,7 +206,8 @@ export async function analitica({ dias } = {}) {
     global.lineas += 1;
     if (des < ped) global.incumplidas += 1;
     acumular(porSede, d.destino || "—", it);
-    acumular(porCategoria, (it.categoria || "Sin categoría").trim() || "Sin categoría", it);
+    acumular(porGrupo, (it.grupo || "").trim() || "Sin grupo", it);
+    acumular(porCategoria, (it.categoria || "").trim() || "Sin subgrupo", it);
     acumular(porFlujo, d.flujo || "general", it);
   }
 
@@ -353,6 +392,12 @@ export async function analitica({ dias } = {}) {
       lineas: global.lineas,
       lineas_incumplidas: global.incumplidas,
       por_sede: aLista(porSede, nombreSede),
+      // Grupo = criterio 001, subgrupo = criterio 002. Se mandan los dos para que
+      // el panel pueda alternar sin pedir de nuevo: son el mismo cálculo agrupado
+      // distinto, y traerlos juntos evita un viaje por cada clic.
+      por_grupo: aLista(porGrupo),
+      por_subgrupo: aLista(porCategoria),
+      // Nombre viejo, mantenido para no romper a nadie que ya lo consuma.
       por_categoria: aLista(porCategoria),
       por_flujo: aLista(porFlujo),
     },

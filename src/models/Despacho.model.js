@@ -785,7 +785,7 @@ export async function findAllWithResumen(filters = {}) {
   const ids = despachos.map((d) => d.id);
   const { data: items, error: errItems } = await supabase
     .from("traslados_items")
-    .select("despacho_id, cantidad_despachador, agotado, cantidad_admin")
+    .select("despacho_id, cantidad_despachador, agotado, cantidad_admin, motivo")
     .in("despacho_id", ids);
 
   if (errItems) throw new Error(`Error al obtener resumen de items: ${errItems.message}`);
@@ -794,9 +794,18 @@ export async function findAllWithResumen(filters = {}) {
   const agg = {};
   for (const item of items || []) {
     if (!agg[item.despacho_id]) {
-      agg[item.despacho_id] = { total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0 };
+      // `motivos` viaja con la lista para que el Monitor pueda filtrar por
+      // "agotados" o "inventario fantasma" sin pedir el detalle de CADA
+      // despacho: con 40 traslados en pantalla serían 40 requests por filtro.
+      agg[item.despacho_id] = {
+        total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0, motivos: {},
+      };
     }
     agg[item.despacho_id].total++;
+    if (item.motivo) {
+      const m = agg[item.despacho_id].motivos;
+      m[item.motivo] = (m[item.motivo] || 0) + 1;
+    }
     if (item.agotado) {
       agg[item.despacho_id].agotados++;
     } else if (item.cantidad_despachador == null) {
@@ -810,7 +819,9 @@ export async function findAllWithResumen(filters = {}) {
 
   return despachos.map((d) => ({
     ...d,
-    resumen: agg[d.id] || { total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0 },
+    resumen: agg[d.id] || {
+      total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0, motivos: {},
+    },
   }));
 }
 
