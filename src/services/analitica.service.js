@@ -247,6 +247,55 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
       }))
       .sort((x, y) => y.faltante_und - x.faltante_und);
 
+  /* ── 1b. Detalle por PRODUCTO ─────────────────────────────────────────
+     El mismo cálculo del nivel de servicio, pero abierto producto por producto y
+     con su grupo/subgrupo encima. Es el paso que faltaba para poder pasar de
+     "Abarrotes anda al 71%" a "y es por estos cuatro productos".
+
+     Se devuelven TODOS y no un top: el panel filtra por grupo, y un top global
+     dejaría afuera justo los productos de la categoría que se está mirando —
+     que es cuando alguien abre este detalle. */
+  const porProducto = new Map();
+  for (const it of registrados) {
+    const k = String(it.codigo_item);
+    if (!porProducto.has(k)) {
+      porProducto.set(k, {
+        codigo_item: k,
+        descripcion: (it.descripcion || "").trim(),
+        grupo: (it.grupo || "").trim() || "Sin grupo",
+        subgrupo: (it.categoria || "").trim() || "Sin subgrupo",
+        pedido: 0,
+        despachado: 0,
+        veces: 0,
+        veces_cortas: 0,
+      });
+    }
+    const a = porProducto.get(k);
+    const ped = pedidoEnUnd(it);
+    const des = despachadoEnUnd(it);
+    a.pedido += ped;
+    a.despachado += des;
+    a.veces += 1;
+    if (des < ped) a.veces_cortas += 1;
+  }
+  const productos = [...porProducto.values()]
+    .map((a) => ({
+      codigo_item: a.codigo_item,
+      descripcion: a.descripcion,
+      grupo: a.grupo,
+      subgrupo: a.subgrupo,
+      pedido_und: Math.round(a.pedido),
+      despachado_und: Math.round(a.despachado),
+      faltante_und: Math.round(a.pedido - a.despachado),
+      // Cuántas VECES se pidió el producto entre todos los traslados de la
+      // ventana. Un 3 acá con 3 en `veces_cortas` es un producto que nunca sale
+      // completo: eso no es abastecimiento, es un dato mal cargado o un proveedor.
+      veces: a.veces,
+      veces_cortas: a.veces_cortas,
+      nivel_servicio: a.pedido > 0 ? a.despachado / a.pedido : null,
+    }))
+    .sort((x, y) => y.faltante_und - x.faltante_und || y.pedido_und - x.pedido_und);
+
   /* ── 2. Pareto de ítems incumplidos ───────────────────────────────────
      Qué productos concentran el faltante. Es la lista con la que compras sabe
      a quién apretar, y casi siempre unos pocos explican la mayoría. */
@@ -360,6 +409,12 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
       codigo_item: String(it.codigo_item),
       descripcion: (it.descripcion || "").trim(),
       diferencia_und: num(it.diferencia),
+      // Los dos lados de la diferencia, para poder mostrarla como un versus en
+      // vez de un número suelto: "−12" no dice si faltaron 12 de 15 o de 1.200.
+      // El despachador guarda en la UM del renglón (por eso el factor) y quien
+      // recibe guarda siempre en unidades base — ver Item.model.
+      despachado_und: despachadoEnUnd(it),
+      recibido_und: num(it.cantidad_auditor),
       no_recibido: !!it.no_recibido,
     }));
 
@@ -418,6 +473,10 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
       // distinto, y traerlos juntos evita un viaje por cada clic.
       por_grupo: aLista(porGrupo),
       por_subgrupo: aLista(porCategoria),
+      // Detalle producto por producto, con su grupo y subgrupo, para el desglose
+      // del panel. Va acá y no en un endpoint aparte: sale del mismo recorrido y
+      // pedirlo por separado sería leer los ítems dos veces.
+      por_producto: productos,
       // Nombre viejo, mantenido para no romper a nadie que ya lo consuma.
       por_categoria: aLista(porCategoria),
       por_flujo: aLista(porFlujo),
