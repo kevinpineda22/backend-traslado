@@ -124,6 +124,19 @@ SELECT * FROM (
          ELSE '✅ nada pendiente' END,
     'ítems con grupo en NULL (salen al final de la lista)',
     8
+
+  UNION ALL
+  -- 028 — backfill del SUBGRUPO. Sin esto, el desglose por subgrupo del Dashboard
+  -- manda todo el histórico a "Sin subgrupo" y no se puede analizar nada.
+  -- OJO: la columna se llama `categoria` pero guarda el criterio 002 = subgrupo.
+  SELECT
+    '028_backfill_categoria_items',
+    CASE WHEN (SELECT count(*) FROM traslados_items WHERE categoria IS NULL) > 0
+         THEN '⚠️ ' || (SELECT count(*)::text FROM traslados_items WHERE categoria IS NULL)
+              || ' ítems sin subgrupo'
+         ELSE '✅ nada pendiente' END,
+    'ítems con categoria (subgrupo) en NULL',
+    9
 ) t
 ORDER BY orden;
 
