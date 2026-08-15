@@ -82,7 +82,7 @@ export async function crear(payload) {
 }
 
 /* =============================================
-   BORRADOR — el listado que el admin arma durante la semana (flujo General)
+   BORRADOR — el listado que el admin arma durante la semana (los dos flujos)
    ============================================= */
 
 /**

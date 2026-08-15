@@ -9,7 +9,7 @@ router.get("/estadisticas/motivos", DespachoController.estadisticasMotivos);
 router.get("/analitica", DespachoController.analiticaCtrl);
 router.get("/activos/items", DespachoController.itemsActivos);
 
-// Listado semanal (borrador) del flujo General.
+// Listado semanal (borrador). Sirve para General y para Llano.
 // OJO: van ANTES de "/:id" — Express matchea por orden y "/listado" entraría por
 // "/:id" (tomando "listado" como un uuid) si se declararan después.
 router.get("/listado", DespachoController.obtenerListado);

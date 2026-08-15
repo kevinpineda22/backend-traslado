@@ -181,7 +181,7 @@ export async function crear(req, res, next) {
 }
 
 /* =============================================
-   BORRADOR — listado semanal del flujo General
+   BORRADOR — listado semanal (General y Llano)
    ============================================= */
 
 /**

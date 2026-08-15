@@ -156,7 +156,7 @@ function aFilaItem(despachoId, item) {
  * Crear un despacho con sus items.
  *
  * `estado` decide si nace listo para el despachador ("Creado", el caso normal) o
- * como lista en construcción ("Borrador", solo flujo General — ver
+ * como lista en construcción ("Borrador", los dos flujos — ver
  * agregarItemsBorrador). `disponible_at` solo se sella cuando nace en "Creado":
  * es el reloj de las alertas de inactividad, y un borrador todavía no espera a nadie.
  *
@@ -229,7 +229,7 @@ export async function create(payload) {
  */
 export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   const TRANSICIONES = {
-    // Borrador = lista en construcción del flujo General. Su única salida es
+    // Borrador = lista en construcción (General y Llano). Su única salida es
     // "Creado" (finalizar el despacho), y la hace `finalizarBorrador`.
     Borrador: ["Creado"],
     Creado: ["En_recoleccion"],
@@ -870,7 +870,7 @@ export async function findForAuditor({ sede } = {}) {
 }
 
 /* =============================================
-   BORRADOR — la lista que el admin arma durante la semana (flujo General)
+   BORRADOR — la lista que el admin arma durante la semana (los dos flujos)
    ============================================= */
 
 /**
@@ -1075,7 +1075,7 @@ export async function finalizarBorrador(id, { despachadorId } = {}) {
 export async function reabrirBorrador(id) {
   const { data: cab } = await supabase
     .from(TABLE)
-    .select("estado, origen, destino, inactivo, flujo")
+    .select("estado, origen, destino, inactivo")
     .eq("id", id)
     .single();
 
@@ -1085,20 +1085,11 @@ export async function reabrirBorrador(id) {
     e.expose = true;
     throw e;
   }
-  // El listado es una función del flujo General y nada más: el panel de armado lo
-  // oculta cuando el destino es Llano (`usaListado = !esLlano`). Un Llano devuelto
-  // a Borrador quedaría en un estado que ninguna pantalla sabe atender — no
-  // aparecería en el panel donde se agregan productos, que es justo para lo que
-  // sirve reabrir. Y no hace falta: en Llano los ítems ya se editan en "Creado"
-  // desde el Monitor.
-  if ((cab.flujo || "general") !== "general") {
-    const e = new Error(
-      "El listado es del flujo General. En Llano los productos se editan directo desde el Monitor, sin reabrir.",
-    );
-    e.statusCode = 409;
-    e.expose = true;
-    throw e;
-  }
+  // SIN GUARDA DE FLUJO. Hubo una que rechazaba todo lo que no fuera General,
+  // porque el panel de armado ocultaba el listado en Llano y un Llano reabierto
+  // quedaba sin pantalla donde agregarle productos. Eso ya no pasa: el listado
+  // se habilitó para los dos flujos (`usaListado = !!destino`), así que reabrir
+  // un Llano lo devuelve a una pantalla que sí sabe atenderlo.
   if (cab.inactivo) {
     const e = new Error(
       "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar.",
