@@ -708,10 +708,19 @@ export async function editarItems(id, items) {
    MARCA "NO SUBIDO A SIESA" — ver sql/029
    ============================================= */
 
-// La marca solo tiene sentido cuando SIESA ya se intentó, y eso ocurre al pasar
-// a "Recolectado" (ver despacho.service). Antes no hay nada que cuadrar contra
-// el ERP, así que ofrecerla sería invitar a marcar por error.
-const ESTADOS_CON_SIESA = [
+// Estados donde se puede marcar un renglón como "no va a SIESA".
+//
+// Arranca en "En_recoleccion", NO en "Recolectado": el objetivo es EXCLUIR el
+// renglón del plano ANTES de que se suba, para que no lo tumbe. La subida ocurre
+// al pasar a "Recolectado", así que hay que poder marcar antes.
+//
+// Quedan afuera "Borrador" y "Creado" a propósito: ahí el despacho todavía es
+// editable (ESTADOS_EDITABLES) y si el admin no quiere un renglón, lo QUITA. La
+// marca es para cuando ya no se puede editar pero el plano aún no cerró (o ya se
+// intentó, para reintentar sin él).
+const ESTADOS_MARCA_SIESA = [
+  "En_recoleccion",
+  "Pendiente_carga",
   "Recolectado",
   "En_recepcion",
   "Auditado",
@@ -720,14 +729,18 @@ const ESTADOS_CON_SIESA = [
 ];
 
 /**
- * Marca (o desmarca) renglones que NO entraron a SIESA.
+ * Marca (o desmarca) renglones que NO deben ir a SIESA.
  *
- * NO TOCA NINGUNA CANTIDAD, a propósito. Es una anotación sobre un hecho ya
- * consumado: la mercancía salió, lo que falló fue la importación al ERP. Poner
- * `cantidad_despachador` en 0 para que "se vea distinto" borraría lo que el
- * despachador recogió — que es justo el dato que esta marca existe para poder
- * cuadrar — y de paso le bajaría el cumplimiento a una sede que no hizo nada
- * mal (ver el encabezado de sql/029).
+ * Dos usos, mismo campo:
+ *   1. ANTES de subir — excluir del plano el renglón que rompe la importación,
+ *      para que el resto entre solo (ver itemsRecolectados en siesaRequisicion).
+ *   2. DESPUÉS de un fallo — dejar registro de lo que se subió a mano aparte.
+ *
+ * NO TOCA NINGUNA CANTIDAD, a propósito. El estado visible del renglón se DERIVA
+ * de `cantidad_despachador`; ponerla en 0 para que "se vea distinto" borraría lo
+ * que el despachador recogió y le bajaría el cumplimiento a una sede que no hizo
+ * nada mal (ver el encabezado de sql/029). La mercancía salió del camión igual;
+ * lo único que cambia es que no la registra el ERP por el plano automático.
  *
  * @param {string} id        - despacho
  * @param {string[]} itemIds - renglones a marcar
@@ -742,9 +755,9 @@ export async function marcarItemsSiesaOmitido(id, itemIds, omitido, correo = nul
     e.expose = true;
     throw e;
   }
-  if (!ESTADOS_CON_SIESA.includes(cab.estado)) {
+  if (!ESTADOS_MARCA_SIESA.includes(cab.estado)) {
     const e = new Error(
-      `Solo se puede marcar "no subido a SIESA" cuando el camión ya salió. Este despacho está en ${cab.estado}.`,
+      `Este despacho está en ${cab.estado}. En Borrador o Creado, quita el producto en vez de marcarlo — todavía es editable.`,
     );
     e.statusCode = 409;
     e.expose = true;

@@ -202,10 +202,26 @@ export function fechaSiesa(d = new Date()) {
   return fechaCompacta(d);
 }
 
-/** Ítems que el DESPACHADOR recolectó y salieron de origen (los que van a SIESA). */
+/**
+ * Ítems que van al plano SIESA: recolectados (cantidad_despachador > 0) y NO
+ * excluidos a mano por el admin.
+ *
+ * `siesa_omitido` es la válvula de escape para el renglón que ROMPE la
+ * importación (código mal en el ERP, ítem que SIESA no acepta). Antes un solo
+ * renglón así tumbaba el traslado ENTERO a `fallido` y tocaba subir todo a mano;
+ * ahora el admin lo saca del plano y el resto entra solo.
+ *
+ * El filtro vive ACÁ, en el helper, y no en cada armador: salida y entrada son
+ * las dos caras del mismo movimiento y TIENEN que excluir exactamente los mismos
+ * renglones. Si una sacara un ítem que la otra deja, el plano quedaría
+ * descuadrado (salió N, entró N+1) y SIESA lo rechazaría.
+ *
+ * OJO: excluye AL ARMAR. Si el renglón ya se envió a SIESA con éxito, marcarlo
+ * después NO lo saca del ERP — ahí la marca queda solo como registro.
+ */
 function itemsRecolectados(despacho) {
   return (despacho?.traslados_items || []).filter(
-    (it) => Number(it.cantidad_despachador) > 0,
+    (it) => Number(it.cantidad_despachador) > 0 && !it.siesa_omitido,
   );
 }
 
