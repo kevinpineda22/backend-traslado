@@ -27,6 +27,10 @@ router.post("/", validators.crearDespacho, DespachoController.crear);
 router.delete("/:id", DespachoController.eliminar);
 router.patch("/:id/despachador", DespachoController.reasignarDespachador);
 router.put("/:id/items", DespachoController.editarItems);
+// Marca "no entro a SIESA" por renglon. PATCH y no PUT: no reemplaza los items,
+// anota unos pocos. La forma la exige el controller y el modelo acota los ids
+// al despacho, asi que no pasa por Zod.
+router.patch("/:id/items/siesa-omitido", DespachoController.marcarSiesaOmitido);
 router.patch("/:id/estado", validators.cambiarEstado, DespachoController.cambiarEstado);
 router.post("/:id/iniciar", DespachoController.iniciarRecoleccion);
 router.post("/:id/abandonar", DespachoController.abandonar);

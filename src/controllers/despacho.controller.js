@@ -171,6 +171,29 @@ export async function editarItems(req, res, next) {
  * Crear un nuevo despacho.
  * Body: { destino, despachador_id, admin_id, criterios, items[] }
  */
+/**
+ * PATCH /api/despachos/:id/items/siesa-omitido
+ * Marca renglones que no entraron a SIESA (subida manual incompleta).
+ * Body: { item_ids: string[], omitido: boolean, correo?: string }
+ */
+export async function marcarSiesaOmitido(req, res, next) {
+  try {
+    const { item_ids, omitido, correo } = req.body || {};
+    if (!Array.isArray(item_ids) || item_ids.length === 0) {
+      return res.status(400).json({ error: "Se esperaba item_ids con al menos un item" });
+    }
+    const data = await DespachoService.marcarItemsSiesaOmitido(
+      req.params.id,
+      item_ids,
+      omitido !== false,
+      typeof correo === "string" ? correo.trim().toLowerCase() : null,
+    );
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function crear(req, res, next) {
   try {
     const data = await DespachoService.crear(req.body);

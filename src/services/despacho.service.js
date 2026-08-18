@@ -75,6 +75,16 @@ export async function editarItems(id, items) {
 }
 
 /**
+ * Marca (o desmarca) renglones que NO entraron a SIESA.
+ *
+ * Pasa derecho al modelo, donde viven las guardas (estado del despacho y
+ * pertenencia de los items). Es una ANOTACION: no mueve cantidades ni motivos.
+ */
+export async function marcarItemsSiesaOmitido(id, itemIds, omitido, correo) {
+  return DespachoModel.marcarItemsSiesaOmitido(id, itemIds, omitido, correo);
+}
+
+/**
  * Crear un despacho nuevo.
  */
 export async function crear(payload) {

@@ -703,6 +703,86 @@ export async function editarItems(id, items) {
   return { id, items: items.length, agregados: nuevos.length };
 }
 
+
+/* =============================================
+   MARCA "NO SUBIDO A SIESA" — ver sql/029
+   ============================================= */
+
+// La marca solo tiene sentido cuando SIESA ya se intentó, y eso ocurre al pasar
+// a "Recolectado" (ver despacho.service). Antes no hay nada que cuadrar contra
+// el ERP, así que ofrecerla sería invitar a marcar por error.
+const ESTADOS_CON_SIESA = [
+  "Recolectado",
+  "En_recepcion",
+  "Auditado",
+  "Rechazado",
+  "Recibido_con_inconsistencia",
+];
+
+/**
+ * Marca (o desmarca) renglones que NO entraron a SIESA.
+ *
+ * NO TOCA NINGUNA CANTIDAD, a propósito. Es una anotación sobre un hecho ya
+ * consumado: la mercancía salió, lo que falló fue la importación al ERP. Poner
+ * `cantidad_despachador` en 0 para que "se vea distinto" borraría lo que el
+ * despachador recogió — que es justo el dato que esta marca existe para poder
+ * cuadrar — y de paso le bajaría el cumplimiento a una sede que no hizo nada
+ * mal (ver el encabezado de sql/029).
+ *
+ * @param {string} id        - despacho
+ * @param {string[]} itemIds - renglones a marcar
+ * @param {boolean} omitido  - true marca, false levanta la marca
+ * @param {string|null} correo - quién lo hace (queda como constancia)
+ */
+export async function marcarItemsSiesaOmitido(id, itemIds, omitido, correo = null) {
+  const { data: cab } = await supabase.from(TABLE).select("estado").eq("id", id).single();
+  if (!cab) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (!ESTADOS_CON_SIESA.includes(cab.estado)) {
+    const e = new Error(
+      `Solo se puede marcar "no subido a SIESA" cuando el camión ya salió. Este despacho está en ${cab.estado}.`,
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  // Los ids llegan del cliente: se acotan a ESTE despacho antes de escribir. Sin
+  // este filtro, un id de otro traslado se marcaría igual y la anotación
+  // aparecería en un despacho que nadie tocó.
+  const { data: propios, error: errLeer } = await supabase
+    .from("traslados_items")
+    .select("id")
+    .eq("despacho_id", id)
+    .in("id", itemIds);
+  if (errLeer) throw new Error(`Error al leer los ítems: ${errLeer.message}`);
+
+  const validos = (propios || []).map((r) => r.id);
+  if (!validos.length) {
+    const e = new Error("Ninguno de los ítems pertenece a este despacho");
+    e.statusCode = 400;
+    e.expose = true;
+    throw e;
+  }
+
+  const parche = omitido
+    ? { siesa_omitido: true, siesa_omitido_at: new Date().toISOString(), siesa_omitido_por: correo }
+    : { siesa_omitido: false, siesa_omitido_at: null, siesa_omitido_por: null };
+
+  const { data, error } = await supabase
+    .from("traslados_items")
+    .update(parche)
+    .in("id", validos)
+    .select("id, siesa_omitido, siesa_omitido_at, siesa_omitido_por");
+  if (error) throw new Error(`Error al marcar los ítems: ${error.message}`);
+
+  return { actualizados: data?.length || 0, items: data || [] };
+}
+
 /**
  * Eliminar un despacho (los items y firmas se borran por FK ON DELETE CASCADE).
  */
