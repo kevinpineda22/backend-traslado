@@ -5,36 +5,50 @@ import { fechaCompacta } from "../config/tiempo.js";
 import { sandboxOn } from "../config/sandbox.js";
 
 /* =============================================
-   Importar requisición a SIESA (/conectoresimportar, conector 249486
-   DEV_REQUISICIONES → registro tipo 450, cabecera de inventario)
+   Importar transferencia EN TRÁNSITO a SIESA (/conectoresimportar, conector
+   252844 TRANSFERENCIA_TRANSITO_DEV_REQUISICIONES → registro tipo 450).
 
    Este módulo ESCRIBE EN EL ERP. Todo lo demás del backend lee; esto no. Si se
-   dispara dos veces quedan dos requisiciones, o sea movimientos de inventario
-   que nunca ocurrieron. La idempotencia no la resuelve este archivo: la resuelve
-   el estado `siesa_estado` en la BD (ver migración 007 y requisicion.service).
-   Acá solo armamos el payload y hacemos el POST.
+   dispara dos veces quedan documentos duplicados, o sea movimientos de
+   inventario que nunca ocurrieron. La idempotencia no la resuelve este archivo:
+   la resuelven `siesa_estado` y `siesa_salida_docto` en la BD (migraciones 007 y
+   029, requisicion.service). Acá solo armamos los payloads y hacemos los POST.
+
+   ── POR QUÉ SON DOS DOCUMENTOS ──
+   SIESA dejó de aceptar la transferencia DIRECTA (clase 67, un documento con
+   origen y destino, que movía inventario de una). Ahora el modelo es EN TRÁNSITO:
+
+     1. SALIDA  (clase 65, tipo CTS): saca de la bodega origen → tránsito.
+        SIESA le asigna un consecutivo (F_CONSEC_AUTO_REG = 1).
+     2. ENTRADA (clase 66, tipo CTE): mete de tránsito → bodega destino, y
+        REFERENCIA a la salida por su consecutivo (CO_BASE + TIPO_DOCTO=CTS +
+        CONSECUTIVO = nro de la salida). Sin ese número la entrada no existe.
+
+   El orden es OBLIGADO: salida → leo el NroDocto → entrada con ese consecutivo.
+   No se pueden mandar en paralelo ni al revés. Por eso este módulo expone las
+   dos importaciones por separado (`importarSalida` / `importarEntrada`) y el
+   orquestador (requisicion.service) las encadena persistiendo el docto de la
+   salida en el medio — así, si la entrada falla, el reintento manda SOLO la
+   entrada sin duplicar la salida.
 
    ── Lo que el conector ya trae horneado (spec del registro 450) ──
    El JSON solo lleva los campos VARIABLES; los fijos viven en la definición del
-   conector y NO viajan. Anotados acá porque explican qué estamos creando:
+   conector y NO viajan:
 
-     f350_id_tipo_docto   = CTI
-     f350_id_clase_docto  = 67  → Transferencias
-     f450_id_concepto     = 607 → Transferencias
-     f350_ind_estado      = 1   → Aprobado/Contabilizado
-     F_CIA                = 001
-     F_CONSEC_AUTO_REG    = 1   → el consecutivo lo asigna SIESA
+     f350_ind_estado    = 1   → Aprobado/Contabilizado (mueve inventario al instante)
+     F_CIA              = 001
+     F_CONSEC_AUTO_REG  = 1   → el consecutivo lo asigna SIESA
 
-   OJO: `ind_estado = 1` significa que el documento NO entra como borrador. Entra
-   aprobado y contabilizado: mueve inventario apenas SIESA lo acepta. No hay una
-   instancia intermedia donde alguien revise. Por eso todo este flujo está armado
-   alrededor de no enviar dos veces y de no enviar basura.
+   OJO: `ind_estado = 1` significa que los documentos NO entran como borrador.
+   Entran aprobados y contabilizados: mueven inventario apenas SIESA los acepta.
+   No hay instancia intermedia donde alguien revise. Por eso todo este flujo está
+   armado alrededor de no enviar dos veces y de no enviar basura.
 
    Configuración (.env):
-     SIESA_IMPORTAR_URL        base del conector (default: QA)
+     SIESA_IMPORTAR_URL        base del conector
      SIESA_IMPORTAR_ID_SISTEMA idSistema (default 1)
-     SIESA_IMPORTAR_ID_DOCUMENTO      default 249486
-     SIESA_IMPORTAR_NOMBRE_DOCUMENTO  default DEV_REQUISICIONES
+     SIESA_IMPORTAR_ID_DOCUMENTO      default 252844
+     SIESA_IMPORTAR_NOMBRE_DOCUMENTO  default TRANSFERENCIA_TRANSITO_DEV_REQUISICIONES
      SIESA_IMPORTAR_CO         centro de operación, 3 chars (ver resolverCO)
      SIESA_IMPORTAR_CO_POR_SEDE  JSON {"PV001":"001", ...} si varía por sede
      CONNEKTA_ID_COMPANIA / CONNI_KEY / CONNI_TOKEN  (ya existen)
@@ -50,14 +64,32 @@ const cfg = {
     "https://servicios.siesacloud.com/api/siesa/v3.1/conectoresimportar",
   idCompania: () => process.env.CONNEKTA_ID_COMPANIA || "7375",
   idSistema: () => process.env.SIESA_IMPORTAR_ID_SISTEMA || "1",
-  idDocumento: () => process.env.SIESA_IMPORTAR_ID_DOCUMENTO || "249486",
-  nombreDocumento: () => process.env.SIESA_IMPORTAR_NOMBRE_DOCUMENTO || "DEV_REQUISICIONES",
+  idDocumento: () => process.env.SIESA_IMPORTAR_ID_DOCUMENTO || "252844",
+  nombreDocumento: () =>
+    process.env.SIESA_IMPORTAR_NOMBRE_DOCUMENTO || "TRANSFERENCIA_TRANSITO_DEV_REQUISICIONES",
   key: () => process.env.CONNEKTA_KEY || process.env.CONNI_KEY || "",
   token: () => process.env.CONNEKTA_TOKEN || process.env.CONNI_TOKEN || "",
 };
 
+/* ── Constantes del contrato de tránsito ─────────────────────────────────────
+   Valores confirmados por inventario (2026-08-18). No son configurables: son EL
+   contrato del documento de tránsito. Si SIESA cambia el modelo otra vez, se
+   tocan acá, en un solo lugar con nombre. */
+const CLASE_SALIDA = "65"; // Transferencia salida en tránsito
+const CLASE_ENTRADA = "66"; // Transferencia entrada en tránsito
+const TIPO_SALIDA = "CTS"; // tipo de documento de la salida
+const TIPO_ENTRADA = "CTE"; // tipo de documento de la entrada
+const MOTIVO_ENTRADA = "01"; // entrada: 01 para todos los casos
+const MOTIVO_SALIDA_PARQUE_LLANO = "50"; // salida del Parque (00301) al Llano (00401)
+const MOTIVO_SALIDA_GENERAL = "02"; // salida: el resto de los casos
+const BODEGA_PARQUE = "00301"; // Girardota Parque (origen del flujo Llano)
+const BODEGA_LLANO = "00401"; // Girardota Llano (destino del flujo Llano)
+
 /** Longitud exacta de f350_id_co según el spec del registro 450. */
 const CO_LARGO = 3;
+
+const num = (v) => Number(v) || 0;
+const trim = (v) => String(v ?? "").trim();
 
 /**
  * Centro de operación (`f350_id_co`) de una sede. 3 chars, valida en maestro.
@@ -68,7 +100,10 @@ const CO_LARGO = 3;
  *   2. La tabla del código.
  *   3. `SIESA_IMPORTAR_CO` — valor único, escotilla de emergencia.
  *
- * @param {string} sede - bodega de origen del despacho
+ * Sirve tanto para el origen (C.O. de la salida) como para el destino (C.O. de
+ * la entrada): en el modelo de tránsito los dos centros de operación viajan.
+ *
+ * @param {string} sede - bodega (origen o destino del despacho)
  * @returns {string} el C.O., o "" si no se pudo resolver
  */
 export function resolverCO(sede) {
@@ -90,6 +125,20 @@ export function resolverCO(sede) {
 }
 
 /**
+ * Motivo del movimiento de SALIDA. Regla de negocio (2026-08-18):
+ *   - 50 si la mercancía sale del Parque (00301) al Llano (00401).
+ *   - 02 en todos los demás casos.
+ * La entrada siempre lleva 01 (ver MOTIVO_ENTRADA).
+ */
+function motivoSalida(despacho) {
+  const origen = trim(despacho?.origen);
+  const destino = trim(despacho?.destino);
+  return origen === BODEGA_PARQUE && destino === BODEGA_LLANO
+    ? MOTIVO_SALIDA_PARQUE_LLANO
+    : MOTIVO_SALIDA_GENERAL;
+}
+
+/**
  * Falta configuración obligatoria. Lo tratamos aparte de un fallo de red: no se
  * reintenta (reintentar no arregla una variable que no existe) y el mensaje dice
  * exactamente qué cargar.
@@ -105,28 +154,38 @@ export class ConfigSiesaError extends Error {
   }
 }
 
+/** Valida el C.O. de UNA sede y agrega a `faltan` lo que corresponda. */
+function validarCO(faltan, sede, etiqueta) {
+  const co = resolverCO(sede);
+  if (!co) {
+    faltan.push(`SIESA_IMPORTAR_CO (${etiqueta}${sede ? ` ${sede}` : ""})`);
+  } else if (co.length !== CO_LARGO) {
+    // Atajamos acá lo que SIESA rechazaría igual, pero con un mensaje que se
+    // entiende: "largo inválido" es más útil que un error del ERP.
+    faltan.push(
+      `SIESA_IMPORTAR_CO ${etiqueta} con largo inválido ("${co}" tiene ${co.length}, deben ser ${CO_LARGO})`,
+    );
+  }
+}
+
 /**
  * Qué falta para poder enviar. Vacío = todo listo.
- * @param {string} [sede] - origen del despacho; el C.O. puede variar por sede
+ *
+ * Ahora se valida el C.O. del ORIGEN y del DESTINO: en el modelo de tránsito la
+ * entrada declara el C.O. destino, y un destino sin C.O. rompería la entrada
+ * DESPUÉS de que la salida ya entró — el peor momento para enterarse.
+ *
+ * @param {string} [origen]  - bodega origen del despacho
+ * @param {string} [destino] - bodega destino del despacho (opcional)
  */
-export function configFaltante(sede) {
+export function configFaltante(origen, destino) {
   const faltan = [];
   if (!cfg.idSistema()) faltan.push("SIESA_IMPORTAR_ID_SISTEMA");
   if (!cfg.key()) faltan.push("CONNI_KEY");
   if (!cfg.token()) faltan.push("CONNI_TOKEN");
 
-  const co = resolverCO(sede);
-  if (!co) {
-    faltan.push(
-      `SIESA_IMPORTAR_CO${sede ? ` (centro de operación de la sede ${sede})` : ""}`,
-    );
-  } else if (co.length !== CO_LARGO) {
-    // Atajamos acá lo que SIESA rechazaría igual, pero con un mensaje que se
-    // entiende: "largo inválido" es más útil que un error del ERP.
-    faltan.push(
-      `SIESA_IMPORTAR_CO con largo inválido ("${co}" tiene ${co.length}, deben ser ${CO_LARGO})`,
-    );
-  }
+  validarCO(faltan, origen, "centro de operación origen");
+  if (destino) validarCO(faltan, destino, "centro de operación destino");
 
   return faltan;
 }
@@ -143,66 +202,126 @@ export function fechaSiesa(d = new Date()) {
   return fechaCompacta(d);
 }
 
+/** Ítems que el DESPACHADOR recolectó y salieron de origen (los que van a SIESA). */
+function itemsRecolectados(despacho) {
+  return (despacho?.traslados_items || []).filter(
+    (it) => Number(it.cantidad_despachador) > 0,
+  );
+}
+
+/** Nota del documento, recortada al tope de f350_notas (255). */
+function notaDoc(despacho, cara) {
+  return `Traslado ${cara} ${despacho.origen} -> ${despacho.destino} (despacho ${despacho.id})`.slice(
+    0,
+    255,
+  );
+}
+
 /**
- * Arma el payload de la requisición a partir de un despacho.
- *
- * Solo viajan los ítems que el DESPACHADOR recolectó y salieron de origen
- * (`cantidad_despachador > 0`). La palabra la tiene el despachador: SIESA refleja
- * lo que salió del camión, no lo que auditó después el auditor (la auditoría es
- * control documental — ver confirmarAuditoria).
+ * Movimientos (una línea por ítem). Salida y entrada comparten estructura y
+ * difieren solo en C.O., tipo de docto, bodega y motivo.
  *
  * OJO con la UNIDAD: `cantidad_despachador` está guardada en la unidad del ítem,
  * NO en UND. `cantidad_despachador × factor` da el total real en UND (el factor
  * queda sincronizado con la unidad guardada — misma canonicalización que
  * compararAuditoria). A SIESA siempre va en UND.
  *
- * OJO con los nombres de campo: `Documentos` usa "NRO DOCTO" (con espacio) y
- * `Movimientos` usa "NRO_DOCTO" (con guión bajo). Está copiado tal cual del
- * contrato del conector — si se "corrige", SIESA lo rechaza.
+ * `NRO DOCTO` va en 0: el conector asigna el consecutivo (F_CONSEC_AUTO_REG = 1).
+ * La entrada NO referencia a la salida por acá, sino por el CONSECUTIVO del
+ * documento (ver armarEntrada).
+ */
+function construirMovimientos(items, { co, tipoDocto, bodega, motivo }) {
+  return items.map((it, i) => ({
+    "C.O_DOCUMENTO": co,
+    "TIPO DOCTO": tipoDocto,
+    "NRO DOCTO": 0,
+    "NRO REGISTRO MOVIMIENTO": String(i + 1),
+    BODEGA_MOVIMIENTO: bodega,
+    MOTIVO: motivo,
+    "C.O MOVIMIENTO": co,
+    UNIDAD_MEDIDA: "UND",
+    CANTIDAD: String((Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1)),
+    ITEM: String(it.codigo_item || ""),
+  }));
+}
+
+/**
+ * Payload de la SALIDA en tránsito (clase 65 / CTS).
+ *
+ * Los 3 campos de referencia al docto base (CO_BASE / TIPO_DOCTO / CONSECUTIVO)
+ * van VACÍOS: solo la entrada apunta a la salida, no al revés. Bodega y C.O. del
+ * movimiento son los del ORIGEN. Motivo 50/02 según Parque→Llano.
  *
  * @param {object} despacho - cabecera + traslados_items
  * @returns {{ Documentos: object[], Movimientos: object[] }}
  */
-export function armarPayload(despacho) {
-  const items = (despacho?.traslados_items || []).filter(
-    (it) => Number(it.cantidad_despachador) > 0,
-  );
-
-  // Consecutivo en 0: el conector va con F_CONSEC_AUTO_REG = 1
-  // ("el consecutivo es recalculado con base en la tabla de consecutivos de
-  // docto"). Lo asigna SIESA; mandarlo nosotros sería pelearle al ERP por un
-  // número que él ya sabe cuál es. Pero SIESA exige que el campo sea numérico,
-  // por lo que mandamos 0 en vez de string vacío.
-  const nroDocto = 0;
+export function armarSalida(despacho) {
+  const items = itemsRecolectados(despacho);
   const fecha = fechaSiesa(new Date(despacho.updated_at || Date.now()));
-  const co = resolverCO(despacho.origen);
+  const coOrigen = resolverCO(despacho.origen);
 
   const documento = {
-    "C.O_DESPACHO": co,
-    "NRO DOCTO": nroDocto,
+    "C.O DOCTO": coOrigen,
+    "TIPO DOCTO": TIPO_SALIDA,
     "FECHA_DOCUMENTO=8 (AAAAMMDD)": fecha,
-    // f350_notas tope 255 en el spec. Recortamos nosotros: que el ERP nos
-    // rechace un documento entero por una nota larga sería absurdo.
-    NOTA_DOCUMENTO: `Traslado ${despacho.origen} -> ${despacho.destino} (despacho ${despacho.id})`.slice(
-      0,
-      255,
-    ),
+    CLASE_DOCTO: CLASE_SALIDA,
+    NOTAS: notaDoc(despacho, "salida"),
     BODEGA_SALIDA: String(despacho.origen || ""),
     BODEGA_ENTRADA: String(despacho.destino || ""),
+    // Referencia al docto base — solo en la ENTRADA. Vacíos acá.
+    CO_BASE: "",
+    TIPO_DOCTO: "",
+    CONSECUTIVO: "",
   };
 
-  const movimientos = items.map((it, i) => ({
-    "C.O_OPERACION": co,
-    NRO_DOCTO: nroDocto,
-    NRO_REGISTRO_MOVIMIENTO: String(i + 1),
+  const movimientos = construirMovimientos(items, {
+    co: coOrigen,
+    tipoDocto: TIPO_SALIDA,
+    bodega: String(despacho.origen || ""),
+    motivo: motivoSalida(despacho),
+  });
+
+  return { Documentos: [documento], Movimientos: movimientos };
+}
+
+/**
+ * Payload de la ENTRADA en tránsito (clase 66 / CTE).
+ *
+ * Referencia a la salida: CO_BASE = C.O. origen, TIPO_DOCTO = CTS (el tipo de la
+ * salida), CONSECUTIVO = nro del docto que generó la salida. Sin ese consecutivo
+ * la entrada no puede existir. Bodega y C.O. del movimiento son los del DESTINO.
+ * Motivo 01 siempre.
+ *
+ * @param {object} despacho    - cabecera + traslados_items
+ * @param {string|number} salidaDocto - consecutivo que SIESA asignó a la salida
+ * @returns {{ Documentos: object[], Movimientos: object[] }}
+ */
+export function armarEntrada(despacho, salidaDocto) {
+  const items = itemsRecolectados(despacho);
+  const fecha = fechaSiesa(new Date(despacho.updated_at || Date.now()));
+  const coOrigen = resolverCO(despacho.origen);
+  const coDestino = resolverCO(despacho.destino);
+
+  const documento = {
+    "C.O DOCTO": coDestino,
+    "TIPO DOCTO": TIPO_ENTRADA,
+    "FECHA_DOCUMENTO=8 (AAAAMMDD)": fecha,
+    CLASE_DOCTO: CLASE_ENTRADA,
+    NOTAS: notaDoc(despacho, "entrada"),
     BODEGA_SALIDA: String(despacho.origen || ""),
-    "C.O_MOVIMIENTO": co,
-    // Canonicalización a UND: cantidad_despachador está en la unidad del ítem;
-    // × factor da el total real en UND. A SIESA siempre va en UND.
-    UNIDAD_MEDIDA: "UND",
-    CANTIDAD: String((Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1)),
-    CODIGO_ITEM: String(it.codigo_item || ""),
-  }));
+    BODEGA_ENTRADA: String(despacho.destino || ""),
+    // La entrada apunta a la salida por su consecutivo.
+    CO_BASE: coOrigen,
+    TIPO_DOCTO: TIPO_SALIDA,
+    CONSECUTIVO: String(salidaDocto ?? ""),
+  };
+
+  const movimientos = construirMovimientos(items, {
+    co: coDestino,
+    tipoDocto: TIPO_ENTRADA,
+    bodega: String(despacho.destino || ""),
+    motivo: MOTIVO_ENTRADA,
+  });
 
   return { Documentos: [documento], Movimientos: movimientos };
 }
@@ -264,77 +383,136 @@ function detalleError(data) {
   return aTexto(data).slice(0, 800);
 }
 
+/** Consecutivo que SIESA asignó a un documento, sin importar cómo lo envuelva. */
+function doctoDe(data) {
+  return String(data?.detalle?.NroDocto || data?.NroDocto || data?.nro_docto || "");
+}
+
 /**
- * Importa la requisición a SIESA. Una sola pasada, SIN reintento interno.
+ * POST crudo al conector. Una sola pasada, SIN reintento interno: el reintento
+ * vive afuera (requisicion.service) y pasa por la BD. Reintentar acá adentro, en
+ * memoria, correría el riesgo de mandar dos veces sin registro de la primera —
+ * con un write al ERP, "no sé si llegó" es peor que "falló".
  *
- * El reintento vive afuera (requisicion.service) y pasa por la BD: reintentar
- * acá adentro, en memoria, correría el riesgo de mandar dos veces sin que quede
- * registro de la primera. Con un POST que escribe en el ERP, "no sé si llegó" es
- * peor que "falló".
+ * Devuelve `{ data, status }`. No lanza por status: el conector devuelve 200 con
+ * errores adentro y también 4xx/5xx; la evaluación la hace quien llama.
+ */
+async function postConector(payload) {
+  return axios
+    .post(cfg.url(), payload, {
+      params: {
+        idCompania: cfg.idCompania(),
+        idSistema: cfg.idSistema(),
+        idDocumento: cfg.idDocumento(),
+        nombreDocumento: cfg.nombreDocumento(),
+      },
+      headers: {
+        conniKey: cfg.key(),
+        conniToken: cfg.token(),
+        "Content-Type": "application/json",
+      },
+      timeout: 60_000,
+      validateStatus: () => true,
+    })
+    .then(({ data, status }) => ({ data, status }));
+}
+
+/** Convierte un rechazo de SIESA en un Error con la respuesta cruda adjunta. */
+function errorRechazo(cara, status, data) {
+  const err = new Error(`SIESA rechazó la ${cara} en tránsito [HTTP ${status}]: ${detalleError(data)}`);
+  // Adjuntamos la respuesta cruda para que el orquestador decida si el rechazo es
+  // un faltante de stock ajustable (registro 470) sin re-parsear el mensaje.
+  err.siesaData = data;
+  err.httpStatus = status;
+  return err;
+}
+
+/**
+ * Importa la SALIDA en tránsito (clase 65) a partir de un despacho.
+ *
+ * Es el PRIMER eslabón: valida stock en la bodega origen, así que es acá donde
+ * SIESA puede rechazar por "Item sin cantidad disponible" (registro 470) y donde
+ * el orquestador engancha el ajuste automático. Devuelve el consecutivo que
+ * SIESA asignó — es el que la entrada necesita.
  *
  * @param {object} despacho
- * @returns {Promise<{ ok: true, docto: string, respuesta: object }>}
+ * @returns {Promise<{ ok:true, docto:string, respuesta:object, payload:object } | { ok:true, vacio:true }>}
  * @throws {ConfigSiesaError} si falta configuración
- * @throws {Error} si SIESA rechaza o no responde
+ * @throws {Error} si SIESA rechaza o no responde (con `siesaData` adjunto)
  */
-export async function importarRequisicion(despacho) {
-  const faltan = configFaltante(despacho?.origen);
+export async function importarSalida(despacho) {
+  const faltan = configFaltante(despacho?.origen, despacho?.destino);
   if (faltan.length) throw new ConfigSiesaError(faltan);
 
-  const payload = armarPayload(despacho);
+  const payload = armarSalida(despacho);
 
   if (payload.Movimientos.length === 0) {
-    // Nada salió del camión: no hay requisición que importar. No es un error.
-    return { ok: true, vacio: true, docto: null, respuesta: null };
+    // Nada salió del camión: no hay transferencia que importar. No es un error.
+    return { ok: true, vacio: true, docto: null, respuesta: null, payload: null };
   }
 
   // SANDBOX — se corta JUSTO ANTES del POST y DESPUÉS de armar el payload: así el
-  // armado (que es donde viven los bugs de C.O., bodegas y unidades) se ejercita
-  // igual y queda guardado en `siesa_payload` para revisarlo. Lo único que no
-  // pasa es el viaje al ERP. El docto simulado deja el despacho en el camino
-  // feliz: probar el cierre no debería obligar a probar también el de error.
+  // armado (donde viven los bugs de C.O., bodegas, motivos y unidades) se
+  // ejercita igual y queda guardado para revisarlo. El docto simulado deja el
+  // par en el camino feliz — la entrada lo referencia como cualquier consecutivo.
   if (sandboxOn()) {
-    const docto = `SANDBOX-${String(despacho?.id || "").slice(0, 8).toUpperCase()}`;
+    const docto = `SANDBOX-CTS-${String(despacho?.id || "").slice(0, 8).toUpperCase()}`;
     console.warn(
-      `[siesa] 🧪 SANDBOX — requisición del despacho ${despacho?.id} NO se importó. ` +
+      `[siesa] 🧪 SANDBOX — salida en tránsito del despacho ${despacho?.id} NO se importó. ` +
         `${payload.Movimientos.length} movimiento(s) simulados como ${docto}.`,
     );
     return { ok: true, sandbox: true, docto, respuesta: { sandbox: true }, payload };
   }
 
-  const { data, status } = await axios.post(cfg.url(), payload, {
-    params: {
-      idCompania: cfg.idCompania(),
-      idSistema: cfg.idSistema(),
-      idDocumento: cfg.idDocumento(),
-      nombreDocumento: cfg.nombreDocumento(),
-    },
-    headers: {
-      conniKey: cfg.key(),
-      conniToken: cfg.token(),
-      "Content-Type": "application/json",
-    },
-    timeout: 60_000,
-    // No lanzamos por status: el conector devuelve 200 con errores adentro y
-    // también 4xx/5xx. Los evaluamos todos por igual acá abajo.
-    validateStatus: () => true,
-  });
+  const { data, status } = await postConector(payload);
+  if (status >= 400 || !respuestaOk(data)) throw errorRechazo("salida", status, data);
 
-  if (status >= 400 || !respuestaOk(data)) {
-    const err = new Error(
-      `SIESA rechazó la requisición [HTTP ${status}]: ${detalleError(data)}`,
-    );
-    // Adjuntamos la respuesta cruda para que el orquestador decida si el rechazo
-    // es un faltante de stock ajustable (registro 470) sin re-parsear el mensaje.
-    err.siesaData = data;
-    err.httpStatus = status;
-    throw err;
+  return { ok: true, docto: doctoDe(data), respuesta: data, payload };
+}
+
+/**
+ * Importa la ENTRADA en tránsito (clase 66) referenciando el consecutivo de la
+ * salida. SEGUNDO eslabón: solo tiene sentido con una salida ya aceptada.
+ *
+ * NO lleva ajuste de faltantes: la entrada no valida stock de la bodega origen
+ * (eso lo hizo la salida), valida que el docto de tránsito exista. Si falla, el
+ * orquestador reintenta SOLO la entrada (la salida ya está persistida).
+ *
+ * @param {object} despacho
+ * @param {string|number} salidaDocto - consecutivo de la salida (obligatorio)
+ * @returns {Promise<{ ok:true, docto:string, respuesta:object, payload:object } | { ok:true, vacio:true }>}
+ * @throws {ConfigSiesaError} si falta configuración
+ * @throws {Error} si falta el consecutivo de salida, o si SIESA rechaza / no responde
+ */
+export async function importarEntrada(despacho, salidaDocto) {
+  const faltan = configFaltante(despacho?.origen, despacho?.destino);
+  if (faltan.length) throw new ConfigSiesaError(faltan);
+
+  const consecutivo = trim(salidaDocto);
+  if (!consecutivo) {
+    // Sin el consecutivo de la salida la entrada es imposible. Es un error de
+    // programa (no debería llegar acá), no un rechazo de SIESA: sin siesaData.
+    throw new Error("No hay consecutivo de salida para armar la entrada en tránsito.");
   }
 
-  return {
-    ok: true,
-    docto: String(data?.detalle?.NroDocto || data?.NroDocto || data?.nro_docto || ""),
-    respuesta: data,
-    payload,
-  };
+  const payload = armarEntrada(despacho, consecutivo);
+
+  if (payload.Movimientos.length === 0) {
+    return { ok: true, vacio: true, docto: null, respuesta: null, payload: null };
+  }
+
+  if (sandboxOn()) {
+    const docto = `SANDBOX-CTE-${String(despacho?.id || "").slice(0, 8).toUpperCase()}`;
+    console.warn(
+      `[siesa] 🧪 SANDBOX — entrada en tránsito del despacho ${despacho?.id} NO se importó. ` +
+        `${payload.Movimientos.length} movimiento(s) simulados como ${docto} ` +
+        `(referencia salida ${consecutivo}).`,
+    );
+    return { ok: true, sandbox: true, docto, respuesta: { sandbox: true }, payload };
+  }
+
+  const { data, status } = await postConector(payload);
+  if (status >= 400 || !respuestaOk(data)) throw errorRechazo("entrada", status, data);
+
+  return { ok: true, docto: doctoDe(data), respuesta: data, payload };
 }

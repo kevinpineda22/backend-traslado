@@ -3,7 +3,8 @@ import * as DespachoModel from "../models/Despacho.model.js";
 import { FLUJOS } from "../config/flujos.js";
 import { tomarLock, liberarLock } from "./lock.service.js";
 import {
-  importarRequisicion,
+  importarSalida,
+  importarEntrada,
   ConfigSiesaError,
   configFaltante,
 } from "./siesaRequisicion.service.js";
@@ -48,7 +49,7 @@ async function marcar(despachoId, patch) {
 /**
  * Traslada `siesaData`/`httpStatus` de un error a otro que lo envuelve.
  *
- * `importarRequisicion` adjunta la respuesta CRUDA de SIESA al error. Cuando ese
+ * `importarSalida` adjunta la respuesta CRUDA de SIESA al error. Cuando ese
  * error se re-envuelve en un `new Error(...)` para agregar contexto, esos campos se
  * pierden y el correo al líder de inventarios llega sin el JSON — que es
  * justamente el dato que sirve para diagnosticar.
@@ -60,9 +61,13 @@ function conSiesaData(errNuevo, errOriginal) {
 }
 
 /**
- * Importa la requisición y, si SIESA la rechaza por FALTANTE DE STOCK y el ajuste
- * automático está habilitado, inserta las unidades faltantes con un ajuste de
- * entrada y reintenta el traslado UNA vez.
+ * Importa la SALIDA en tránsito y, si SIESA la rechaza por FALTANTE DE STOCK y el
+ * ajuste automático está habilitado, inserta las unidades faltantes con un ajuste
+ * de entrada y reintenta la salida UNA vez.
+ *
+ * POR QUÉ SOLO ENVUELVE LA SALIDA — el faltante de stock (registro 470) lo
+ * dispara la validación de la BODEGA ORIGEN, que solo ocurre en la salida. La
+ * entrada valida contra el docto de tránsito, no contra stock: nunca tira 470.
  *
  * Idempotencia del ajuste (defensa contra inventario fantasma duplicado):
  *   - El ajuste es un write al ERP. Solo se hace si `siesa_ajuste_estado` NO es
@@ -71,14 +76,14 @@ function conSiesaData(errNuevo, errOriginal) {
  *   - Corre DENTRO del lock del despacho (lo toma `enviarRequisicion`), así que
  *     no hay dos ajustes simultáneos para el mismo despacho.
  *
- * Devuelve lo mismo que `importarRequisicion`, o lanza (lo maneja el catch de
+ * Devuelve lo mismo que `importarSalida`, o lanza (lo maneja el catch de
  * `enviarRequisicion`, que marca la requisición pendiente/fallida como siempre).
  *
  * @param {object} despacho - cabecera + items (recién leído de la BD)
  */
-async function enviarConAjusteAutomatico(despacho) {
+async function enviarSalidaConAjuste(despacho) {
   try {
-    return await importarRequisicion(despacho);
+    return await importarSalida(despacho);
   } catch (err) {
     const autoOn = ajusteAutoHabilitado();
     const faltantes = autoOn ? detectarFaltantes(err.siesaData) : [];
@@ -138,8 +143,71 @@ async function enviarConAjusteAutomatico(despacho) {
     );
 
     // Reintento único: si vuelve a fallar, cae al catch de enviarRequisicion.
-    return await importarRequisicion(despacho);
+    return await importarSalida(despacho);
   }
+}
+
+/**
+ * Envía la transferencia EN TRÁNSITO completa: SALIDA (clase 65) y luego ENTRADA
+ * (clase 66) referenciando el consecutivo de la salida. Son DOS writes al ERP en
+ * una operación; el orden es obligado y la entrada depende del docto de la salida.
+ *
+ * IDEMPOTENCIA DEL PAR (defensa contra salida duplicada):
+ *   El docto de la salida se PERSISTE apenas SIESA la acepta, ANTES de intentar
+ *   la entrada. Si la entrada falla (o el proceso muere), el reintento ve
+ *   `siesa_salida_docto` ya cargado y SALTA la salida: manda solo la entrada con
+ *   ese consecutivo. Re-mandar la salida duplicaría el movimiento de tránsito.
+ *
+ * Devuelve el docto de la ENTRADA como `docto` (el que cierra el par) y ambos
+ * payloads bajo `payload: { salida, entrada }`. `vacio:true` si no hay ítems.
+ *
+ * @param {object} despacho - cabecera + items (recién leído de la BD)
+ */
+async function enviarTransito(despacho) {
+  // 1. SALIDA — salvo que ya haya entrado en un intento anterior. Ese es el caso
+  //    de reintento solo-entrada: la salida ya movió inventario y no se repite.
+  let salidaDocto = despacho.siesa_salida_docto || null;
+  let salidaPayload = despacho.siesa_salida_payload || null;
+
+  if (!salidaDocto) {
+    const salida = await enviarSalidaConAjuste(despacho);
+    if (salida.vacio) return { vacio: true }; // nada recolectado: no hay par que crear
+
+    salidaDocto = salida.docto;
+    salidaPayload = salida.payload;
+
+    // Persistir la salida INMEDIATAMENTE. Este es el punto crítico del cambio: si
+    // el proceso muere entre la salida y la entrada, el cron levanta el despacho y
+    // el reintento no re-manda la salida (no duplica el tránsito).
+    await marcar(despacho.id, {
+      siesa_salida_docto: salidaDocto,
+      siesa_salida_at: new Date().toISOString(),
+      siesa_salida_payload: salidaPayload,
+    });
+    despacho.siesa_salida_docto = salidaDocto; // por si algo relee en esta misma pasada
+
+    console.log(
+      `[requisicion] ➡️ despacho ${despacho.id}: salida en tránsito importada (docto ${
+        salidaDocto || "s/n"
+      }). Va la entrada.`,
+    );
+  } else {
+    console.log(
+      `[requisicion] ↩️ despacho ${despacho.id}: salida ya importada (docto ${salidaDocto}). ` +
+        "Reintento solo de la entrada.",
+    );
+  }
+
+  // 2. ENTRADA — referencia el consecutivo de la salida. Si falla, lanza y el
+  //    catch de enviarRequisicion marca pendiente/fallido; la salida queda
+  //    persistida para que el próximo intento mande solo la entrada.
+  const entrada = await importarEntrada(despacho, salidaDocto);
+
+  return {
+    docto: entrada.docto,
+    salidaDocto,
+    payload: { salida: salidaPayload, entrada: entrada.payload },
+  };
 }
 
 /**
@@ -182,7 +250,7 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     // de entorno que falta no es SIESA fallando, y reintentar no la va a crear.
     // Si consumiera intentos, un fin de semana de cron dejaría todo en 'fallido'
     // por algo que se arregla cargando una variable.
-    const faltan = configFaltante(despacho.origen);
+    const faltan = configFaltante(despacho.origen, despacho.destino);
     if (faltan.length) {
       await marcar(id, {
         siesa_estado: "pendiente",
@@ -216,10 +284,10 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     if (!reservado) return { estado: "omitido", motivo: "ya enviado (carrera)" };
 
     try {
-      const r = await enviarConAjusteAutomatico(despacho);
+      const r = await enviarTransito(despacho);
 
       if (r.vacio) {
-        // Despacho sin nada recolectado: no hay requisición que crear.
+        // Despacho sin nada recolectado: no hay transferencia que crear.
         await marcar(id, {
           siesa_estado: "enviado",
           siesa_error: null,
@@ -229,6 +297,9 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
         return { estado: "enviado", motivo: "sin ítems recolectados" };
       }
 
+      // `siesa_docto` = docto de la ENTRADA (cierra el par). El de la salida ya
+      // quedó en `siesa_salida_docto` cuando se importó. `siesa_payload` lleva los
+      // dos documentos { salida, entrada } para poder auditar el par completo.
       await marcar(id, {
         siesa_estado: "enviado",
         siesa_error: null,
@@ -236,7 +307,11 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
         siesa_enviado_at: new Date().toISOString(),
         siesa_payload: r.payload || null,
       });
-      console.log(`[requisicion] ✅ despacho ${id} importado a SIESA (docto ${r.docto || "s/n"})`);
+      console.log(
+        `[requisicion] ✅ despacho ${id} en tránsito completo (salida ${
+          r.salidaDocto || "s/n"
+        } → entrada ${r.docto || "s/n"})`,
+      );
       return { estado: "enviado" };
     } catch (err) {
       const esConfig = err instanceof ConfigSiesaError;
