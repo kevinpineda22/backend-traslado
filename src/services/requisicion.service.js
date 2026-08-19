@@ -37,14 +37,50 @@ import {
 const TABLE = "traslados_despachos";
 const MAX_INTENTOS = Number(process.env.SIESA_REQUISICION_MAX_INTENTOS) || 5;
 const LOCK_TTL_S = 120;
+// Tope del historial de intentos que se guarda por despacho. No crece sin límite.
+const MAX_LOG_INTENTOS = 50;
 
 const lockDe = (despachoId) => `siesa:requisicion:${despachoId}`;
+
+/**
+ * Modo SOLO SALIDA. Mientras SIESA devuelve los consecutivos de la salida de forma
+ * inestable, la ENTRADA (que los necesita) se PAUSA: se manda solo la salida y el
+ * par se cierra a mano cuando haya consecutivos.
+ *
+ * Con el modo prendido, una salida aceptada es TERMINAL — el despacho pasa a
+ * 'enviado' apenas SIESA acepta la salida, sin intentar la entrada. Al ser terminal
+ * (defensa 1), NO se reintenta: es lo que garantiza una única subida a SIESA.
+ */
+function soloSalida() {
+  return ["1", "true", "on", "si", "sí"].includes(
+    String(process.env.SIESA_SOLO_SALIDA || "").trim().toLowerCase(),
+  );
+}
 
 /** Marca el estado del envío en la cabecera del despacho. */
 async function marcar(despachoId, patch) {
   const { error } = await supabase.from(TABLE).update(patch).eq("id", despachoId);
   if (error) console.error(`[requisicion] no se pudo marcar ${despachoId}:`, error.message);
 }
+
+/**
+ * Historial de intentos, APPEND-ONLY. Antes `siesa_error` guardaba solo el último
+ * intento y el anterior se perdía. Para certificar que a SIESA se sube UNA sola vez
+ * hay que poder ver CADA intento, no el último: qué pasó, cuándo, en qué fase, si
+ * hubo ajuste. Cada entrada es una foto del intento. Se topea a los últimos N.
+ *
+ * @param {object} despacho - el despacho recién leído (trae `siesa_intentos_log`)
+ * @param {object} entrada  - la entrada del intento actual
+ * @returns {object[]} el log con la entrada nueva anexada
+ */
+function anexarIntento(despacho, entrada) {
+  const prev = Array.isArray(despacho.siesa_intentos_log) ? despacho.siesa_intentos_log : [];
+  return [...prev, entrada].slice(-MAX_LOG_INTENTOS);
+}
+
+/** ¿Se hizo un ajuste de inventario para este despacho? (para el log del intento) */
+const ajusteDelIntento = (despacho) =>
+  despacho.siesa_ajuste_estado === "hecho" ? "hecho" : null;
 
 /**
  * Traslada `siesaData`/`httpStatus` de un error a otro que lo envuelve.
@@ -164,48 +200,94 @@ async function enviarSalidaConAjuste(despacho) {
  * @param {object} despacho - cabecera + items (recién leído de la BD)
  */
 async function enviarTransito(despacho) {
-  // 1. SALIDA — salvo que ya haya entrado en un intento anterior. Ese es el caso
-  //    de reintento solo-entrada: la salida ya movió inventario y no se repite.
+  // IDEMPOTENCIA ANCLADA EN LA HORA DE ACEPTACIÓN, NO EN EL CONSECUTIVO.
+  //
+  // El bug que duplicaba inventario: SIESA aceptaba la salida (movía inventario)
+  // pero el código no lograba LEER el consecutivo (doctoDe → ""). Con el docto
+  // vacío, `siesa_salida_docto` quedaba "" (falsy), y un guard que dependa del
+  // docto creía que la salida NUNCA entró → la re-mandaba en cada reintento.
+  //
+  // La prueba de que la salida entró NO es el consecutivo (que puede no leerse),
+  // es la HORA en que SIESA la aceptó. Por eso el guard mira `siesa_salida_at`:
+  // si tiene valor, la salida ya movió inventario y JAMÁS se re-manda.
+  const salidaYaEnviada =
+    Boolean(despacho.siesa_salida_at) || Boolean(despacho.siesa_salida_docto);
+
   let salidaDocto = despacho.siesa_salida_docto || null;
   let salidaPayload = despacho.siesa_salida_payload || null;
+  let salidaRespuesta = despacho.siesa_salida_respuesta || null;
 
-  if (!salidaDocto) {
-    const salida = await enviarSalidaConAjuste(despacho);
+  if (!salidaYaEnviada) {
+    let salida;
+    try {
+      salida = await enviarSalidaConAjuste(despacho);
+    } catch (e) {
+      if (!e.fase) e.fase = "salida";
+      throw e;
+    }
     if (salida.vacio) return { vacio: true }; // nada recolectado: no hay par que crear
 
-    salidaDocto = salida.docto;
+    salidaDocto = salida.docto || null;
     salidaPayload = salida.payload;
+    salidaRespuesta = salida.respuesta || null;
 
-    // Persistir la salida INMEDIATAMENTE. Este es el punto crítico del cambio: si
-    // el proceso muere entre la salida y la entrada, el cron levanta el despacho y
-    // el reintento no re-manda la salida (no duplica el tránsito).
+    // Persistir la ACEPTACIÓN de inmediato, anclada en `siesa_salida_at`. Este es
+    // el punto crítico de la idempotencia: si el proceso muere después de esto, el
+    // reintento ve la salida ya enviada y NO la re-manda (no duplica el tránsito),
+    // AUNQUE no se haya podido leer el consecutivo. Guardamos también la respuesta
+    // cruda de SIESA — es la constancia de la subida y de dónde sale el docto.
+    const ahora = new Date().toISOString();
     await marcar(despacho.id, {
       siesa_salida_docto: salidaDocto,
-      siesa_salida_at: new Date().toISOString(),
+      siesa_salida_at: ahora,
       siesa_salida_payload: salidaPayload,
+      siesa_salida_respuesta: salidaRespuesta,
     });
-    despacho.siesa_salida_docto = salidaDocto; // por si algo relee en esta misma pasada
+    despacho.siesa_salida_at = ahora; // por si algo relee en esta misma pasada
+    despacho.siesa_salida_docto = salidaDocto;
 
     console.log(
       `[requisicion] ➡️ despacho ${despacho.id}: salida en tránsito importada (docto ${
-        salidaDocto || "s/n"
-      }). Va la entrada.`,
+        salidaDocto || "SIN CONSECUTIVO LEÍDO"
+      }).`,
     );
   } else {
     console.log(
-      `[requisicion] ↩️ despacho ${despacho.id}: salida ya importada (docto ${salidaDocto}). ` +
-        "Reintento solo de la entrada.",
+      `[requisicion] ↩️ despacho ${despacho.id}: salida ya enviada (docto ${
+        salidaDocto || "s/n"
+      }). No se re-manda — se evita duplicar el movimiento.`,
     );
   }
 
-  // 2. ENTRADA — referencia el consecutivo de la salida. Si falla, lanza y el
-  //    catch de enviarRequisicion marca pendiente/fallido; la salida queda
-  //    persistida para que el próximo intento mande solo la entrada.
-  const entrada = await importarEntrada(despacho, salidaDocto);
+  // MODO SOLO SALIDA — la entrada se pausa a propósito (le faltan los consecutivos
+  // de SIESA). La salida ya movió inventario: el despacho es TERMINAL y el par se
+  // cierra a mano cuando SIESA entregue los consecutivos. Sin entrada, sin
+  // reintento, sin duplicado.
+  if (soloSalida()) {
+    return {
+      soloSalida: true,
+      docto: null, // no hay entrada en este modo
+      salidaDocto,
+      salidaRespuesta,
+      payload: { salida: salidaPayload },
+    };
+  }
+
+  // FLUJO COMPLETO — la entrada referencia el consecutivo de la salida. Si el
+  // consecutivo no se pudo leer (salidaDocto null), la entrada lanza y el despacho
+  // queda 'pendiente', pero la salida NO se re-manda (ya está anclada arriba).
+  let entrada;
+  try {
+    entrada = await importarEntrada(despacho, salidaDocto);
+  } catch (e) {
+    if (!e.fase) e.fase = "entrada";
+    throw e;
+  }
 
   return {
     docto: entrada.docto,
     salidaDocto,
+    salidaRespuesta,
     payload: { salida: salidaPayload, entrada: entrada.payload },
   };
 }
@@ -252,9 +334,17 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     // por algo que se arregla cargando una variable.
     const faltan = configFaltante(despacho.origen, despacho.destino);
     if (faltan.length) {
+      const motivoCfg = `Configuración incompleta: falta ${faltan.join(", ")}`;
       await marcar(id, {
         siesa_estado: "pendiente",
-        siesa_error: `Configuración incompleta: falta ${faltan.join(", ")}`,
+        siesa_error: motivoCfg,
+        siesa_intentos_log: anexarIntento(despacho, {
+          n: Number(despacho.siesa_intentos) || 0,
+          at: new Date().toISOString(),
+          estado: "pendiente",
+          fase: "config",
+          error: motivoCfg,
+        }),
       });
       console.error(`[requisicion] ⚠️ despacho ${id} sin enviar — falta ${faltan.join(", ")}`);
       return { estado: "pendiente", motivo: "config" };
@@ -285,16 +375,53 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
 
     try {
       const r = await enviarTransito(despacho);
+      const ahora = new Date().toISOString();
 
       if (r.vacio) {
         // Despacho sin nada recolectado: no hay transferencia que crear.
         await marcar(id, {
           siesa_estado: "enviado",
           siesa_error: null,
-          siesa_enviado_at: new Date().toISOString(),
+          siesa_enviado_at: ahora,
           siesa_docto: null,
+          siesa_intentos_log: anexarIntento(despacho, {
+            n: intentos + 1,
+            at: ahora,
+            estado: "enviado",
+            fase: "vacio",
+            resultado: "sin ítems recolectados",
+          }),
         });
         return { estado: "enviado", motivo: "sin ítems recolectados" };
+      }
+
+      if (r.soloSalida) {
+        // MODO SOLO SALIDA — terminal apenas SIESA acepta la salida. `siesa_docto`
+        // toma el consecutivo de la SALIDA (no hay entrada que cierre el par), y
+        // `siesa_salida_respuesta` deja la constancia cruda de la subida.
+        await marcar(id, {
+          siesa_estado: "enviado",
+          siesa_error: null,
+          siesa_docto: r.salidaDocto || null,
+          siesa_enviado_at: ahora,
+          siesa_payload: r.payload || null,
+          siesa_salida_respuesta: r.salidaRespuesta || null,
+          siesa_intentos_log: anexarIntento(despacho, {
+            n: intentos + 1,
+            at: ahora,
+            estado: "enviado",
+            fase: "salida",
+            resultado: "solo salida",
+            salida_docto: r.salidaDocto || null,
+            ajuste: ajusteDelIntento(despacho),
+          }),
+        });
+        console.log(
+          `[requisicion] ✅ despacho ${id}: SOLO SALIDA enviada (docto ${
+            r.salidaDocto || "SIN CONSECUTIVO LEÍDO"
+          }). Entrada pausada.`,
+        );
+        return { estado: "enviado", soloSalida: true };
       }
 
       // `siesa_docto` = docto de la ENTRADA (cierra el par). El de la salida ya
@@ -304,8 +431,19 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
         siesa_estado: "enviado",
         siesa_error: null,
         siesa_docto: r.docto || null,
-        siesa_enviado_at: new Date().toISOString(),
+        siesa_enviado_at: ahora,
         siesa_payload: r.payload || null,
+        siesa_salida_respuesta: r.salidaRespuesta || null,
+        siesa_intentos_log: anexarIntento(despacho, {
+          n: intentos + 1,
+          at: ahora,
+          estado: "enviado",
+          fase: "entrada",
+          resultado: "completo",
+          salida_docto: r.salidaDocto || null,
+          entrada_docto: r.docto || null,
+          ajuste: ajusteDelIntento(despacho),
+        }),
       });
       console.log(
         `[requisicion] ✅ despacho ${id} en tránsito completo (salida ${
@@ -318,10 +456,20 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
       const agotado = intentos + 1 >= MAX_INTENTOS;
       // Config incompleta no consume el cupo de reintentos: no es SIESA fallando.
       const estado = esConfig ? "pendiente" : agotado ? "fallido" : "pendiente";
+      const msg = String(err.message).slice(0, 1000);
 
       await marcar(id, {
         siesa_estado: estado,
-        siesa_error: String(err.message).slice(0, 1000),
+        siesa_error: msg,
+        siesa_intentos_log: anexarIntento(despacho, {
+          n: intentos + 1,
+          at: new Date().toISOString(),
+          estado,
+          fase: err.fase || "envio",
+          error: msg,
+          http_status: err.httpStatus ?? null,
+          ajuste: ajusteDelIntento(despacho),
+        }),
       });
       console.error(
         `[requisicion] ❌ despacho ${id} intento ${intentos + 1}/${MAX_INTENTOS}: ${err.message}`,

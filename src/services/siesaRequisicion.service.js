@@ -399,9 +399,46 @@ function detalleError(data) {
   return aTexto(data).slice(0, 800);
 }
 
+/**
+ * Busca recursivamente la primera clave tipo consecutivo con valor útil.
+ *
+ * El conector devuelve el NroDocto en formas distintas según el caso (bajo
+ * `detalle`, dentro de un array `Documentos`, anidado). Un lookup por rutas fijas
+ * se pierde el consecutivo y dispara el bug de la salida duplicada. Esta búsqueda
+ * recorre el objeto y toma el primer valor de una clave `NroDocto`/`nro_docto`/
+ * `consecutivo`/`consec_docto` que NO sea vacío ni el placeholder "0".
+ */
+function buscarConsecutivo(obj, prof = 0) {
+  if (obj == null || prof > 4) return "";
+  if (Array.isArray(obj)) {
+    for (const x of obj) {
+      const r = buscarConsecutivo(x, prof + 1);
+      if (r) return r;
+    }
+    return "";
+  }
+  if (typeof obj === "object") {
+    for (const [k, v] of Object.entries(obj)) {
+      if (/^(nro_?docto|consecutivo|consec_docto)$/i.test(k)) {
+        const s = String(v ?? "").trim();
+        if (s && s !== "0") return s;
+      }
+    }
+    for (const v of Object.values(obj)) {
+      const r = buscarConsecutivo(v, prof + 1);
+      if (r) return r;
+    }
+  }
+  return "";
+}
+
 /** Consecutivo que SIESA asignó a un documento, sin importar cómo lo envuelva. */
 function doctoDe(data) {
-  return String(data?.detalle?.NroDocto || data?.NroDocto || data?.nro_docto || "");
+  const directo = String(data?.detalle?.NroDocto || data?.NroDocto || data?.nro_docto || "").trim();
+  if (directo && directo !== "0") return directo;
+  // Si las rutas conocidas no dieron, barremos el cuerpo entero. Mejor recuperar
+  // el consecutivo que dejarlo vacío y arriesgar el flujo de la entrada.
+  return buscarConsecutivo(data);
 }
 
 /**
