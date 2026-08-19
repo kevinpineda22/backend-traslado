@@ -107,7 +107,7 @@ const recolectarSchema = z.object({
         cantidad: z.number().min(0, "cantidad no puede ser negativa"),
         agotado: z.boolean().optional(),
         motivo: z
-          .enum(["sin_stock", "surtido_parcial", "inventario_inflado"])
+          .enum(["sin_stock", "surtido_parcial", "inventario_inflado", "corta_fecha_vencido"])
           .nullable()
           .optional(),
         nueva_unidad_medida: z.string().optional(),

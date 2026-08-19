@@ -3,8 +3,13 @@ import { createError } from "../middleware/errorHandler.js";
 
 const TABLE = "traslados_items";
 
-/** Motivos válidos de faltante (espejo del CHECK de la migración 004). */
-export const MOTIVOS_FALTANTE = ["sin_stock", "surtido_parcial", "inventario_inflado"];
+/** Motivos válidos de faltante (espejo del CHECK de las migraciones 004 + 031). */
+export const MOTIVOS_FALTANTE = [
+  "sin_stock",
+  "surtido_parcial",
+  "inventario_inflado",
+  "corta_fecha_vencido",
+];
 
 /**
  * Canonicalización a UND de lo que despachó el despachador.

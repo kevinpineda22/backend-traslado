@@ -29,6 +29,7 @@ const MOTIVO_LABEL = {
   sin_stock: "Agotado",
   surtido_parcial: "Surtido parcial en PV",
   inventario_inflado: "Inventario Fantasma",
+  corta_fecha_vencido: "Corta fecha/Vencido",
 };
 
 const MOTIVO_INFLADO = "inventario_inflado";
