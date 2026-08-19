@@ -542,7 +542,10 @@ export function htmlManifiestoCarga(despacho, manifiesto, conAdjunto) {
   const ruta = `${nombreSede(despacho?.origen)} → ${nombreSede(despacho?.destino)}`;
   const numero = String(manifiesto?.despacho_id || despacho?.id || "").slice(0, 8).toUpperCase();
   const pesoKg = Number(manifiesto?.peso_kg || 0).toLocaleString("es-CO");
-  const items = despacho?.traslados_items || [];
+  // Los EXCLUIDOS a mano (siesa_omitido) no viajan en el camión: no cuentan como
+  // cargados ni en el total. El manifiesto debe reflejar lo que sube, no lo que
+  // el admin sacó del envío.
+  const items = (despacho?.traslados_items || []).filter((it) => !it.siesa_omitido);
   const renglonesCargados = items.filter((it) => Number(it.cantidad_despachador) > 0).length;
 
   const bloque = (titulo, filas) => `
