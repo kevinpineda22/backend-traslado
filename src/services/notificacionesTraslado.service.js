@@ -246,11 +246,18 @@ function salioDeOrigen(it) {
 /**
  * Filas del comparativo Enviado vs Contado (en UND). Enviado = cantidad_despachador
  * × factor (canonicalización estándar); Contado = cantidad_auditor (ya en UND).
- * Solo ítems que salieron de origen + extras agregados por el auditor.
+ * Solo ítems que salieron de origen + extras agregados por el auditor. Los
+ * EXCLUIDOS a mano (siesa_omitido) quedan fuera: el auditor nunca los contó
+ * (obtenerDetalle los omite), así que aparecerían como diferencia fantasma
+ * "despachó X, contó 0". Misma regla que ocultoParaAuditor en despacho.service.
  */
 function filasComparativo(items) {
   return items
-    .filter((it) => salioDeOrigen(it) || it.agregado_por_auditor || it.no_recibido)
+    .filter(
+      (it) =>
+        (salioDeOrigen(it) || it.agregado_por_auditor || it.no_recibido) &&
+        it.siesa_omitido !== true,
+    )
     .map((it) => {
       const noRecibido = it.no_recibido === true;
       const enviado = (Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1);

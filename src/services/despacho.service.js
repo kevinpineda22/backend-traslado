@@ -529,6 +529,24 @@ export function noSalioDeOrigen(item) {
 }
 
 /**
+ * ¿El ítem NO debe llegar al auditor? Une dos motivos distintos:
+ *   1. No salió de origen (agotado / recolectado en 0) — no hay nada físico.
+ *   2. El admin lo EXCLUYÓ (`siesa_omitido`) — se maneja aparte, fuera del
+ *      flujo automático, así que tampoco entra a la recepción.
+ *
+ * OJO: un excluido SÍ salió de origen (su cantidad no se toca), por eso NO va
+ * dentro de noSalioDeOrigen — ese nombre mentiría, y el correo de faltantes que
+ * lo usa cuenta lo que físicamente no viajó, cosa que un excluido sí hizo.
+ *
+ * Tiene que ser la MISMA regla en la lista del auditor y en la comparación: si
+ * el auditor no ve un ítem pero la comparación lo cuenta, le aparece una
+ * diferencia fantasma que no puede resolver.
+ */
+export function ocultoParaAuditor(item) {
+  return noSalioDeOrigen(item) || item.siesa_omitido === true;
+}
+
+/**
  * Auditoría — Paso 1: COMPARAR (solo lectura, no firma, no cambia estado).
  * Revela la comparación entre lo que recolectó el despachador y lo que contó el
  * auditor. `match` es true si ninguna diferencia es distinta de 0.
@@ -562,7 +580,7 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
   let match = true;
   // Devolvemos TODOS los items comparados (no solo los que difieren) para que el
   // panel muestre la tabla completa; `match` indica si hubo alguna discrepancia.
-  const visibles = (despacho.traslados_items || []).filter((it) => !noSalioDeOrigen(it));
+  const visibles = (despacho.traslados_items || []).filter((it) => !ocultoParaAuditor(it));
   const differences = visibles.map((item) => {
     const cantidadAuditor = conteoAuditor.has(item.id)
       ? conteoAuditor.get(item.id)
