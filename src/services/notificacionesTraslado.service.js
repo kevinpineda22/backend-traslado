@@ -247,11 +247,18 @@ function salioDeOrigen(it) {
 /**
  * Filas del comparativo Enviado vs Contado (en UND). Enviado = cantidad_despachador
  * × factor (canonicalización estándar); Contado = cantidad_auditor (ya en UND).
- * Solo ítems que salieron de origen + extras agregados por el auditor.
+ * Solo ítems que salieron de origen + extras agregados por el auditor. Los
+ * EXCLUIDOS a mano (siesa_omitido) quedan fuera: el auditor nunca los contó
+ * (obtenerDetalle los omite), así que aparecerían como diferencia fantasma
+ * "despachó X, contó 0". Misma regla que ocultoParaAuditor en despacho.service.
  */
 function filasComparativo(items) {
   return items
-    .filter((it) => salioDeOrigen(it) || it.agregado_por_auditor || it.no_recibido)
+    .filter(
+      (it) =>
+        (salioDeOrigen(it) || it.agregado_por_auditor || it.no_recibido) &&
+        it.siesa_omitido !== true,
+    )
     .map((it) => {
       const noRecibido = it.no_recibido === true;
       const enviado = (Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1);
@@ -536,7 +543,10 @@ export function htmlManifiestoCarga(despacho, manifiesto, conAdjunto) {
   const ruta = `${nombreSede(despacho?.origen)} → ${nombreSede(despacho?.destino)}`;
   const numero = String(manifiesto?.despacho_id || despacho?.id || "").slice(0, 8).toUpperCase();
   const pesoKg = Number(manifiesto?.peso_kg || 0).toLocaleString("es-CO");
-  const items = despacho?.traslados_items || [];
+  // Los EXCLUIDOS a mano (siesa_omitido) no viajan en el camión: no cuentan como
+  // cargados ni en el total. El manifiesto debe reflejar lo que sube, no lo que
+  // el admin sacó del envío.
+  const items = (despacho?.traslados_items || []).filter((it) => !it.siesa_omitido);
   const renglonesCargados = items.filter((it) => Number(it.cantidad_despachador) > 0).length;
 
   const bloque = (titulo, filas) => `

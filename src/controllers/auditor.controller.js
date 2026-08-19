@@ -60,12 +60,12 @@ export async function obtenerDetalle(req, res, next) {
     // Auditoría ciega: ocultar cantidad_despachador y firma del despachador
     const { traslados_firmas, traslados_items, ...cabecera } = despacho;
 
-    // Los no enviados se omiten ENTEROS. Esto no rompe la ceguera: el auditor
-    // nunca supo que existían, así que no puede deducir nada de su ausencia
-    // (no tiene la lista original del admin contra la cual comparar).
-    // MISMA regla que usa compararAuditoria — ver DespachoService.noSalioDeOrigen.
+    // Los no enviados y los EXCLUIDOS a mano (siesa_omitido) se omiten ENTEROS.
+    // Esto no rompe la ceguera: el auditor nunca supo que existían, así que no
+    // puede deducir nada de su ausencia (no tiene la lista original del admin).
+    // MISMA regla que usa compararAuditoria — ver DespachoService.ocultoParaAuditor.
     const itemsCiegos = (traslados_items || [])
-      .filter((it) => !DespachoService.noSalioDeOrigen(it))
+      .filter((it) => !DespachoService.ocultoParaAuditor(it))
       .map((item) => ({
         id: item.id,
         codigo_item: item.codigo_item,
