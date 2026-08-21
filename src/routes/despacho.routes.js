@@ -34,6 +34,8 @@ router.patch("/:id/items/siesa-omitido", DespachoController.marcarSiesaOmitido);
 router.patch("/:id/estado", validators.cambiarEstado, DespachoController.cambiarEstado);
 router.post("/:id/iniciar", DespachoController.iniciarRecoleccion);
 router.post("/:id/abandonar", DespachoController.abandonar);
+// Enviar la primera parte: lo pendiente pasa a un traslado nuevo (flujo Llano).
+router.post("/:id/dividir", DespachoController.dividir);
 router.post("/:id/recolectar", validators.recolectar, DespachoController.recolectar);
 // Camión cargado: cierra la recolección CON el manifiesto y dispara SIESA.
 router.post("/:id/cargar", validators.cargarCamion, DespachoController.cargarCamion);

@@ -392,6 +392,27 @@ export async function assertPuedeRecolectar(despachoId, despachadorId) {
 }
 
 /**
+ * Envía lo que ya está listo y pasa lo pendiente a un traslado nuevo.
+ *
+ * Solo el flujo LLANO. En General finalizar EXIGE que cada renglón esté
+ * resuelto, así que no existe el escenario de "lo dejo a medias": la persona
+ * tiene que decidir producto por producto antes de cerrar. El llano es el que
+ * auto-clasifica lo que quedó sin tocar, y por eso es el que necesita esta
+ * salida (ver el encabezado de sql/032).
+ */
+export async function dividirEnPartes(id) {
+  const despacho = await DespachoModel.findById(id);
+  if (!despacho) throw createError(404, "Despacho no encontrado");
+  if ((despacho.flujo || "general") !== "llano") {
+    throw createError(
+      409,
+      "Enviar por partes es del flujo Llano. En General hay que resolver cada producto antes de cerrar.",
+    );
+  }
+  return DespachoModel.dividirEnPartes(id);
+}
+
+/**
  * CAMIÓN CARGADO — cierra la recolección con el manifiesto de carga.
  *
  * Es el reemplazo del cierre directo: antes el despachador firmaba y el despacho

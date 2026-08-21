@@ -602,6 +602,140 @@ export async function abandonarRecoleccion(id, despachadorId) {
 }
 
 /**
+ * DIVIDIR EN PARTES — manda lo que ya está listo y pasa el resto a un traslado
+ * nuevo (ver sql/032).
+ *
+ * QUÉ SE QUEDA Y QUÉ SE VA
+ *   · Se QUEDA lo que la persona atendió: contado (> 0) o con un motivo puesto a
+ *     mano. Un fantasma marcado por alguien que fue al pasillo es un dato real y
+ *     viaja en el cierre de hoy.
+ *   · Se VA lo que nadie tocó: sin motivo, sin `agotado`, en 0 o en null.
+ *
+ * Es EXACTAMENTE el mismo criterio con el que la auto-clasificación del flujo
+ * llano decide a quién ponerle motivo (ver `cambiarEstado`). Tiene que ser el
+ * mismo: lo que se lleva la parte 2 es justo lo que, de quedarse, se llevaría un
+ * motivo inventado.
+ *
+ * POR QUÉ SE MUEVEN LAS FILAS EN VEZ DE COPIARLAS
+ * Se reapunta `despacho_id`. Copiar obligaría a reconstruir la foto del ítem
+ * (stock de origen y destino, consumo, sugerido, peso) que se tomó cuando el
+ * admin armó el traslado, y cualquier campo que se olvide sale como un dato
+ * plausible pero falso. Moviendo, la foto viaja intacta.
+ *
+ * `recolectado_por` se limpia en los que se mueven: el candado por renglón
+ * (migración 023) dice quién lo está contando AHORA, y en la parte 2 no lo está
+ * contando nadie todavía. Si quedara sellado, el que la tome mañana se comería
+ * un "lo está contando otra persona" sobre un renglón que nadie tiene.
+ *
+ * @param {string} id - despacho a dividir
+ * @returns {Promise<{ despacho: object, parte2: object, movidos: number }>}
+ */
+export async function dividirEnPartes(id) {
+  const { data: cab } = await supabase
+    .from(TABLE)
+    .select("estado, origen, destino, flujo, criterios, admin_id, inactivo, parte_num")
+    .eq("id", id)
+    .single();
+
+  if (!cab) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (cab.inactivo) {
+    const e = new Error("Este traslado está inactivo. Reactivalo desde el panel de alertas.");
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  // Solo mientras se está recolectando. Después de "Pendiente_carga" el conteo ya
+  // se cerró y la auto-clasificación del llano YA corrió: dividir ahí dejaría la
+  // parte 2 llena de renglones con motivos automáticos que no le corresponden.
+  if (cab.estado !== "En_recoleccion") {
+    const e = new Error(
+      `Solo se puede enviar una primera parte mientras se está recolectando. Este traslado está en ${cab.estado}.`,
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  const { data: items, error: errItems } = await supabase
+    .from("traslados_items")
+    .select("id, cantidad_despachador, motivo, agotado")
+    .eq("despacho_id", id);
+  if (errItems) throw new Error(`Error al leer los ítems: ${errItems.message}`);
+
+  const sinTocar = (items || []).filter(
+    (it) =>
+      !it.motivo &&
+      !it.agotado &&
+      (it.cantidad_despachador == null || Number(it.cantidad_despachador) === 0),
+  );
+  const atendidos = (items || []).length - sinTocar.length;
+
+  if (sinTocar.length === 0) {
+    const e = new Error(
+      "No hay productos pendientes: ya registraste todos. Cerrá la recolección normalmente.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (atendidos === 0) {
+    const e = new Error(
+      "Todavía no registraste ningún producto. Una primera parte vacía dejaría el traslado igual pero partido en dos.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
+  const ahora = new Date().toISOString();
+
+  // La parte 2 nace en "Creado" y SIN dueño: va al pool. El que empezó puede
+  // estar de descanso o en otra sede mañana, y un traslado reservado a alguien
+  // que no viene es un traslado que no sale.
+  const { data: parte2, error: errCab } = await supabase
+    .from(TABLE)
+    .insert({
+      flujo: cab.flujo || "general",
+      origen: cab.origen,
+      destino: cab.destino,
+      criterios: cab.criterios,
+      admin_id: cab.admin_id,
+      despachador_id: null,
+      estado: "Creado",
+      disponible_at: ahora,
+      parte_de: id,
+      // Si ya era una parte 2, la siguiente es la 3: dividir puede pasar de nuevo.
+      parte_num: (Number(cab.parte_num) || 1) + 1,
+    })
+    .select()
+    .single();
+  if (errCab) throw new Error(`Error al crear la parte 2: ${errCab.message}`);
+
+  // Mover los pendientes. Si esto falla, la parte 2 queda vacía: se borra para no
+  // dejar un traslado fantasma de 0 renglones en el pool de mañana.
+  const { error: errMover } = await supabase
+    .from("traslados_items")
+    .update({ despacho_id: parte2.id, recolectado_por: null })
+    .in(
+      "id",
+      sinTocar.map((it) => it.id),
+    );
+  if (errMover) {
+    await supabase.from(TABLE).delete().eq("id", parte2.id);
+    throw new Error(`Error al mover los pendientes: ${errMover.message}`);
+  }
+
+  await supabase.from(TABLE).update({ updated_at: ahora }).eq("id", id);
+
+  return { despacho: await findById(id), parte2, movidos: sinTocar.length };
+}
+
+/**
  * Reasignar (o quitar) el despachador de un despacho.
  */
 export async function updateDespachador(id, despachadorId) {

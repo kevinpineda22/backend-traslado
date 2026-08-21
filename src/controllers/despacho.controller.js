@@ -194,6 +194,20 @@ export async function marcarSiesaOmitido(req, res, next) {
   }
 }
 
+/**
+ * POST /api/despachos/:id/dividir
+ * Envia la primera parte: lo pendiente se va a un traslado nuevo.
+ * Resp: { ok, data: { despacho, parte2, movidos } }
+ */
+export async function dividir(req, res, next) {
+  try {
+    const data = await DespachoService.dividirEnPartes(req.params.id);
+    res.status(201).json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function crear(req, res, next) {
   try {
     const data = await DespachoService.crear(req.body);
