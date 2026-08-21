@@ -1077,7 +1077,10 @@ export async function findAllWithResumen(filters = {}) {
 export async function findForAuditor({ sede } = {}) {
   let query = supabase
     .from(TABLE)
-    .select("id, origen, destino, estado, created_at, updated_at")
+    // `parte_num` viaja para que el recibidor sepa CUÁL parte tiene enfrente: dos
+    // partes de la misma ruta se ven idénticas en la lista (mismo origen, mismo
+    // destino, mismo día) y recibir la equivocada es un error fácil de cometer.
+    .select("id, origen, destino, estado, created_at, updated_at, parte_num")
     .in("estado", ["Recolectado", "En_recepcion"])
     // Los inactivos desaparecen también del auditor (ver aplicarFiltroInactivo).
     .eq("inactivo", false);
