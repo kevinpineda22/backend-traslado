@@ -230,11 +230,44 @@ export async function resetRecoleccionByDespacho(despachoId) {
  */
 export async function insertItemAuditor(despachoId, item) {
   const cantidadAuditor = Number(item.cantidad_auditor) || 0;
+  const codigo = String(item.codigo_item || "").trim() || "S/COD";
+
+  // RED DE SEGURIDAD: no duplicar un renglón que YA está en el despacho.
+  //
+  // El panel decide si un escaneo es "extra" o no, y ya hubo un bug ahí: cuando
+  // el lector daba un EAN, el match fallaba, SIESA resolvía el código bueno y
+  // nadie volvía a buscarlo — así el ítem se insertaba como sobrante aunque
+  // estuviera en la lista. El renglón quedaba partido en dos: uno con su pedido
+  // y otro con pedido 0 y una diferencia en rojo que no era real.
+  //
+  // Eso se corrigió en el panel, pero la guarda vive acá porque esta es la única
+  // puerta por la que entra un renglón agregado: cualquier otro camino que caiga
+  // en lo mismo queda cubierto sin depender de que el cliente venga bien.
+  //
+  // Se SUMA al renglón existente en vez de rechazar: la mercancía se contó de
+  // verdad, y perder ese conteo sería peor que el duplicado que estamos evitando.
+  const { data: existente } = await supabase
+    .from(TABLE)
+    .select("id, cantidad_auditor, cantidad_despachador, factor")
+    .eq("despacho_id", despachoId)
+    .eq("codigo_item", codigo)
+    .limit(1)
+    .maybeSingle();
+
+  if (existente) {
+    const total = (Number(existente.cantidad_auditor) || 0) + cantidadAuditor;
+    console.warn(
+      `[auditoría] ${codigo} ya existe en el despacho ${despachoId}: se suma al renglón ` +
+        `(${existente.cantidad_auditor ?? 0} + ${cantidadAuditor} = ${total}) en vez de duplicarlo.`,
+    );
+    return updateCantidadAuditor(existente.id, total);
+  }
+
   const { data, error } = await supabase
     .from(TABLE)
     .insert({
       despacho_id: despachoId,
-      codigo_item: String(item.codigo_item || "").trim() || "S/COD",
+      codigo_item: codigo,
       descripcion: item.descripcion || null,
       unidad_medida: item.unidad_medida || null,
       // Grupo y subgrupo del catálogo (los completa `completarFichaItem`). Sin
