@@ -199,6 +199,26 @@ export async function marcarSiesaOmitido(req, res, next) {
  * Envia la primera parte: lo pendiente se va a un traslado nuevo.
  * Resp: { ok, data: { despacho, parte2, movidos } }
  */
+/**
+ * GET /api/despachos/manifiestos?correo=quien@merkahorrosas.com
+ * Los manifiestos en los que participó esa persona, del más nuevo al más viejo.
+ *
+ * El correo se EXIGE: sin él esto devolvería los manifiestos de todo el mundo, y
+ * el panel del despachador es de cada quien.
+ */
+export async function misManifiestos(req, res, next) {
+  try {
+    const correo = String(req.query.correo || "").trim();
+    if (!correo) {
+      return res.status(400).json({ ok: false, error: "correo es requerido" });
+    }
+    const data = await DespachoService.manifiestosDeDespachador(correo);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function dividir(req, res, next) {
   try {
     const data = await DespachoService.dividirEnPartes(req.params.id);

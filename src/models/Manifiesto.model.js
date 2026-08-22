@@ -162,6 +162,67 @@ export async function crear(despachoId, payload = {}) {
   return data;
 }
 
+/**
+ * Manifiestos en los que participó una persona, del más nuevo al más viejo.
+ *
+ * QUÉ CUENTA COMO "PARTICIPÓ"
+ * Dos cosas, y hacen falta las dos:
+ *   1. Cargó el camión — `manifiesto.despachador_id` es su correo. Es quien firma
+ *      y quien se para frente al conductor.
+ *   2. Era el despachador del traslado — `despacho.despachador_id`. Alguien puede
+ *      haber recolectado todo y que el camión lo cierre otro que estaba de turno
+ *      cuando llegó (eso es a propósito, ver `cargarCamion`). Ese traslado también
+ *      es suyo.
+ *
+ * POR QUÉ DOS CONSULTAS Y NO UN `or` CON JOIN
+ * Las dos condiciones viven en TABLAS distintas (una en el manifiesto, otra en el
+ * despacho). Un `.or()` de Supabase no cruza la relación, así que se piden por
+ * separado y se unen por id acá. Con volúmenes de manifiestos —uno por traslado—
+ * el costo es irrelevante frente a una consulta que no se puede leer.
+ *
+ * Trae la ruta y la fecha del despacho pegadas: la lista tiene que poder
+ * identificarse de un vistazo ("Copacabana → Barbosa, 22/08, placa ABC123") y sin
+ * eso el panel tendría que pedir cada despacho por separado.
+ *
+ * @param {string} correo
+ * @param {number} [limite=60] - tope de filas; la lista es para encontrar un papel
+ *   reciente, no para auditar el año.
+ */
+export async function listarPorDespachador(correo, limite = 60) {
+  const clave = String(correo || "").trim().toLowerCase();
+  if (!clave) return [];
+
+  const CAMPOS =
+    "id, despacho_id, placa, conductor_nombre, conductor_documento, peso_kg, " +
+    "despachador_id, despachador_nombre, origen_viaje, destino_viaje, created_at, " +
+    "traslados_despachos!inner(id, origen, destino, estado, despachador_id, updated_at)";
+
+  // 1. Los que cargó esta persona.
+  const { data: propios, error: e1 } = await supabase
+    .from(TABLE)
+    .select(CAMPOS)
+    .ilike("despachador_id", clave)
+    .order("created_at", { ascending: false })
+    .limit(limite);
+  if (e1) throw new Error(`Error al listar manifiestos: ${e1.message}`);
+
+  // 2. Los de traslados que eran suyos, aunque el camión lo cerrara otro.
+  const { data: deSusDespachos, error: e2 } = await supabase
+    .from(TABLE)
+    .select(CAMPOS)
+    .ilike("traslados_despachos.despachador_id", clave)
+    .order("created_at", { ascending: false })
+    .limit(limite);
+  if (e2) throw new Error(`Error al listar manifiestos: ${e2.message}`);
+
+  const porId = new Map();
+  for (const m of [...(propios || []), ...(deSusDespachos || [])]) porId.set(m.id, m);
+
+  return [...porId.values()]
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+    .slice(0, limite);
+}
+
 /** El manifiesto de un despacho, o null. */
 export async function porDespacho(despachoId) {
   const { data, error } = await supabase
