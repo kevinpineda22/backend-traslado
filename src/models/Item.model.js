@@ -246,13 +246,23 @@ export async function insertItemAuditor(despachoId, item) {
   //
   // Se SUMA al renglón existente en vez de rechazar: la mercancía se contó de
   // verdad, y perder ese conteo sería peor que el duplicado que estamos evitando.
-  const { data: existente } = await supabase
+  // Se comparan NORMALIZADOS y no con un `.eq()`: SIESA muestra los códigos
+  // rellenados con ceros a 7 dígitos ("0189202") y nosotros guardamos el número
+  // pelado ("189202"). Con la igualdad exacta, un renglón que llegara con el
+  // relleno esquivaba esta guarda y se duplicaba igual — que es justo lo que la
+  // guarda existe para evitar.
+  const sinCeros = (c) => {
+    const t = String(c ?? "").trim();
+    return t.replace(/^0+/, "") || t;
+  };
+  const { data: delDespacho } = await supabase
     .from(TABLE)
-    .select("id, cantidad_auditor, cantidad_despachador, factor")
-    .eq("despacho_id", despachoId)
-    .eq("codigo_item", codigo)
-    .limit(1)
-    .maybeSingle();
+    .select("id, codigo_item, cantidad_auditor, cantidad_despachador, factor")
+    .eq("despacho_id", despachoId);
+
+  const existente = (delDespacho || []).find(
+    (r) => sinCeros(r.codigo_item) === sinCeros(codigo),
+  );
 
   if (existente) {
     const total = (Number(existente.cantidad_auditor) || 0) + cantidadAuditor;
