@@ -200,19 +200,19 @@ export async function marcarSiesaOmitido(req, res, next) {
  * Resp: { ok, data: { despacho, parte2, movidos } }
  */
 /**
- * GET /api/despachos/manifiestos?correo=quien@merkahorrosas.com
- * Los manifiestos en los que participó esa persona, del más nuevo al más viejo.
- *
- * El correo se EXIGE: sin él esto devolvería los manifiestos de todo el mundo, y
- * el panel del despachador es de cada quien.
+ * GET /api/despachos/manifiestos?desde=2026-08-01&hasta=2026-08-22
+ * Todos los manifiestos, del más nuevo al más viejo. Sin fechas devuelve los
+ * más recientes hasta el tope.
  */
-export async function misManifiestos(req, res, next) {
+export async function listarManifiestosCtrl(req, res, next) {
   try {
-    const correo = String(req.query.correo || "").trim();
-    if (!correo) {
-      return res.status(400).json({ ok: false, error: "correo es requerido" });
-    }
-    const data = await DespachoService.manifiestosDeDespachador(correo);
+    // Las fechas se validan con FORMA, no se pasan crudas: van a una consulta y
+    // un valor raro devolvería un error de Postgres en vez de un mensaje útil.
+    const fecha = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? v : undefined);
+    const data = await DespachoService.listarManifiestos({
+      desde: fecha(req.query.desde),
+      hasta: fecha(req.query.hasta),
+    });
     res.json({ ok: true, data });
   } catch (error) {
     next(error);

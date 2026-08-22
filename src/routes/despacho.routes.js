@@ -10,7 +10,7 @@ router.get("/analitica", DespachoController.analiticaCtrl);
 router.get("/activos/items", DespachoController.itemsActivos);
 // Manifiestos de una persona. VA ANTES de "/:id": Express matchea por orden y
 // "manifiestos" entraria por "/:id" tomandolo como un uuid.
-router.get("/manifiestos", DespachoController.misManifiestos);
+router.get("/manifiestos", DespachoController.listarManifiestosCtrl);
 
 // Listado semanal (borrador). Sirve para General y para Llano.
 // OJO: van ANTES de "/:id" — Express matchea por orden y "/listado" entraría por

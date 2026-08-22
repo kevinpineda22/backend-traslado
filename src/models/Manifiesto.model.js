@@ -163,64 +163,50 @@ export async function crear(despachoId, payload = {}) {
 }
 
 /**
- * Manifiestos en los que participó una persona, del más nuevo al más viejo.
+ * Manifiestos de TODAS las sedes, del más nuevo al más viejo, con filtro de fecha.
  *
- * QUÉ CUENTA COMO "PARTICIPÓ"
- * Dos cosas, y hacen falta las dos:
- *   1. Cargó el camión — `manifiesto.despachador_id` es su correo. Es quien firma
- *      y quien se para frente al conductor.
- *   2. Era el despachador del traslado — `despacho.despachador_id`. Alguien puede
- *      haber recolectado todo y que el camión lo cierre otro que estaba de turno
- *      cuando llegó (eso es a propósito, ver `cargarCamion`). Ese traslado también
- *      es suyo.
+ * POR QUÉ TODOS Y NO SOLO LOS PROPIOS
+ * El manifiesto es el papel que se le entrega al conductor, y quien vuelve a
+ * necesitarlo no siempre es quien lo cargó: el conductor pide otra copia días
+ * después, o el que está de turno tiene que reimprimir el de un compañero que ya
+ * salió. Acotarlo a "los míos" dejaba justo esos casos sin salida.
  *
- * POR QUÉ DOS CONSULTAS Y NO UN `or` CON JOIN
- * Las dos condiciones viven en TABLAS distintas (una en el manifiesto, otra en el
- * despacho). Un `.or()` de Supabase no cruza la relación, así que se piden por
- * separado y se unen por id acá. Con volúmenes de manifiestos —uno por traslado—
- * el costo es irrelevante frente a una consulta que no se puede leer.
+ * EL FILTRO DE FECHA ES LA HERRAMIENTA REAL DE BÚSQUEDA
+ * Con todas las sedes adentro la lista crece rápido, y nadie recuerda un
+ * manifiesto por su número: lo recuerda por el DÍA ("el del martes a Barbosa").
+ * Por eso las fechas filtran en el servidor y no en el navegador — traer un año
+ * entero para descartarlo en el cliente es pagar el costo dos veces.
  *
- * Trae la ruta y la fecha del despacho pegadas: la lista tiene que poder
- * identificarse de un vistazo ("Copacabana → Barbosa, 22/08, placa ABC123") y sin
- * eso el panel tendría que pedir cada despacho por separado.
+ * `hasta` se estira al final del día: con un timestamp, "hasta el 22" excluiría
+ * todo lo del 22 salvo la medianoche exacta. Es el bug clásico de los filtros de
+ * fecha, y ya está resuelto igual en analitica.service.
  *
- * @param {string} correo
- * @param {number} [limite=60] - tope de filas; la lista es para encontrar un papel
- *   reciente, no para auditar el año.
+ * @param {object} [opts]
+ * @param {string} [opts.desde]  - YYYY-MM-DD
+ * @param {string} [opts.hasta]  - YYYY-MM-DD (incluye el día entero)
+ * @param {number} [opts.limite=300]
  */
-export async function listarPorDespachador(correo, limite = 60) {
-  const clave = String(correo || "").trim().toLowerCase();
-  if (!clave) return [];
+export async function listarTodos({ desde, hasta, limite = 300 } = {}) {
+  const finDelDia = (f) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(String(f || "")) ? `${f}T23:59:59.999Z` : f;
 
-  const CAMPOS =
-    "id, despacho_id, placa, conductor_nombre, conductor_documento, peso_kg, " +
-    "despachador_id, despachador_nombre, origen_viaje, destino_viaje, created_at, " +
-    "traslados_despachos!inner(id, origen, destino, estado, despachador_id, updated_at)";
-
-  // 1. Los que cargó esta persona.
-  const { data: propios, error: e1 } = await supabase
+  let q = supabase
     .from(TABLE)
-    .select(CAMPOS)
-    .ilike("despachador_id", clave)
+    .select(
+      "id, despacho_id, placa, marca, conductor_nombre, conductor_documento, " +
+        "peso_kg, despachador_id, despachador_nombre, origen_viaje, destino_viaje, " +
+        "observaciones, created_at, " +
+        "traslados_despachos!inner(id, origen, destino, estado, despachador_id, flujo)",
+    )
     .order("created_at", { ascending: false })
     .limit(limite);
-  if (e1) throw new Error(`Error al listar manifiestos: ${e1.message}`);
 
-  // 2. Los de traslados que eran suyos, aunque el camión lo cerrara otro.
-  const { data: deSusDespachos, error: e2 } = await supabase
-    .from(TABLE)
-    .select(CAMPOS)
-    .ilike("traslados_despachos.despachador_id", clave)
-    .order("created_at", { ascending: false })
-    .limit(limite);
-  if (e2) throw new Error(`Error al listar manifiestos: ${e2.message}`);
+  if (desde) q = q.gte("created_at", desde);
+  if (hasta) q = q.lte("created_at", finDelDia(hasta));
 
-  const porId = new Map();
-  for (const m of [...(propios || []), ...(deSusDespachos || [])]) porId.set(m.id, m);
-
-  return [...porId.values()]
-    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
-    .slice(0, limite);
+  const { data, error } = await q;
+  if (error) throw new Error(`Error al listar manifiestos: ${error.message}`);
+  return data || [];
 }
 
 /** El manifiesto de un despacho, o null. */

@@ -500,11 +500,11 @@ export async function cargarCamion(
 
 /** El manifiesto de un despacho (para el panel del admin y el del auditor). */
 /**
- * Manifiestos en los que participó una persona. Ver el modelo para qué cuenta
- * como participar.
+ * Todos los manifiestos, con filtro de fecha. Ver el modelo para el porqué de
+ * mostrarlos todos y no solo los propios.
  */
-export async function manifiestosDeDespachador(correo) {
-  return ManifiestoModel.listarPorDespachador(correo);
+export async function listarManifiestos(opts) {
+  return ManifiestoModel.listarTodos(opts);
 }
 
 export async function obtenerManifiesto(despachoId) {
