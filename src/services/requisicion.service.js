@@ -335,10 +335,18 @@ async function enviarTransito(despacho) {
  *   cuando el fallo vino del ERP (ausente en timeouts y fallos de red).
  */
 /**
- * Cierra un envío que quedó INCIERTO, con lo que una persona vio en SIESA.
+ * Cierra un envío trabado con lo que una persona vio en SIESA.
  *
- * Es la salida del estado que introdujo sql/033. Dos caminos, y los dos exigen
- * que alguien haya MIRADO el ERP — por eso no hay forma automática:
+ * Aplica a los dos estados que quedan esperando a un humano:
+ *   · "incierto" → SIESA no respondió y no se sabe si entró (sql/033).
+ *   · "fallido"  → se agotaron los intentos. Muchos de estos terminan
+ *     resolviéndose A MANO en SIESA, y hasta ahora la app no se enteraba: seguía
+ *     mostrándolos en rojo, con un botón de "Forzar reintento" que los habría
+ *     mandado OTRA VEZ y duplicado el movimiento. Marcarlos cierra esa puerta,
+ *     porque "enviado" sí es terminal.
+ *
+ * Los dos caminos exigen que alguien haya MIRADO el ERP — por eso no hay forma
+ * automática:
  *
  *   "enviado"    → la salida SÍ está en SIESA. Se marca enviado y no se manda
  *                  nada más. Es terminal, así que ya nadie lo vuelve a tocar.
@@ -366,9 +374,10 @@ export async function resolverIncierto(despachoId, resultado, quien = null) {
     e.expose = true;
     throw e;
   }
-  if (despacho.siesa_estado !== "incierto") {
+  if (!["incierto", "fallido"].includes(despacho.siesa_estado)) {
     const e = new Error(
-      `Este traslado no está en revisión: su envío a SIESA está en "${despacho.siesa_estado}".`,
+      `Este traslado no necesita resolverse a mano: su envío a SIESA está en ` +
+        `"${despacho.siesa_estado}".`,
     );
     e.statusCode = 409;
     e.expose = true;
@@ -393,8 +402,10 @@ export async function resolverIncierto(despachoId, resultado, quien = null) {
       fase: "resolucion-manual",
       error:
         resultado === "enviado"
-          ? `Verificado en SIESA: la salida SI entro${quien ? " — " + quien : ""}`
-          : `Verificado en SIESA: la salida NO entro, se reintenta${quien ? " — " + quien : ""}`,
+          ? `Resuelto A MANO en SIESA (venia de "${despacho.siesa_estado}")${
+              quien ? " — " + quien : ""
+            }`
+          : `Verificado en SIESA: NO esta, vuelve a la cola${quien ? " — " + quien : ""}`,
     }),
   });
 
