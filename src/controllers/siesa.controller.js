@@ -5,6 +5,7 @@ import {
   reintentarPendientes,
   estadoRequisiciones,
   enviarRequisicion,
+  resolverIncierto,
 } from "../services/requisicion.service.js";
 import {
   refrescarSnapshotUnico,
@@ -150,6 +151,28 @@ export async function estadoAjusteCtrl(req, res, next) {
  * Fuerza el envío de UNA requisición (botón de rescate para operación).
  * Sigue respetando el estado 'enviado': no puede duplicar.
  */
+/**
+ * POST /api/siesa/requisiciones/:despachoId/resolver
+ * Cierra un envio que quedo INCIERTO (SIESA no respondio y no se sabe si entro).
+ * Body: { resultado: "enviado" | "reintentar", correo? }
+ *
+ * Lo dispara una persona DESPUES de mirar el ERP. No hay forma automatica: el
+ * sistema no puede saber si el documento entro (ver sql/033).
+ */
+export async function resolverInciertoCtrl(req, res, next) {
+  try {
+    const { resultado, correo } = req.body || {};
+    const data = await resolverIncierto(
+      req.params.despachoId,
+      String(resultado || "").trim(),
+      typeof correo === "string" ? correo.trim().toLowerCase() : null,
+    );
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function enviarRequisicionCtrl(req, res, next) {
   try {
     // ?forzar=1 → reintento manual desde el panel, saltando el tope de intentos.

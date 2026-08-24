@@ -43,6 +43,34 @@ const MAX_LOG_INTENTOS = 50;
 const lockDe = (despachoId) => `siesa:requisicion:${despachoId}`;
 
 /**
+ * ¿El envío se quedó SIN RESPUESTA? Entonces no sabemos si llegó.
+ *
+ * Esta es la distinción que faltaba. Un rechazo de SIESA es un fallo: sabemos
+ * que NO se procesó y reintentar es seguro. Un timeout no es un fallo, es una
+ * INCÓGNITA: SIESA pudo haber procesado la salida y haberse cortado solo la
+ * respuesta de vuelta. Reintentar ahí duplica el movimiento en el ERP.
+ *
+ * Ya pasó: un traslado quedó dos veces en SIESA porque el intento 1 dio timeout
+ * a los 60 s, quedó como "pendiente" y el cron lo reintentó.
+ *
+ * Se es DELIBERADAMENTE conservador: cualquier error sin respuesta cuenta como
+ * incierto, aunque algunos (un DNS que no resuelve) nunca hayan llegado a mandar
+ * nada. No se pueden distinguir desde acá, y equivocarse hacia "no sé" cuesta que
+ * alguien destrabe un traslado; equivocarse hacia "falló" cuesta ir a pedirle a
+ * SIESA que borre un movimiento.
+ */
+function sinRespuesta(err) {
+  if (err instanceof ConfigSiesaError) return false; // nunca se mandó nada
+  // Con status HTTP hubo respuesta: SIESA contestó, aunque sea un rechazo.
+  if (err?.httpStatus != null) return false;
+  const codigo = String(err?.code || "").toUpperCase();
+  if (["ECONNABORTED", "ETIMEDOUT", "ECONNRESET", "EPIPE"].includes(codigo)) return true;
+  return /timeout|timed out|socket hang up|network error|aborted/i.test(
+    String(err?.message || ""),
+  );
+}
+
+/**
  * Modo SOLO SALIDA. Mientras SIESA devuelve los consecutivos de la salida de forma
  * inestable, la ENTRADA (que los necesita) se PAUSA: se manda solo la salida y el
  * par se cierra a mano cuando haya consecutivos.
@@ -306,6 +334,77 @@ async function enviarTransito(despacho) {
  *   siesaData?:any, httpStatus?:number}>} `siesaData` es la respuesta CRUDA de SIESA
  *   cuando el fallo vino del ERP (ausente en timeouts y fallos de red).
  */
+/**
+ * Cierra un envío que quedó INCIERTO, con lo que una persona vio en SIESA.
+ *
+ * Es la salida del estado que introdujo sql/033. Dos caminos, y los dos exigen
+ * que alguien haya MIRADO el ERP — por eso no hay forma automática:
+ *
+ *   "enviado"    → la salida SÍ está en SIESA. Se marca enviado y no se manda
+ *                  nada más. Es terminal, así que ya nadie lo vuelve a tocar.
+ *   "reintentar" → la salida NO está. Vuelve a "pendiente" y el cron lo retoma
+ *                  por el camino normal.
+ *
+ * No se toca `siesa_intentos`: el historial tiene que seguir mostrando que hubo
+ * un envío sin respuesta. Borrar ese rastro es perder la única pista de por qué
+ * un documento podría estar duplicado.
+ *
+ * @param {string} despachoId
+ * @param {"enviado"|"reintentar"} resultado - lo que la persona verificó
+ * @param {string} [quien] - correo de quien lo resolvió (queda como constancia)
+ */
+export async function resolverIncierto(despachoId, resultado, quien = null) {
+  const { data: despacho } = await supabase
+    .from(TABLE)
+    .select("id, siesa_estado, siesa_intentos, siesa_intentos_log")
+    .eq("id", despachoId)
+    .maybeSingle();
+
+  if (!despacho) {
+    const e = new Error("Despacho no encontrado");
+    e.statusCode = 404;
+    e.expose = true;
+    throw e;
+  }
+  if (despacho.siesa_estado !== "incierto") {
+    const e = new Error(
+      `Este traslado no está en revisión: su envío a SIESA está en "${despacho.siesa_estado}".`,
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+  if (!["enviado", "reintentar"].includes(resultado)) {
+    const e = new Error('resultado debe ser "enviado" o "reintentar"');
+    e.statusCode = 400;
+    e.expose = true;
+    throw e;
+  }
+
+  const estado = resultado === "enviado" ? "enviado" : "pendiente";
+  await marcar(despachoId, {
+    siesa_estado: estado,
+    siesa_enviado_at: resultado === "enviado" ? new Date().toISOString() : null,
+    siesa_error: null,
+    siesa_intentos_log: anexarIntento(despacho, {
+      n: Number(despacho.siesa_intentos) || 0,
+      at: new Date().toISOString(),
+      estado,
+      fase: "resolucion-manual",
+      error:
+        resultado === "enviado"
+          ? `Verificado en SIESA: la salida SI entro${quien ? " — " + quien : ""}`
+          : `Verificado en SIESA: la salida NO entro, se reintenta${quien ? " — " + quien : ""}`,
+    }),
+  });
+
+  console.log(
+    `[requisicion] 🔎 despacho ${despachoId} resuelto a mano: ${resultado}` +
+      (quien ? ` (${quien})` : ""),
+  );
+  return { estado, resultado };
+}
+
 export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
   const id = typeof despachoOId === "string" ? despachoOId : despachoOId?.id;
   if (!id) return { estado: "omitido", motivo: "sin id" };
@@ -321,6 +420,21 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     // "ya se envió" es justo el dato que no podemos permitirnos leer desactualizado.
     const despacho = await DespachoModel.findById(id);
     if (!despacho) return { estado: "omitido", motivo: "no existe" };
+
+    // Defensa 4: un resultado INCIERTO no se manda de nuevo por las buenas.
+    //
+    // El cron ya no lo levanta (solo toca "pendiente"), pero el botón de rescate
+    // del panel sí llegaría hasta acá. Apretarlo sobre un incierto es justo la
+    // acción que duplica: no sabemos si el envío anterior entró. Se exige `forzar`,
+    // que en el panel corresponde a "ya verifiqué en SIESA y NO está".
+    if (despacho.siesa_estado === "incierto" && !forzar) {
+      return {
+        estado: "omitido",
+        motivo:
+          "el envío anterior no respondió y no se sabe si entró. Verificá en SIESA " +
+          "antes de reintentar: si la salida está, marcala como enviada.",
+      };
+    }
 
     // Defensa 1: 'enviado' es terminal.
     if (despacho.siesa_estado === "enviado") {
@@ -454,8 +568,20 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     } catch (err) {
       const esConfig = err instanceof ConfigSiesaError;
       const agotado = intentos + 1 >= MAX_INTENTOS;
+      // SIN RESPUESTA ⇒ "incierto", y ahí se FRENA. El cron solo levanta
+      // "pendiente", así que este no se reintenta solo: espera a que alguien mire
+      // en SIESA y decida (ver sql/033). Es la política que este módulo ya
+      // declaraba en su encabezado — "preferimos parar y avisar antes que insistir
+      // a ciegas" — y que hasta ahora no estaba implementada.
+      //
       // Config incompleta no consume el cupo de reintentos: no es SIESA fallando.
-      const estado = esConfig ? "pendiente" : agotado ? "fallido" : "pendiente";
+      const estado = esConfig
+        ? "pendiente"
+        : sinRespuesta(err)
+          ? "incierto"
+          : agotado
+            ? "fallido"
+            : "pendiente";
       const msg = String(err.message).slice(0, 1000);
 
       await marcar(id, {
@@ -471,9 +597,16 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
           ajuste: ajusteDelIntento(despacho),
         }),
       });
-      console.error(
-        `[requisicion] ❌ despacho ${id} intento ${intentos + 1}/${MAX_INTENTOS}: ${err.message}`,
-      );
+      if (estado === "incierto") {
+        console.error(
+          `[requisicion] ⚠️ despacho ${id}: SIESA no respondió (${err.message}). ` +
+            "NO se reintenta solo — hay que verificar en SIESA si la salida entró.",
+        );
+      } else {
+        console.error(
+          `[requisicion] ❌ despacho ${id} intento ${intentos + 1}/${MAX_INTENTOS}: ${err.message}`,
+        );
+      }
       // `siesaData` viaja en el retorno (no se persiste) para que el correo de error
       // pueda mostrar el JSON crudo del rechazo. Puede venir undefined: un timeout
       // o un fallo de red no tiene respuesta que adjuntar.

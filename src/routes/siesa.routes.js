@@ -23,5 +23,10 @@ router.get("/requisiciones/estado", SiesaController.estadoRequisicionesCtrl);
 router.get("/requisiciones/reintentar", SiesaController.reintentarRequisiciones);
 router.post("/requisiciones/reintentar", SiesaController.reintentarRequisiciones);
 router.post("/requisiciones/:despachoId/enviar", SiesaController.enviarRequisicionCtrl);
+// Cierra un envio INCIERTO con lo que una persona verifico en SIESA (sql/033).
+router.post(
+  "/requisiciones/:despachoId/resolver",
+  SiesaController.resolverInciertoCtrl,
+);
 
 export default router;
