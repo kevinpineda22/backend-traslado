@@ -1008,14 +1008,32 @@ export async function findAllWithResumen(filters = {}) {
   if (error) throw new Error(`Error al listar despachos: ${error.message}`);
   if (!despachos?.length) return [];
 
-  // 2. Obtener agregación de items
+  // 2. Obtener agregación de items, PAGINANDO.
+  //
+  // Supabase corta en 1000 filas por consulta. Sin paginar, con 46 traslados de
+  // ~130 renglones se piden 6050 y llegan 5000: los últimos traslados vuelven SIN
+  // un solo ítem y su resumen queda en 0. En el monitor eso se ve como una barra
+  // vacía y un "0/0" en traslados que sí se recolectaron completos — un dato falso
+  // que hace dudar del trabajo de la gente.
+  //
+  // El corte no avisa: la consulta responde OK con menos filas. Por eso se nota
+  // recién cuando alguien mira la pantalla y no cuadra.
   const ids = despachos.map((d) => d.id);
-  const { data: items, error: errItems } = await supabase
-    .from("traslados_items")
-    .select("despacho_id, cantidad_despachador, agotado, cantidad_admin, motivo")
-    .in("despacho_id", ids);
+  const PAGINA = 1000;
+  const items = [];
+  for (let desde = 0; ; desde += PAGINA) {
+    const { data, error: errItems } = await supabase
+      .from("traslados_items")
+      .select("despacho_id, cantidad_despachador, agotado, cantidad_admin, motivo")
+      .in("despacho_id", ids)
+      .range(desde, desde + PAGINA - 1);
 
-  if (errItems) throw new Error(`Error al obtener resumen de items: ${errItems.message}`);
+    if (errItems) throw new Error(`Error al obtener resumen de items: ${errItems.message}`);
+    if (!data?.length) break;
+    items.push(...data);
+    // Una página incompleta es la última: evita una consulta de más por cada lista.
+    if (data.length < PAGINA) break;
+  }
 
   // 3. Armar resumen por despacho
   const agg = {};
