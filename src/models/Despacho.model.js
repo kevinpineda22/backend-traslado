@@ -973,9 +973,61 @@ export async function updateAuditor(id, auditorId) {
  * Devuelve los despachos con conteo de completos/incompletos/agotados/pendientes.
  * Acepta los mismos filtros que findAll.
  */
+/**
+ * Columnas de la LISTA del monitor. Se enumeran en vez de usar `*` porque cuatro
+ * campos JSONB pesan casi todo y no los mira nadie en una lista:
+ *
+ *   siesa_payload         742 KB   59.7%  ← el plano completo que se manda al ERP
+ *   siesa_salida_payload  443 KB   35.7%  ← el mismo, de la salida
+ *   siesa_ajuste_payload  ...
+ *   siesa_intentos_log    ...
+ *
+ * Medido en producción: la lista pesaba 1277 KB para 48 traslados y lo que las
+ * tarjetas realmente muestran eran 17 KB. El 99% viajaba sin que nadie lo leyera,
+ * y a ~26 KB por traslado eso se vuelve inmanejable solo: con 300 serían 8 MB.
+ *
+ * Esos payloads SÍ se necesitan, pero en el DETALLE (`findById`, que sigue con
+ * `*`): es donde vive el "Detalle técnico" de EstadoSiesa, y ahí se pide un
+ * traslado por vez.
+ *
+ * Al enumerar hay que acordarse de sumar acá una columna nueva que la lista
+ * necesite. Es el costo de esto, y se paga una vez; el `*` cobraba en cada carga.
+ */
+const COLUMNAS_LISTA = [
+  "id",
+  "flujo",
+  "origen",
+  "destino",
+  "estado",
+  "despachador_id",
+  "admin_id",
+  "auditor_id",
+  "criterios",
+  "created_at",
+  "updated_at",
+  "disponible_at",
+  "inactivo",
+  "inactivo_at",
+  "inactivo_motivo",
+  "recoleccion_finalizada_at",
+  "auditoria_iniciada_at",
+  "auditoria_abierta_at",
+  "auditoria_finalizada_at",
+  "alerta_recoleccion_at",
+  "alerta_auditoria_at",
+  // Estado del envío: la tarjeta lo pinta. El PAYLOAD no, y es lo que pesa.
+  "siesa_estado",
+  "siesa_docto",
+  "siesa_intentos",
+  "siesa_enviado_at",
+  // Traslado por partes (sql/032): el badge "Parte N" sale de acá.
+  "parte_de",
+  "parte_num",
+].join(", ");
+
 export async function findAllWithResumen(filters = {}) {
   // 1. Obtener cabeceras (reusa lógica de findAll)
-  let query = supabase.from(TABLE).select("*");
+  let query = supabase.from(TABLE).select(COLUMNAS_LISTA);
 
   if (Array.isArray(filters.estado)) query = query.in("estado", filters.estado);
   else if (filters.estado) query = query.eq("estado", filters.estado);
