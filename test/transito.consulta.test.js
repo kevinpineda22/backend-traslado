@@ -62,6 +62,17 @@ test("EL CASO REAL: tres salidas del mismo despacho → no elige ninguna", async
   assert.equal(await mod.buscarSalida(A), null, "con duplicados no se adivina el consecutivo");
 });
 
+test("existeSalida SÍ contesta con duplicados: la pregunta es otra", async () => {
+  filas = [
+    { CO: "001", Tipo: "CTS", Nro: 4775, Fecha: null, Notas: nota(A) },
+    { CO: "001", Tipo: "CTS", Nro: 4773, Fecha: null, Notas: nota(A) },
+  ];
+
+  assert.equal(await mod.existeSalida(A), true, "¿ya se mandó? sí, dos veces");
+  assert.equal(await mod.buscarSalida(A), null, "¿cuál referencio? no se puede saber");
+  assert.equal(await mod.existeSalida(B), false);
+});
+
 test("una sola salida: la devuelve", async () => {
   filas = [{ CO: "003", Tipo: "CTS", Nro: 1754, Fecha: "2026-09-01T00:00:00", Notas: nota(A) }];
 

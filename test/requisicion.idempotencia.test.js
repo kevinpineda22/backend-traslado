@@ -117,6 +117,9 @@ beforeEach(() => {
   };
   delete process.env.SIESA_SOLO_SALIDA;
   delete process.env.SIESA_ENTRADA_VERIFICAR;
+  // Este archivo NO mockea siesaTransito.consulta: sin esto, y con la consulta
+  // configurada en el .env de la máquina, los tests saldrían a Connekta de verdad.
+  delete process.env.SIESA_CONSULTA_TRANSITO;
   // Camino feliz por defecto; cada test lo ajusta.
   impl.importarSalida = async () => ({ ok: true, docto: "S1", respuesta: {}, payload: { s: 1 } });
   impl.importarEntrada = async () => ({ ok: true, docto: "E1", respuesta: {}, payload: { e: 1 } });

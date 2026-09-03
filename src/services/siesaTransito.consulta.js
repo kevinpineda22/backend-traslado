@@ -208,6 +208,26 @@ export async function buscarSalida(despachoId, opts) {
 }
 
 /**
+ * ¿SIESA ya tiene alguna salida de este despacho? Pregunta de EXISTENCIA.
+ *
+ * Es distinta de `buscarSalida` a propósito, y la diferencia importa. Aquella
+ * contesta "cuál consecutivo referencio" y ante un duplicado devuelve null
+ * porque no se puede elegir. Ésta contesta "¿la salida ya se mandó?", y ahí un
+ * duplicado es un SÍ todavía más rotundo — devolver null haría que el sistema
+ * mande otra.
+ *
+ * Usarla para decidir si mandar la salida. Usar `buscarSalida` para armar la
+ * entrada. Confundirlas es el bug que esta función existe para evitar.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function existeSalida(despachoId, opts) {
+  const { salidas } = await consultarTransito(opts);
+  const docs = salidas.get(String(despachoId).toLowerCase());
+  return Boolean(docs && docs.length > 0);
+}
+
+/**
  * ENTRADA (CTE) que ya existe para este despacho — la haya hecho este backend o
  * una persona en el ERP. Si devuelve algo, NO hay que importar otra.
  *

@@ -24,7 +24,7 @@ let enviarRequisicion;
 
 let row;
 const impl = {};
-const calls = { salida: 0, entrada: 0, buscarSalida: 0, buscarEntrada: 0 };
+const calls = { salida: 0, entrada: 0, buscarSalida: 0, buscarEntrada: 0, existeSalida: 0 };
 
 function builder() {
   let patch = null;
@@ -98,6 +98,10 @@ before(async () => {
         calls.buscarEntrada += 1;
         return impl.buscarEntrada(id, o);
       },
+      existeSalida: async (id, o) => {
+        calls.existeSalida += 1;
+        return impl.existeSalida(id, o);
+      },
     },
   });
 
@@ -109,6 +113,7 @@ beforeEach(() => {
   calls.entrada = 0;
   calls.buscarSalida = 0;
   calls.buscarEntrada = 0;
+  calls.existeSalida = 0;
   row = {
     id: "D1",
     origen: "PV001",
@@ -129,6 +134,7 @@ beforeEach(() => {
   impl.consultaConfigurada = true;
   impl.buscarSalida = async () => null;
   impl.buscarEntrada = async () => null;
+  impl.existeSalida = async () => false;
 });
 
 test("camino feliz: salida y entrada, una vez cada una", async () => {
@@ -223,6 +229,51 @@ test("SIESA_ENTRADA_VERIFICAR=0 apaga el guard (para cuando ya nadie las hace a 
   assert.equal(r.estado, "enviado");
   assert.equal(calls.entrada, 1, "manda la entrada sin consultar");
   assert.equal(calls.buscarEntrada, 0, "no consultó nada");
+});
+
+test("SEGUNDA RED: si SIESA ya tiene la salida, no se manda otra aunque la base no lo sepa", async () => {
+  // Fila anterior a la migración 030: sin `siesa_salida_at` ni docto, pero con la
+  // salida en SIESA. El guard de la base dice "nunca se mandó" — y se equivoca.
+  row.siesa_salida_at = null;
+  row.siesa_salida_docto = null;
+  impl.existeSalida = async () => true;
+  impl.buscarSalida = async () => ({ nro: "4773", co: "001", fecha: null });
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.salida, 0, "NO se re-mandó la salida: SIESA ya la tenía");
+  assert.ok(row.siesa_salida_at, "se ancló para que no vuelva a pasar");
+});
+
+test("con salidas DUPLICADAS en SIESA tampoco manda otra (existencia, no elección)", async () => {
+  // El caso de afe067d3: tres CTS. `buscarSalida` devuelve null porque no puede
+  // elegir — si el guard dependiera de ella, mandaría una CUARTA salida.
+  row.siesa_salida_at = null;
+  row.siesa_salida_docto = null;
+  impl.existeSalida = async () => true;
+  impl.buscarSalida = async () => null; // ambiguo: no elige
+  // Mismo contrato que el módulo real: sin consecutivo, la entrada no se arma.
+  impl.importarEntrada = async (_d, doc) => {
+    if (!doc) throw new Error("No hay consecutivo de salida para armar la entrada en tránsito.");
+    return { ok: true, docto: "E1", respuesta: {}, payload: { e: 1 } };
+  };
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.salida, 0, "no se manda una cuarta salida");
+  assert.equal(row.siesa_docto, undefined, "no se cerró el par: no hay entrada");
+  assert.equal(row.siesa_estado, "pendiente", "queda para que una persona limpie SIESA");
+});
+
+test("si la consulta falla, la segunda red no bloquea el envío", async () => {
+  row.siesa_salida_at = null;
+  impl.existeSalida = async () => {
+    throw new Error("Connekta caído");
+  };
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.salida, 1, "sigue con el guard de la base — no frena todos los traslados");
 });
 
 test("modo SOLO SALIDA sigue funcionando como freno de emergencia", async () => {

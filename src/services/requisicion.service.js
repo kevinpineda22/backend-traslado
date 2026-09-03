@@ -16,6 +16,7 @@ import {
 import {
   buscarSalida,
   buscarEntrada,
+  existeSalida,
   consultaConfigurada,
 } from "./siesaTransito.consulta.js";
 
@@ -324,8 +325,45 @@ async function enviarTransito(despacho) {
   // La prueba de que la salida entró NO es el consecutivo (que puede no leerse),
   // es la HORA en que SIESA la aceptó. Por eso el guard mira `siesa_salida_at`:
   // si tiene valor, la salida ya movió inventario y JAMÁS se re-manda.
-  const salidaYaEnviada =
+  let salidaYaEnviada =
     Boolean(despacho.siesa_salida_at) || Boolean(despacho.siesa_salida_docto);
+
+  // SEGUNDA RED: LA VERDAD ESTÁ EN SIESA, NO EN NUESTRA BASE.
+  //
+  // El guard de arriba solo sabe lo que alcanzamos a escribir. Los despachos
+  // ANTERIORES a la migración 030 tienen `siesa_salida_at` en null porque la
+  // columna no existía cuando se mandaron — y varios de ellos SÍ tienen su
+  // salida en SIESA (los del 19/08, algunos por triplicado). Para esas filas el
+  // guard dice "nunca se mandó" y manda otra: inventario saliendo de bodega de
+  // nuevo. Es el mismo desastre del 19/08, servido por un hueco de datos.
+  //
+  // Si SIESA dice que ya hay una salida de este despacho, ya se mandó. Punto.
+  // Se usa `existeSalida` (existencia) y NO `buscarSalida` (cuál): con salidas
+  // duplicadas la segunda devuelve null, y tomar eso por "no hay" sería
+  // exactamente el bug que esto viene a tapar.
+  //
+  // Si no se puede consultar, se sigue con el guard de la BD y se avisa: frenar
+  // todos los traslados porque Connekta no responde es peor que el riesgo que
+  // cubre esta red, que es un caso de datos viejos.
+  if (!salidaYaEnviada && consultaConfigurada()) {
+    try {
+      if (await existeSalida(despacho.id)) {
+        salidaYaEnviada = true;
+        const ahora = new Date().toISOString();
+        await marcar(despacho.id, { siesa_salida_at: ahora });
+        despacho.siesa_salida_at = ahora;
+        console.warn(
+          `[requisicion] 🛡️ despacho ${despacho.id}: SIESA ya tiene la salida pero nuestra ` +
+            `base no lo registraba. NO se re-manda. Se ancla ahora para que no vuelva a pasar.`,
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `[requisicion] no se pudo confirmar en SIESA si la salida de ${despacho.id} ya existe ` +
+          `(${e.message}). Se sigue con el estado de la base.`,
+      );
+    }
+  }
 
   let salidaDocto = despacho.siesa_salida_docto || null;
   let salidaPayload = despacho.siesa_salida_payload || null;
