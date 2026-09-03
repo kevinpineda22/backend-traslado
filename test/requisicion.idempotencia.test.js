@@ -116,6 +116,7 @@ beforeEach(() => {
     siesa_ajuste_estado: null,
   };
   delete process.env.SIESA_SOLO_SALIDA;
+  delete process.env.SIESA_ENTRADA_VERIFICAR;
   // Camino feliz por defecto; cada test lo ajusta.
   impl.importarSalida = async () => ({ ok: true, docto: "S1", respuesta: {}, payload: { s: 1 } });
   impl.importarEntrada = async () => ({ ok: true, docto: "E1", respuesta: {}, payload: { e: 1 } });
@@ -125,6 +126,11 @@ beforeEach(() => {
 });
 
 test("EL BUG: salida aceptada con consecutivo vacío NO se re-manda en el reintento", async () => {
+  // Este test certifica la idempotencia de la SALIDA, no el guard de la entrada.
+  // Sin esto, el guard frena antes de llegar a `importarEntrada` (no puede
+  // verificar si la entrada ya existe) y la fase que se quiere ejercitar nunca
+  // corre. El guard tiene su propia certificación en requisicion.entrada.test.js.
+  process.env.SIESA_ENTRADA_VERIFICAR = "0";
   // SIESA acepta la salida (mueve inventario) pero no devuelve consecutivo legible.
   impl.importarSalida = async () => ({ ok: true, docto: "", respuesta: { codigo: 0 }, payload: { s: 1 } });
   // Sin consecutivo, la entrada no se puede armar.

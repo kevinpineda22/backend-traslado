@@ -13,6 +13,11 @@ import {
   detectarFaltantes,
   ajusteAutoHabilitado,
 } from "./siesaAjuste.service.js";
+import {
+  buscarSalida,
+  buscarEntrada,
+  consultaConfigurada,
+} from "./siesaTransito.consulta.js";
 
 /* =============================================
    Orquestación del envío de requisiciones a SIESA
@@ -83,6 +88,87 @@ function soloSalida() {
   return ["1", "true", "on", "si", "sí"].includes(
     String(process.env.SIESA_SOLO_SALIDA || "").trim().toLowerCase(),
   );
+}
+
+/**
+ * ¿Hay que preguntarle a SIESA si la entrada ya existe, antes de crearla?
+ *
+ * Prendido por default, y se apaga a propósito solo cuando ya no queda nadie
+ * creando entradas a mano. Ver `verificarEntradaPrevia` para qué protege.
+ */
+function verificarEntrada() {
+  const v = String(process.env.SIESA_ENTRADA_VERIFICAR ?? "1").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(v);
+}
+
+/**
+ * Consigue el consecutivo de la salida cuando la respuesta del conector no lo
+ * trajo. NO manda nada al ERP: lee.
+ *
+ * Este es el agujero que dejó el par abierto durante dos semanas. SIESA aceptaba
+ * la salida pero `doctoDe()` devolvía "", y sin consecutivo la entrada no se
+ * puede armar. El número siempre estuvo en SIESA — nos faltaba ir a buscarlo.
+ *
+ * @returns {Promise<string|null>} el consecutivo, o null si no se pudo resolver
+ */
+async function resolverConsecutivoSalida(despacho) {
+  if (!consultaConfigurada()) return null;
+  try {
+    // `refrescar` porque la salida se acaba de importar: un cache de hace unos
+    // segundos es anterior al documento que estamos buscando.
+    const doc = await buscarSalida(despacho.id, { refrescar: true });
+    if (!doc) return null;
+    console.log(
+      `[requisicion] 🔎 despacho ${despacho.id}: consecutivo de salida recuperado de SIESA (${doc.nro}).`,
+    );
+    return doc.nro;
+  } catch (e) {
+    console.warn(
+      `[requisicion] no se pudo consultar el consecutivo de salida de ${despacho.id}: ${e.message}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * ¿Ya existe la entrada de este despacho en SIESA?
+ *
+ * POR QUÉ ESTO EXISTE: hasta 2026-09-03 las entradas las creaba una persona a
+ * mano en el ERP (35 de 35 despachos, mismo día, apareo 1:1 verificado). Si el
+ * sistema empieza a crearlas sin mirar, durante la transición el destino recibe
+ * la mercancía DOS VECES — el espejo exacto del incidente de la salida
+ * duplicada del 19/08, del otro lado del tránsito.
+ *
+ * Si no se puede consultar, se FRENA en vez de mandar a ciegas: es la política
+ * que este módulo ya declara arriba. Un traslado trabado se destraba en un
+ * minuto; una entrada duplicada hay que ir a que SIESA la borre.
+ *
+ * @returns {Promise<{ existe: boolean, doc?: object }>}
+ * @throws {Error} si hay que verificar y no se pudo — el envío no debe seguir
+ */
+async function verificarEntradaPrevia(despacho) {
+  if (!verificarEntrada()) return { existe: false };
+
+  if (!consultaConfigurada()) {
+    const err = new Error(
+      "No se puede verificar si la entrada ya existe en SIESA: falta SIESA_CONSULTA_TRANSITO. " +
+        "Se frena para no duplicar la entrada. Configurá la consulta o apagá " +
+        "SIESA_ENTRADA_VERIFICAR solo si ya nadie las crea a mano.",
+    );
+    err.fase = "verificacion";
+    throw err;
+  }
+
+  let doc;
+  try {
+    doc = await buscarEntrada(despacho.id);
+  } catch (e) {
+    const err = new Error(`No se pudo verificar la entrada previa en SIESA: ${e.message}`);
+    err.fase = "verificacion";
+    throw err;
+  }
+
+  return doc ? { existe: true, doc } : { existe: false };
 }
 
 /** Marca el estado del envío en la cabecera del despacho. */
@@ -301,9 +387,37 @@ async function enviarTransito(despacho) {
     };
   }
 
-  // FLUJO COMPLETO — la entrada referencia el consecutivo de la salida. Si el
-  // consecutivo no se pudo leer (salidaDocto null), la entrada lanza y el despacho
-  // queda 'pendiente', pero la salida NO se re-manda (ya está anclada arriba).
+  // FLUJO COMPLETO — la entrada referencia el consecutivo de la salida.
+  //
+  // Si el conector no devolvió el consecutivo, se lo pedimos a SIESA leyendo los
+  // documentos de tránsito. Antes, acá el flujo moría: `importarEntrada` lanzaba
+  // "No hay consecutivo de salida" y el par quedaba abierto para siempre.
+  if (!salidaDocto) {
+    salidaDocto = await resolverConsecutivoSalida(despacho);
+    if (salidaDocto) {
+      await marcar(despacho.id, { siesa_salida_docto: salidaDocto });
+      despacho.siesa_salida_docto = salidaDocto;
+    }
+  }
+
+  // GUARD ANTI-DUPLICADO. Se pregunta SIEMPRE, incluso con el consecutivo en
+  // mano: la entrada pudo haberla creado una persona en el ERP mientras esto
+  // corría. Si ya existe, no se importa otra — se adopta la que está.
+  const previa = await verificarEntradaPrevia(despacho);
+  if (previa.existe) {
+    console.log(
+      `[requisicion] 🛑 despacho ${despacho.id}: la entrada YA existe en SIESA ` +
+        `(docto ${previa.doc.nro}, ${previa.doc.fecha || "s/f"}). No se crea otra.`,
+    );
+    return {
+      docto: previa.doc.nro,
+      entradaExterna: true,
+      salidaDocto,
+      salidaRespuesta,
+      payload: { salida: salidaPayload, entrada: null },
+    };
+  }
+
   let entrada;
   try {
     entrada = await importarEntrada(despacho, salidaDocto);
@@ -556,6 +670,7 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
         siesa_estado: "enviado",
         siesa_error: null,
         siesa_docto: r.docto || null,
+        siesa_entrada_externa: Boolean(r.entradaExterna),
         siesa_enviado_at: ahora,
         siesa_payload: r.payload || null,
         siesa_salida_respuesta: r.salidaRespuesta || null,
@@ -564,7 +679,8 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
           at: ahora,
           estado: "enviado",
           fase: "entrada",
-          resultado: "completo",
+          // "adoptada" = la entrada ya existía en SIESA y este backend NO la creó.
+          resultado: r.entradaExterna ? "entrada adoptada" : "completo",
           salida_docto: r.salidaDocto || null,
           entrada_docto: r.docto || null,
           ajuste: ajusteDelIntento(despacho),
@@ -573,9 +689,9 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
       console.log(
         `[requisicion] ✅ despacho ${id} en tránsito completo (salida ${
           r.salidaDocto || "s/n"
-        } → entrada ${r.docto || "s/n"})`,
+        } → entrada ${r.docto || "s/n"}${r.entradaExterna ? ", adoptada de SIESA" : ""})`,
       );
-      return { estado: "enviado" };
+      return { estado: "enviado", entradaExterna: Boolean(r.entradaExterna) };
     } catch (err) {
       const esConfig = err instanceof ConfigSiesaError;
       const agotado = intentos + 1 >= MAX_INTENTOS;
