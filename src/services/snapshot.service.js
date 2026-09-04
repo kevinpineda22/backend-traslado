@@ -25,11 +25,19 @@ const TAM_PAG = Number(process.env.CONNEKTA_TAM_PAG) || 1000;
 const CHUNK = 1000; // filas por insert a Supabase
 
 /* ─── Red de seguridad del snapshot ─────────────────────────────────────
-   La consulta de Connekta se pagina SIN un ORDER BY estable, así que cada pull
-   puede traer un subconjunto distinto (filas que se pierden y se duplican).
-   Estos guardas evitan que un pull incompleto pise o borre el snapshot bueno.
-   El fix de raíz es agregar ORDER BY a la consulta registrada; esto es la malla
-   de contención mientras tanto (y ante fallos de red / páginas cortas). */
+   EL FIX DE RAÍZ YA ESTÁ PUESTO, y no vive en este repo: `merkahorro_traslados_dev`
+   termina en `ORDER BY f150_id, v121a_id_item, f400_id_instalacion OFFSET 0 ROWS`
+   (el `OFFSET` es obligatorio: Connekta envuelve la consulta en una subconsulta y
+   SQL Server prohíbe ORDER BY ahí sin TOP/OFFSET). Con ese orden —el mismo con el
+   que agrupamos acá abajo— paginar 77 veces es determinístico. Ver
+   docs/CONTEXTO-Y-PENDIENTES-TRASLADOS.md §4.1.
+
+   Antes de eso, el mismo ítem traía datos distintos entre pulls y, combinado con
+   el prune destructivo de entonces, el catálogo se corrompía. Estas guardas son
+   lo que quedó de esa época y se quedan: cubren fallos de red, páginas cortas, y
+   el día en que alguien edite la consulta en Connekta y le vuele el ORDER BY sin
+   que este código se entere. Que la corrupción sea imposible hoy no las hace
+   sobrantes — las hace baratas. */
 
 // Completitud: filas crudas traídas vs total declarado por Connekta. Debajo de
 // este ratio asumimos que faltaron páginas y abortamos.
@@ -45,6 +53,22 @@ const GRACIA_PRUNE_MS =
 
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(v ?? "").trim();
+
+/**
+ * Huella de una fila cruda, para contar filas DISTINTAS.
+ *
+ * Va con TODAS las columnas ordenadas por nombre y no con la llave de agrupación
+ * (bodega|item|instalación): los LEFT JOIN de criterios multiplican filas que
+ * COMPARTEN esa llave y son legítimas, así que usarla como identidad haría contar
+ * repetido lo que no lo es. Dos huellas iguales son dos filas indistinguibles.
+ */
+function huellaFila(r) {
+  if (r == null || typeof r !== "object") return String(r);
+  return Object.keys(r)
+    .sort()
+    .map((k) => `${k}=${r[k] == null ? "" : String(r[k]).trim()}`)
+    .join("");
+}
 
 /* ─── Pull desde Connekta ──────────────────────────────────────────── */
 
@@ -88,7 +112,28 @@ async function traerDeConnekta() {
   // `crudas` (antes de filtrar) y `totalDeclarado` (lo que Connekta dice que hay)
   // alimentan la guarda de completitud: si crudas << totalDeclarado, faltaron
   // páginas y no debemos pisar el snapshot bueno.
-  return { filas, crudas: todos.length, totalDeclarado: primera.total };
+  //
+  // POR QUÉ ADEMÁS CONTAMOS LAS DISTINTAS. Cuando la paginación se desordena, las
+  // filas repetidas y las salteadas vienen en el MISMO viaje y se compensan: si la
+  // página 2 repite N filas de la 1, son N filas que ninguna página trajo, y
+  // `crudas` da igualito contra `totalDeclarado` con el dataset agujereado. Es lo
+  // que pasó en la consulta de tránsito (ver siesaTransito.consulta.js).
+  //
+  // Acá NO aborta, a propósito: esta consulta sí tiene su ORDER BY y el prune con
+  // gracia ya absorbe una omisión transitoria. Lo que hace es dejar rastro, para
+  // que el día que alguien toque la consulta en Connekta el log lo diga en vez de
+  // que lo descubramos por un sugerido raro tres semanas después.
+  const unicas = new Set(todos.map(huellaFila)).size;
+  if (primera.total > 0 && unicas < primera.total) {
+    console.warn(
+      `[snapshot] ⚠️ ${unicas} filas distintas de ${primera.total} declaradas ` +
+        `(${todos.length} traídas, ${todos.length - unicas} repetidas). Eso es paginación ` +
+        `sin orden estable: revisá que "${QUERY_TRASLADOS}" siga terminando en ` +
+        `ORDER BY … OFFSET 0 ROWS.`,
+    );
+  }
+
+  return { filas, crudas: todos.length, unicas, totalDeclarado: primera.total };
 }
 
 /**
@@ -209,7 +254,7 @@ async function contarSnapshot(bodegas) {
 export async function refrescarSnapshot() {
   const inicio = new Date().toISOString();
 
-  const { filas: rows, crudas, totalDeclarado } = await traerDeConnekta();
+  const { filas: rows, crudas, unicas, totalDeclarado } = await traerDeConnekta();
   const bodegas = bodegasInvolucradas();
 
   // Guarda 1 — completitud (páginas faltantes / respuestas cortas).
@@ -257,6 +302,7 @@ export async function refrescarSnapshot() {
     bodegas,
     origenFilas: rows.length,
     crudas,
+    unicas,
     totalDeclarado,
     actualizado_at: inicio,
   };

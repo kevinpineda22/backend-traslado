@@ -28,8 +28,21 @@ FROM dbo.t350_co_docto_contable AS D
 WHERE D.f350_fecha >= DATEADD(day, -60, GETDATE()) AND LTRIM(RTRIM(D.f350_id_tipo_docto)) IN ('CTS', 'CTE')
 ```
 
-Reglas de forma que Connekta impone: **sin `;` final, sin `ORDER BY`, sin
+Reglas de forma que Connekta impone: **sin `;` final, sin `ORDER BY` desnudo, sin
 comentarios**. Cualquiera de las tres devuelve un 500 de sintaxis.
+
+> ⚠️ **"Sin `ORDER BY`" es media verdad, y la mitad que falta importa.** Lo que
+> revienta es el `ORDER BY` *solo*: Connekta envuelve la consulta en una subconsulta
+> y SQL Server prohíbe ordenar ahí sin `TOP`/`OFFSET`. Con `OFFSET 0 ROWS` al final
+> **sí lo acepta** — es lo que arregló `merkahorro_traslados_dev`
+> (ver `CONTEXTO-Y-PENDIENTES-TRASLADOS.md` §4.1).
+>
+> Esta consulta **no** lo tiene, y por eso `siesaTransito.consulta.js` pide una sola
+> página de 2000 y lanza si hay más. El día que 60 días no entren en 2000 filas, la
+> salida no es subir el número para siempre: es agregarle
+> `ORDER BY D.f350_id_co, D.f350_id_tipo_docto, D.f350_consec_docto OFFSET 0 ROWS`
+> y recién ahí volver a paginar. **Ojo:** editar una consulta en Connekta le
+> **resetea los permisos** — hay que re-asignar el consumidor (§2) o el 401 vuelve.
 
 ### Por qué está escrita así
 

@@ -76,7 +76,7 @@ async function main() {
     // Una sola página, igual que el servicio. Paginar sin ORDER BY saltea filas, y
     // un diagnóstico con filas faltantes es peor que no diagnosticar: fue lo que
     // hizo reportar tres pares abiertos que estaban cerrados hacía seis días.
-    res = await ejecutarConsulta(nombre, 1, 2000);
+    res = await ejecutarConsulta(nombre, 1, 1000); // 1000 = tope de Connekta
   } catch (e) {
     console.error(`❌ ${e.message}`);
     process.exit(1);

@@ -44,7 +44,7 @@ Trae, por cada `(bodega, item, instalación)`: inventario, disponible, compromet
 
 - ❌ **No usar `IN (...)`** → Connekta lo interpreta como "múltiples consultas" y rechaza la paginación.
 - ✅ **Usar `OR`** encadenado (`f150_id='PV001' OR f150_id='00301' OR ...`).
-- ❌ **Sin comentarios `--`**, sin `;` final, sin `ORDER BY` (Connekta envuelve el query en una subconsulta y SQL Server prohíbe `ORDER BY` ahí sin `TOP/OFFSET`).
+- ❌ **Sin comentarios `--`**, sin `;` final, sin `ORDER BY` **desnudo** (Connekta envuelve el query en una subconsulta y SQL Server prohíbe `ORDER BY` ahí sin `TOP/OFFSET`). ✅ **Con `OFFSET 0 ROWS` al final sí se puede** — y en una consulta que se pagina **no es opcional**: sin orden estable las páginas se pisan y saltean filas (§4.1 de `CONTEXTO-Y-PENDIENTES-TRASLADOS.md`).
 - ⚠️ Al copiar/pegar el query es fácil comerse líneas y romper los JOINs de criterios → da el mismo error genérico de "múltiples consultas".
 
 El query completo y validado está en `sql/` (o pedirlo a quien mantiene Connekta).
@@ -385,7 +385,7 @@ Frontend: `VITE_TRASLADOS_API_URL=https://backend-traslado.vercel.app/api`
 ## 12. Glosario de gotchas (para no repetir errores)
 
 - Connekta dinámico **no acepta parámetros** → filtramos de nuestro lado.
-- En el query: **`OR` sí, `IN` no**; sin `--`, sin `;`, sin `ORDER BY`.
+- En el query: **`OR` sí, `IN` no**; sin `--`, sin `;`, y el `ORDER BY` **solo con `OFFSET 0 ROWS`** (desnudo da 500). Si la consulta se pagina, ese `ORDER BY` es obligatorio: sin él, cada página trae un subconjunto distinto.
 - Editar un query en Connekta **resetea sus permisos** → hay que re-asignarlos.
 - Vercel serverless **no persiste memoria** entre requests y su disco es **read-only**.
 - El mismo item se **repite por instalación** → siempre agregar antes de mostrar.

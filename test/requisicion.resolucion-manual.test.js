@@ -246,3 +246,48 @@ test("no se resuelve a mano algo que no está esperando a un humano", async () =
   );
   assert.equal(calls.buscarEntrada, 0, "ni se molesta en preguntarle a SIESA");
 });
+
+/* -----------------------------------------------------------------------------
+   NO SE GASTA UNA LLAMADA A CONNEKTA SI NO CAMBIA LA DECISIÓN (2026-09-04)
+
+   Medido en vivo: la primera resolución tardó >60 s con el rate limit de Connekta
+   activo (~10 llamadas por ventana) y la siguiente 1 s. Esto cuelga de un click,
+   y un botón que parece colgado se aprieta otra vez.
+
+   La relectura solo aporta cuando el cache CONTRADICE lo declarado — ahí el
+   documento puede haberse creado hace segundos. Si el cache ya coincide, releer
+   no cambia nada.
+   -------------------------------------------------------------------------- */
+
+test("si el cache ya confirma lo declarado, NO se relee", async () => {
+  impl.buscarEntrada = async () => ({ nro: "1419", co: "004", fecha: null });
+
+  await resolverIncierto(row.id, "enviado", null);
+
+  assert.equal(calls.buscarEntrada, 1, "una sola consulta: el cache ya decía que sí");
+});
+
+test("si el cache contradice, se relee ANTES de frenar a nadie", async () => {
+  // El caso que justifica la relectura: la entrada se creó hace segundos y el
+  // cache (TTL 30 s) todavía no la ve. Bloquear con datos viejos sería un falso
+  // freno sobre alguien que hizo bien el trabajo.
+  let llamada = 0;
+  impl.buscarEntrada = async (_id, o) => {
+    llamada += 1;
+    return o?.refrescar ? { nro: "1419", co: "004", fecha: null } : null;
+  };
+
+  const r = await resolverIncierto(row.id, "enviado", null);
+
+  assert.equal(llamada, 2, "cache primero, relectura después");
+  assert.equal(r.estado, "enviado");
+  assert.equal(row.siesa_docto, "1419");
+});
+
+test("y si tras releer sigue sin estar, ahí sí frena", async () => {
+  await assert.rejects(
+    () => resolverIncierto(row.id, "enviado", null),
+    (e) => e.statusCode === 409,
+  );
+  assert.equal(calls.buscarEntrada, 2, "se le dio la chance de la relectura");
+});

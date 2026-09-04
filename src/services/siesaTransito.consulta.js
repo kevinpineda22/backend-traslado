@@ -70,8 +70,33 @@ const cacheTtlMs = () => Number(process.env.SIESA_CONSULTA_TRANSITO_TTL_MS) || 3
  * Una sola página no tiene el problema: no hay "entre páginas" donde perderse.
  * Si algún día el universo no entra en una, `consultarTransito` lo detecta y
  * grita en vez de devolver datos incompletos en silencio.
+ *
+ * ── 1000 ES EL TECHO DE CONNEKTA, NO UNA ELECCIÓN ──
+ * Pedir más devuelve un HTTP 400: "El valor de tamPag no puede superar los 1000
+ * registros". Así que este número NO se sube. Cuando los documentos de la ventana
+ * pasen de 1000 hay DOS salidas, en este orden:
+ *
+ *   1. ACHICAR la ventana de fechas del SQL. Es la barata y la que hay que probar
+ *      primero: hoy son 60 días para ~113 documentos, y el apareo solo necesita
+ *      cubrir los despachos que todavía puedan estar abiertos.
+ *
+ *   2. DARLE ORDEN A LA CONSULTA, y recién ahí volver a paginar. "Connekta no
+ *      acepta ORDER BY" es media verdad, y conviene tenerla completa ANTES de
+ *      quedarse sin ventana que achicar: lo que rechaza con un 500 es el ORDER BY
+ *      DESNUDO, porque envuelve la consulta en una subconsulta y SQL Server no
+ *      ordena ahí sin TOP/OFFSET. Con `OFFSET 0 ROWS` al final SÍ lo acepta — es
+ *      lo que arregló `merkahorro_traslados_dev` y lo que hace que sus 77 páginas
+ *      sean determinísticas (docs/CONTEXTO-Y-PENDIENTES-TRASLADOS.md §4.1). Para
+ *      ésta sería:
+ *
+ *        ORDER BY D.f350_id_co, D.f350_id_tipo_docto, D.f350_consec_docto
+ *        OFFSET 0 ROWS
+ *
+ *      Ojo con el efecto colateral: editar una consulta en Connekta le RESETEA los
+ *      permisos, y hay que re-asignar nuestro consumidor o vuelve el 401 (que
+ *      Connekta reporta igual que "esa consulta no existe").
  */
-const TAM_PAGINA = 2000;
+const TAM_PAGINA = 1000;
 
 const RE_DESPACHO =
   /despacho\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
@@ -230,10 +255,13 @@ export async function consultarTransito({ refrescar = false } = {}) {
   // exactamente lo correcto.
   if (res.totalPaginas > 1) {
     throw new ConsultaTransitoError(
-      `La consulta "${nombre}" devolvió ${res.total} documentos en ${res.totalPaginas} páginas ` +
-        `de ${TAM_PAGINA}. No se puede paginar sin ORDER BY (Connekta no lo acepta) porque el ` +
-        `motor saltea filas entre páginas, y una entrada que no llega hace que el sistema cree ` +
-        `una segunda. Achicá la ventana de fechas del SQL o subí TAM_PAGINA.`,
+      `La consulta "${nombre}" devolvió ${res.total} documentos y no entran en una página de ` +
+        `${TAM_PAGINA}. Sin un ORDER BY estable el motor saltea filas entre páginas, y una ` +
+        `entrada que no llega hace que el sistema cree una segunda. TAM_PAGINA no se puede ` +
+        `subir: 1000 es el tope de Connekta. Salidas, en orden: ACHICAR la ventana de fechas ` +
+        `del SQL (hoy son 60 días), o agregarle a la consulta ` +
+        `"ORDER BY D.f350_id_co, D.f350_id_tipo_docto, D.f350_consec_docto OFFSET 0 ROWS" ` +
+        `(el OFFSET es lo que Connekta necesita para aceptarlo) y volver a paginar.`,
     );
   }
 

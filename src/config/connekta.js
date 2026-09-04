@@ -130,27 +130,41 @@ export async function ejecutarConsulta(descripcion, pagina = 1, tamPag = 100) {
   );
 }
 
-/**
- * Obtener todas las páginas de una consulta (con límite de seguridad).
- */
-export async function ejecutarConsultaCompleta(
-  descripcion,
-  tamPag = 100,
-  maxPaginas = 20,
-) {
-  const primera = await ejecutarConsulta(descripcion, 1, tamPag);
-  let todos = [...primera.datos];
+/* ─── Acá NO hay un `ejecutarConsultaCompleta` (2026-09-04) ─────────────────────
+   Había uno: pedía la página 1, después la 2, la 3… y devolvía todo concatenado.
+   Nadie lo llamaba, y así se fue — pero conviene dejar dicho por qué no vuelve,
+   porque es exactamente lo que uno escribe cuando quiere "traer todo".
 
-  const limite = Math.min(primera.totalPaginas, maxPaginas);
-  for (let pag = 2; pag <= limite; pag++) {
-    const page = await ejecutarConsulta(descripcion, pag, tamPag);
-    todos = todos.concat(page.datos);
-  }
+   PAGINAR UNA CONSULTA SIN `ORDER BY` NO TRAE TODO. SQL Server no garantiza
+   ningún orden entre dos consultas separadas, así que la página 2 puede repetir
+   filas de la 1 y —lo grave— SALTEARSE otras que no aparecen en ninguna. El
+   helper devolvía ese resultado con cara de completo, sin forma de saberlo.
 
-  return {
-    datos: todos,
-    total: primera.total,
-    paginasObtenidas: limite,
-    totalPaginas: primera.totalPaginas,
-  };
-}
+   Ya nos costó dos veces:
+     · Tránsito (113 filas, 2 páginas): las CTE 1412, 1413 y 1415 no volvieron
+       nunca y el verificador reportó como abiertos tres pares que estaban
+       cerrados. Peor todavía: "la entrada no existe" es la respuesta que autoriza
+       a crear una SEGUNDA entrada en el ERP.
+     · Snapshot (~77 páginas): el mismo ítem traía datos distintos entre pulls y,
+       con el prune destructivo de entonces, el catálogo se corrompía.
+
+   EL FIX DE RAÍZ VIVE EN CONNEKTA, NO ACÁ: la consulta registrada tiene que
+   terminar en `ORDER BY <llave estable> OFFSET 0 ROWS`. El `OFFSET` es
+   obligatorio — Connekta envuelve la consulta en una subconsulta y SQL Server
+   prohíbe `ORDER BY` ahí sin `TOP/OFFSET`; por eso el `ORDER BY` desnudo devuelve
+   un 500 de sintaxis, y de ahí salió la media verdad de que "Connekta no acepta
+   ORDER BY". Sí lo acepta, con `OFFSET 0 ROWS`: es lo que arregló
+   `merkahorro_traslados_dev` (docs/CONTEXTO-Y-PENDIENTES-TRASLADOS.md §4.1).
+
+   Mientras una consulta no tenga ese ORDER BY, quien la lee tiene que elegir a
+   mano y hacerse cargo de la elección:
+     · `siesaTransito.consulta.js` pide UNA sola página y lanza si hay más de una.
+     · `siesaAjuste.service.js` (~22k filas, no entran en una) pagina, pero cuenta
+       las filas distintas contra el `total` declarado y no cachea un mapa con
+       agujeros.
+     · `snapshot.service.js` pagina sobre una consulta que SÍ tiene el ORDER BY, y
+       aun así conserva guardas de completitud y prune con gracia.
+
+   Un helper genérico no puede tomar ninguna de esas tres decisiones, y su peor
+   efecto es esconder que hay una decisión que tomar. Por eso no está.
+   ────────────────────────────────────────────────────────────────────────────── */

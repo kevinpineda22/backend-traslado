@@ -194,7 +194,7 @@ async function verificarEntradaPrevia(despacho) {
  * @returns {Promise<{cara:"entrada"|"salida", existe:boolean, doc:object|null}>}
  * @throws {Error} si no se pudo preguntar — "no sé" NO es "no está"
  */
-async function buscarCierreEnSiesa(despachoId) {
+async function buscarCierreEnSiesa(despachoId, { refrescar = false } = {}) {
   const cara = soloSalida() ? "salida" : "entrada";
 
   if (!consultaConfigurada()) {
@@ -204,21 +204,45 @@ async function buscarCierreEnSiesa(despachoId) {
   }
 
   try {
-    // `refrescar`: el documento pudo crearse hace segundos, justo antes de que la
-    // persona apretara el botón. Un cache viejo diría "no está" sobre algo que sí.
     if (cara === "salida") {
-      const existe = await existeSalida(despachoId, { refrescar: true });
+      const existe = await existeSalida(despachoId, { refrescar });
       const doc = existe ? await buscarSalida(despachoId) : null;
       return { cara, existe, doc };
     }
 
-    const doc = await buscarEntrada(despachoId, { refrescar: true });
+    const doc = await buscarEntrada(despachoId, { refrescar });
     return { cara, existe: Boolean(doc), doc };
   } catch (e) {
     const err = new Error(`No se pudo consultar SIESA: ${e.message}`);
     err.noSePudoVerificar = true;
     throw err;
   }
+}
+
+/**
+ * Lo que hay en SIESA, releyendo SOLO si hace falta.
+ *
+ * Esto cuelga de un click, y Connekta tiene rate limit (~10 llamadas por
+ * ventana). Releer siempre costaba una llamada por cada botón apretado: medido en
+ * vivo, la primera resolución tardó más de 60 segundos con el rate limit activo y
+ * la siguiente 1. Dos personas destrabando despachos a la vez y el botón se
+ * cuelga un minuto — y un botón que parece colgado se aprieta otra vez.
+ *
+ * La relectura solo aporta cuando el cache CONTRADICE lo declarado: ahí sí puede
+ * ser que el documento se haya creado hace segundos y el cache (TTL 30s) todavía
+ * no lo vea, y bloquear con datos viejos sería un falso freno. Cuando el cache ya
+ * coincide con lo que la persona dice haber visto, releer no cambia la decisión:
+ * es una llamada regalada.
+ *
+ * @returns {Promise<{cara:string, existe:boolean, doc:object|null}>}
+ */
+async function estadoEnSiesaPara(despachoId, resultado) {
+  const esperaExista = resultado === "enviado";
+
+  const cacheado = await buscarCierreEnSiesa(despachoId);
+  if (cacheado.existe === esperaExista) return cacheado;
+
+  return buscarCierreEnSiesa(despachoId, { refrescar: true });
 }
 
 /** Marca el estado del envío en la cabecera del despacho. */
@@ -559,7 +583,7 @@ function errorVerificacion(mensaje) {
 async function verificarDeclaracion(despachoId, resultado, forzar) {
   let hallazgo;
   try {
-    hallazgo = await buscarCierreEnSiesa(despachoId);
+    hallazgo = await estadoEnSiesaPara(despachoId, resultado);
   } catch (e) {
     // NO SE PUDO PREGUNTAR ≠ NO ESTÁ. Frenar todos los cierres porque Connekta no
     // responde deja a la gente sin salida frente a un panel en rojo; aceptar en

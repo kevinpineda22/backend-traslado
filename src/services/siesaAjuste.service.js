@@ -69,6 +69,11 @@ import { sandboxOn } from "../config/sandbox.js";
      SIESA_AJUSTE_CONSULTA_COSTO  default merkahorro_costo_promedio_dev
      SIESA_AJUSTE_PARAM_ITEM      default v121_id_item (parámetro de la consulta)
      SIESA_AJUSTE_COSTO_DEFAULT   costo de respaldo si la consulta no trae el ítem
+     SIESA_AJUSTE_COSTO_MAX_PAGINAS tope de páginas del pull de costo (default 300)
+     SIESA_AJUSTE_COSTO_TOLERAR_PARCIAL  "1" para seguir con un pull de costo
+                                  incompleto (acepta valuar con el costo por
+                                  defecto). Apagada por defecto — ver el guard
+                                  de completitud en cargarMapaCostos.
      (reusa CONNEKTA_ID_COMPANIA / CONNI_KEY / CONNI_TOKEN / SIESA_IMPORTAR_URL)
    ============================================= */
 
@@ -164,6 +169,13 @@ export async function probarConsultaCosto(item) {
       totalRegistros: cache.total,
       paginasLeidas: cache.paginas,
       filasValidas: cache.filas,
+      // Estos tres son el termómetro de la paginación: `filasDistintas` tiene que
+      // dar igual a `totalRegistros`. Si da menos, hay filas que ninguna página
+      // trajo, y `filasRepetidas` es cuántas vinieron dos veces tapando el faltante.
+      filasTraidas: cache.crudas,
+      filasDistintas: cache.unicas,
+      filasRepetidas: cache.crudas - cache.unicas,
+      lecturaParcial: Boolean(cache.parcial),
       itemsEnMapa: cache.mapa.size,
       item: codigo,
       claveNormalizada: normItem(codigo),
@@ -297,12 +309,78 @@ function acumularFaltante(porItem, { item, bodega, cantidad }) {
    costo cambia lento, así que un TTL largo alcanza y sobra.
 
    Solo el COSTO: la unidad de negocio es fija (001) y no depende del ítem, así
-   que meterla acá era lo que la ataba a la instalación equivocada. */
+   que meterla acá era lo que la ataba a la instalación equivocada.
+
+   ── POR QUÉ ESTA PAGINACIÓN SE MIDE (2026-09-04) ──
+   Una consulta registrada que NO termine en `ORDER BY … OFFSET 0 ROWS` no tiene
+   orden garantizado entre páginas: la 2 puede repetir filas de la 1 y SALTEARSE
+   otras que no aparecen en ninguna. No es teórico — pasó en la consulta de
+   tránsito con 113 filas en 2 páginas: tres CTE no volvieron nunca (ver el
+   encabezado de siesaTransito.consulta.js).
+
+   Allá se resolvió pidiendo UNA sola página. Acá no se puede: medido el
+   2026-09-04 contra producción, el universo son 79.982 filas —80 páginas, porque
+   Connekta topea `tamPag` en 1000— que se agregan a 21.942 ítems. Entonces se
+   pagina, pero se CUENTA: filas distintas traídas contra el `total` que declara
+   Connekta. Si faltan, no se cachea nada y se lanza.
+
+   ESTADO AL 2026-09-04: esa misma medición dio 79.982 distintas de 79.982, cero
+   repetidas. O sea que hoy la consulta YA tiene un orden estable detrás — 80
+   páginas sin una sola fila repetida no sale por casualidad. El guard no está
+   tapando un agujero abierto: está puesto para que, si alguien edita la consulta
+   en Connekta y le vuela el ORDER BY, se note acá y no en la valuación de un
+   documento contable. Se verifica sin adivinar con
+   GET /api/siesa/ajuste/estado?probe=<item>.
+
+   POR QUÉ FALLAR CERRADO. Un ítem que no llega al mapa no se nota: si hay
+   `SIESA_AJUSTE_COSTO_DEFAULT` configurado, entra al ERP un ajuste
+   CONTABILIZADO valuado con un costo inventado. Y el mapa vive 6 HORAS en caché
+   — un pull con agujeros envenena todos los ajustes de esa ventana, en silencio.
+   Lanzar deja el despacho 'pendiente' con el motivo en el log y se destraba en un
+   minuto; una valuación mal escrita en el ERP la arregla contabilidad.
+
+   EL FIX DE RAÍZ NO VIVE ACÁ: es agregarle a la consulta, en Connekta,
+   `ORDER BY … OFFSET 0 ROWS`. El `OFFSET` no es adorno — Connekta envuelve la
+   consulta en una subconsulta y SQL Server prohíbe `ORDER BY` ahí sin
+   `TOP/OFFSET`; por eso el `ORDER BY` desnudo devuelve un 500 de sintaxis y por
+   eso quedó dando vueltas la idea de que "Connekta no acepta ORDER BY". Sí lo
+   acepta con `OFFSET 0 ROWS`, y es exactamente lo que arregló
+   `merkahorro_traslados_dev` (ver docs/CONTEXTO-Y-PENDIENTES-TRASLADOS.md §4.1).
+   Esto de acá es la red, no la solución. */
 const COSTO_TTL_MS = Number(process.env.SIESA_AJUSTE_COSTO_TTL_MS) || 6 * 60 * 60 * 1000;
 const COSTO_TAM_PAG = Number(process.env.SIESA_AJUSTE_COSTO_TAMPAG) || 1000;
 const COSTO_MAX_PAGINAS = Number(process.env.SIESA_AJUSTE_COSTO_MAX_PAGINAS) || 300;
 
-let _costoCache = { mapa: null, time: 0, total: 0, filas: 0, paginas: 0 };
+/**
+ * Válvula de escape para operación: degrada el guard de completitud a un warning
+ * y cachea el mapa igual, marcado como parcial. Existe para no dejar el ajuste
+ * muerto si el guard resulta más estricto que la consulta real, pero prenderla es
+ * aceptar explícitamente que un ajuste puede valuarse con el costo por defecto.
+ * Apagada por defecto, como todo lo que termina escribiendo en el ERP.
+ */
+const tolerarCostoParcial = () =>
+  ["1", "true", "on", "si", "sí"].includes(
+    String(process.env.SIESA_AJUSTE_COSTO_TOLERAR_PARCIAL || "").trim().toLowerCase(),
+  );
+
+/** El pull del costo vino con agujeros: no se cachea el mapa y no se escribe nada. */
+export class CostoIncompletoError extends Error {
+  constructor(mensaje) {
+    super(mensaje);
+    this.name = "CostoIncompletoError";
+  }
+}
+
+let _costoCache = {
+  mapa: null,
+  time: 0,
+  total: 0,
+  filas: 0,
+  crudas: 0,
+  unicas: 0,
+  paginas: 0,
+  parcial: false,
+};
 
 /**
  * Acumula filas al mapa item→costo. La consulta trae una fila por INSTALACIÓN y nos
@@ -328,31 +406,109 @@ function acumularCostos(mapa, rows) {
 }
 
 /**
+ * Huella de una fila, para contar filas DISTINTAS.
+ *
+ * Se arma con TODAS las columnas ordenadas por nombre, a propósito. La llave real
+ * de esta consulta no la elegimos nosotros (la crearon ellos), y asumir una de
+ * menos —`IdItem` solo, por ejemplo— colapsaría filas legítimas de instalaciones
+ * distintas y haría gritar al guard sobre un pull sano. Con la fila entera, dos
+ * huellas iguales son dos filas indistinguibles: o la consulta las devolvió
+ * repetidas, o la paginación nos dio la misma dos veces. En cualquiera de los dos
+ * casos aportan un solo dato al mapa.
+ */
+function huellaFila(r) {
+  if (r == null || typeof r !== "object") return String(r);
+  return Object.keys(r)
+    .sort()
+    .map((k) => `${k}=${r[k] == null ? "" : String(r[k]).trim()}`)
+    .join("");
+}
+
+/**
  * Carga (o reusa de caché) el mapa completo de costos. Pagina toda la consulta
- * dinámica una sola vez por TTL.
+ * dinámica una sola vez por TTL, y verifica que la lectura haya sido COMPLETA
+ * antes de cachearla (ver el bloque de arriba: sin ORDER BY las páginas saltean
+ * filas, y este mapa se usa para valuar un documento que entra contabilizado).
  */
 async function cargarMapaCostos({ force = false } = {}) {
   if (!force && _costoCache.mapa && Date.now() - _costoCache.time < COSTO_TTL_MS) {
     return _costoCache;
   }
   const mapa = new Map();
-  let filas = 0;
+  const huellas = new Set();
+  let filas = 0; // filas con ítem y costo utilizables
+  let crudas = 0; // filas devueltas, sirvan o no
+
+  const acumular = (datos) => {
+    const lote = datos || [];
+    crudas += lote.length;
+    for (const r of lote) huellas.add(huellaFila(r));
+    filas += acumularCostos(mapa, lote);
+  };
 
   const primera = await ejecutarConsulta(cfg.consultaCosto(), 1, COSTO_TAM_PAG);
-  filas += acumularCostos(mapa, primera.datos);
+  acumular(primera.datos);
 
-  const limite = Math.min(primera.totalPaginas || 1, COSTO_MAX_PAGINAS);
-  for (let pag = 2; pag <= limite; pag++) {
+  const totalPaginas = primera.totalPaginas || 1;
+  const total = primera.total || 0;
+
+  // TRUNCAR EN SILENCIO ES PEOR QUE FALLAR.
+  //
+  // `COSTO_MAX_PAGINAS` nació como tope de seguridad, pero el `Math.min` que tenía
+  // acá lo convertía en otra cosa: "leé lo que entre, armá el mapa con eso y
+  // cachealo seis horas". Si el universo crece más allá del tope, el mapa queda
+  // sin la cola de los ítems y nadie se entera — el síntoma es un costo por
+  // defecto, no un error. Se corta y se dice qué subir.
+  if (totalPaginas > COSTO_MAX_PAGINAS) {
+    throw new CostoIncompletoError(
+      `La consulta de costo "${cfg.consultaCosto()}" declara ${totalPaginas} páginas de ` +
+        `${COSTO_TAM_PAG} y el tope es ${COSTO_MAX_PAGINAS}. No se arma un mapa a medias para ` +
+        `valuar un ajuste: subí SIESA_AJUSTE_COSTO_MAX_PAGINAS o achicá la consulta.`,
+    );
+  }
+
+  for (let pag = 2; pag <= totalPaginas; pag++) {
     const page = await ejecutarConsulta(cfg.consultaCosto(), pag, COSTO_TAM_PAG);
-    filas += acumularCostos(mapa, page.datos);
+    acumular(page.datos);
+  }
+
+  const unicas = huellas.size;
+  const repetidas = crudas - unicas;
+
+  // FILAS REPETIDAS = SÍNTOMA, FILAS QUE FALTAN = ENFERMEDAD.
+  //
+  // Cuando la paginación se desordena, las dos cosas pasan JUNTAS y se compensan
+  // en el conteo: si la página 2 repite N filas de la 1, son N filas que ninguna
+  // página trajo. Por eso `crudas` puede dar exacto contra el `total` y el mapa
+  // estar igual de agujereado — hay que contar las DISTINTAS.
+  //
+  // (Así se vio en tránsito: 113 filas en 2 páginas, la CTS 1757 y la CTE 1421
+  // duplicadas, y las CTE 1412, 1413 y 1415 que no volvieron nunca.)
+  if (total > 0 && unicas < total) {
+    const msg =
+      `Lectura incompleta del costo en "${cfg.consultaCosto()}": ${unicas} filas distintas de ` +
+      `${total} declaradas (${crudas} traídas, ${repetidas} repetidas) en ${totalPaginas} ` +
+      `páginas de ${COSTO_TAM_PAG}. Sin ORDER BY la paginación saltea filas: agregale ` +
+      `"ORDER BY … OFFSET 0 ROWS" a la consulta en Connekta.`;
+
+    if (!tolerarCostoParcial()) {
+      throw new CostoIncompletoError(
+        `${msg} No se cachea el mapa; el ajuste queda pendiente. Si necesitás seguir igual, ` +
+          `SIESA_AJUSTE_COSTO_TOLERAR_PARCIAL=1 (acepta valuar con el costo por defecto).`,
+      );
+    }
+    console.warn(`[siesa] ⚠️ ${msg} SIESA_AJUSTE_COSTO_TOLERAR_PARCIAL está prendido: sigo igual.`);
   }
 
   _costoCache = {
     mapa,
     time: Date.now(),
-    total: primera.total || 0,
+    total,
     filas,
-    paginas: limite,
+    crudas,
+    unicas,
+    paginas: totalPaginas,
+    parcial: total > 0 && unicas < total,
   };
   return _costoCache;
 }
@@ -360,6 +516,14 @@ async function cargarMapaCostos({ force = false } = {}) {
 /** Fuerza recarga del mapa de costos (para probes / diagnóstico). */
 export async function refrescarMapaCostos() {
   return cargarMapaCostos({ force: true });
+}
+
+/**
+ * Tira el mapa cacheado. Para los tests y para forzar una relectura sin esperar
+ * las 6 horas del TTL. Mismo rol que `invalidarCache` en siesaTransito.consulta.js.
+ */
+export function invalidarCacheCostos() {
+  _costoCache = { mapa: null, time: 0, total: 0, filas: 0, crudas: 0, unicas: 0, paginas: 0, parcial: false };
 }
 
 /**
@@ -382,6 +546,11 @@ export async function getDatosItems(items) {
   try {
     ({ mapa } = await cargarMapaCostos());
   } catch (e) {
+    // El error de lectura incompleta viaja TAL CUAL: su mensaje ya trae los
+    // números y el fix (el ORDER BY en Connekta), y envolverlo en "no se pudo
+    // consultar el costo" lo haría parecer una caída de red — que es justo el
+    // diagnóstico equivocado, porque la consulta respondió perfecto.
+    if (e instanceof CostoIncompletoError) throw e;
     throw new Error(`No se pudo consultar el costo (${cfg.consultaCosto()}): ${e.message}`);
   }
 
