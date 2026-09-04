@@ -23,6 +23,7 @@ export function redondear(x) {
    FLUJO GENERAL — Stock de seguridad
    ============================================= */
 
+   
 /**
  * Sugerido del flujo general.
  *   stock_seguridad = consumoDestino × periodoCubrimiento
