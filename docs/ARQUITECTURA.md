@@ -372,6 +372,39 @@ Frontend: `VITE_TRASLADOS_API_URL=https://backend-traslado.vercel.app/api`
 
 ---
 
+## 10.5. `vercel.json` — NO lo "modernices"
+
+El deploy usa el formato **`version` + `builds` + `routes`**. Parece legacy. Lo es. **Dejalo así.**
+
+Con `builds`/`routes`, el `dest` enruta a la función **sin reescribir la URL**: Express recibe
+la ruta original (`/api/health`) y sus rutas montadas en `/api` responden.
+
+El 2026-07-02 se migró al formato moderno con `rewrites`:
+
+```json
+{ "rewrites": [{ "source": "/(.*)", "destination": "src/server.js" }] }
+```
+
+Y `rewrites` **sí reescribe la ruta visible**. Express pasó a recibir literalmente
+`/src/server.js` en cada request, no encontraba ninguna ruta, y devolvía su propio 404:
+
+```
+GET /src/server.js  404  - 41     <- 41 bytes = {"ok":false,"error":"Ruta no encontrada"}
+```
+
+**Cómo reconocerlo:** `/` responde 200 con el JSON de la raíz, y TODO lo demás devuelve el
+mismo 404 de 41 bytes — incluso una ruta inventada. Si ves eso, es esto. No es el código.
+
+No explotó en julio porque el alias de producción siguió sirviendo un deployment viejo,
+construido con la config buena. Reventó el 2026-09-04, dos meses después, el día que un
+deploy promovió build nuevo y dejó el panel de Traslados sin backend.
+
+La lección que vale más que el fix: **un cambio de infraestructura puede tardar meses en
+mostrarse.** La fecha del commit no es la fecha del incidente, y "hoy no tocamos nada" no
+descarta un cambio de hace dos meses.
+
+---
+
 ## 11. Pendientes
 
 - [ ] **Flujo Llano:** upload del Excel (item, unidades, capacidad, clase A/B/C) + pantalla. Lógica ya lista en `sugerido.service.js`.
