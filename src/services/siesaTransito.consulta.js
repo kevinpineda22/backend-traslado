@@ -44,8 +44,34 @@ const nombreConsulta = () => String(process.env.SIESA_CONSULTA_TRANSITO || "").t
  */
 const cacheTtlMs = () => Number(process.env.SIESA_CONSULTA_TRANSITO_TTL_MS) || 30_000;
 
-/** Páginas de 100 que se traen como mucho. 20 × 100 = 2000 documentos. */
-const MAX_PAGINAS = 20;
+/**
+ * Documentos que se traen EN UNA SOLA PÁGINA. No es una preferencia: es una
+ * corrección.
+ *
+ * ── POR QUÉ NO SE PAGINA (2026-09-04) ──
+ * La consulta registrada en Connekta NO puede llevar `ORDER BY` — Connekta lo
+ * rechaza con un 500 de sintaxis (ver docs/CONSULTA_TRANSITO_CONNEKTA.md). Y sin
+ * ORDER BY, SQL Server no garantiza NINGÚN orden entre una página y la siguiente:
+ * pedir "página 1" y después "página 2" puede devolver filas repetidas de la
+ * primera y, peor, SALTEARSE otras que no aparecen en ninguna.
+ *
+ * Eso no es teórico. Con 113 filas en 2 páginas, en una misma mañana:
+ *   · la CTS 1757 y la CTE 1421 volvieron DOS veces (fila repetida entre páginas);
+ *   · las CTE 1412, 1413 y 1415 no volvieron NUNCA, y el verificador reportó tres
+ *     pares abiertos que estaban cerrados desde el 29 de agosto;
+ *   · dos corridas seguidas dieron totales distintos (44/34 y 39/32 documentos).
+ *
+ * La fila repetida la tapa `indexar` (ver el Set `vistos`). La fila SALTEADA no la
+ * tapa nada, y es la peligrosa: si la entrada de un despacho no viene,
+ * `verificarEntradaPrevia` responde "no existe" y el sistema crea una SEGUNDA
+ * entrada. Inventario duplicado en la tienda destino, por un renglón que el motor
+ * decidió no mandar.
+ *
+ * Una sola página no tiene el problema: no hay "entre páginas" donde perderse.
+ * Si algún día el universo no entra en una, `consultarTransito` lo detecta y
+ * grita en vez de devolver datos incompletos en silencio.
+ */
+const TAM_PAGINA = 2000;
 
 const RE_DESPACHO =
   /despacho\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
@@ -176,8 +202,10 @@ export async function consultarTransito({ refrescar = false } = {}) {
     // .service (que ahora depende de este módulo) mate el proceso al arrancar en
     // cualquier entorno sin Connekta configurado — tests incluidos. Acá adentro,
     // el costo de esa config solo lo paga quien realmente va a consultar.
-    const { ejecutarConsultaCompleta } = await import("../config/connekta.js");
-    res = await ejecutarConsultaCompleta(nombre, 100, MAX_PAGINAS);
+    const { ejecutarConsulta } = await import("../config/connekta.js");
+    // UNA sola página, a propósito. Ver TAM_PAGINA: paginar sin ORDER BY saltea
+    // filas, y una entrada que no llega hace que el sistema cree una segunda.
+    res = await ejecutarConsulta(nombre, 1, TAM_PAGINA);
   } catch (e) {
     // Connekta devuelve el MISMO 401 para "sin permiso" y para "no existe esa
     // consulta". El mensaje lo dice para que nadie pierda una tarde con eso.
@@ -189,15 +217,28 @@ export async function consultarTransito({ refrescar = false } = {}) {
     );
   }
 
-  const { salidas, entradas } = indexar(res.datos || []);
-  cache = { at: Date.now(), salidas, entradas };
-
-  if (res.paginasObtenidas < res.totalPaginas) {
-    console.warn(
-      `[transito] la consulta "${nombre}" tiene ${res.totalPaginas} páginas y se leyeron ` +
-        `${res.paginasObtenidas}. Achicá la ventana de fechas del SQL o subí MAX_PAGINAS.`,
+  // LA LECTURA TIENE QUE SER COMPLETA O NO SIRVE.
+  //
+  // Todo lo que cuelga de esta consulta —el guard anti-duplicado, la recuperación
+  // del consecutivo, la verificación del cierre manual— responde "no existe"
+  // cuando un documento no llega. Y "no existe" es la respuesta que autoriza a
+  // ESCRIBIR en el ERP. Devolver una lectura parcial en silencio es peor que no
+  // leer nada: quien pregunta cree que sabe.
+  //
+  // Con más de una página estamos otra vez en el terreno del orden inestable, así
+  // que se corta acá y se dice qué hacer. Frenar la entrada automática por esto es
+  // exactamente lo correcto.
+  if (res.totalPaginas > 1) {
+    throw new ConsultaTransitoError(
+      `La consulta "${nombre}" devolvió ${res.total} documentos en ${res.totalPaginas} páginas ` +
+        `de ${TAM_PAGINA}. No se puede paginar sin ORDER BY (Connekta no lo acepta) porque el ` +
+        `motor saltea filas entre páginas, y una entrada que no llega hace que el sistema cree ` +
+        `una segunda. Achicá la ventana de fechas del SQL o subí TAM_PAGINA.`,
     );
   }
+
+  const { salidas, entradas } = indexar(res.datos || []);
+  cache = { at: Date.now(), salidas, entradas };
 
   return { salidas, entradas };
 }

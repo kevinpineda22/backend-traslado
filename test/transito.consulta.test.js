@@ -17,6 +17,9 @@ import assert from "node:assert/strict";
 
 let mod;
 let filas;
+// Páginas que dice tener la consulta. 1 = el caso real; >1 se usa para probar
+// que una lectura partida NO se devuelve como si fuera completa.
+let paginas;
 
 const nota = (uuid) => `Traslado salida 00301 -> 00401 (despacho ${uuid})`;
 const A = "afe067d3-bc4a-4d36-8c10-532967b929c9";
@@ -25,11 +28,13 @@ const B = "e128e90c-ad47-4ea9-8e50-3a4c1a4b5da3";
 before(async () => {
   mock.module("../src/config/connekta.js", {
     exports: {
-      ejecutarConsultaCompleta: async () => ({
+      // Una sola página, como en producción: la consulta de tránsito NO pagina.
+      // `paginas` deja que un test simule el caso partido (ver el test del final).
+      ejecutarConsulta: async () => ({
         datos: filas,
         total: filas.length,
-        paginasObtenidas: 1,
-        totalPaginas: 1,
+        pagina: 1,
+        totalPaginas: paginas,
       }),
     },
   });
@@ -39,6 +44,7 @@ before(async () => {
 beforeEach(() => {
   process.env.SIESA_CONSULTA_TRANSITO = "consulta_test";
   filas = [];
+  paginas = 1;
   mod.invalidarCache();
 });
 
@@ -178,4 +184,46 @@ test("la deduplicación no cruza las caras: una CTS y una CTE con el mismo nro c
 
   assert.equal((await mod.buscarSalida(A)).nro, "1757");
   assert.equal((await mod.buscarEntrada(A)).nro, "1757");
+});
+
+/* -----------------------------------------------------------------------------
+   UNA LECTURA PARCIAL NO SE DEVUELVE COMO COMPLETA (2026-09-04)
+
+   La consulta no puede llevar ORDER BY (Connekta lo rechaza), y sin ORDER BY el
+   motor no garantiza el orden entre páginas: pedir la 1 y después la 2 repite
+   filas y SALTEA otras.
+
+   Pasó de verdad, con 113 filas en 2 páginas: las CTE 1412, 1413 y 1415 no
+   volvieron en ninguna página, y el verificador reportó tres pares abiertos que
+   estaban cerrados desde el 29 de agosto.
+
+   La fila repetida la tapa `indexar`. La SALTEADA no la tapa nada: si la entrada
+   de un despacho no llega, `verificarEntradaPrevia` dice "no existe" y el sistema
+   crea una SEGUNDA. Por eso, ante más de una página, esto LANZA. Frenar la
+   entrada automática es lo correcto; devolver media lectura no.
+   -------------------------------------------------------------------------- */
+
+test("si la consulta no entra en una página, LANZA en vez de devolver media lectura", async () => {
+  paginas = 2;
+  filas = [{ CO: "003", Tipo: "CTS", Nro: 1750, Fecha: null, Notas: nota(A) }];
+
+  await assert.rejects(
+    () => mod.buscarEntrada(A),
+    (e) => {
+      assert.match(e.message, /p[áa]ginas/i);
+      assert.match(e.message, /ORDER BY/, "el mensaje tiene que decir POR QUÉ no se pagina");
+      return true;
+    },
+  );
+});
+
+test("y no deja el resultado parcial en el cache", async () => {
+  paginas = 2;
+  filas = [{ CO: "003", Tipo: "CTS", Nro: 1750, Fecha: null, Notas: nota(A) }];
+  await assert.rejects(() => mod.buscarSalida(A));
+
+  // Una lectura incompleta cacheada seguiría contestando "no existe" durante todo
+  // el TTL, y esa es justo la respuesta que autoriza a escribir en el ERP.
+  paginas = 1;
+  assert.equal((await mod.buscarSalida(A)).nro, "1750");
 });
