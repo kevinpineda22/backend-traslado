@@ -172,6 +172,55 @@ async function verificarEntradaPrevia(despacho) {
   return doc ? { existe: true, doc } : { existe: false };
 }
 
+/**
+ * ¿Está en SIESA el documento que CIERRA este despacho?
+ *
+ * Se le pregunta al ERP, no a nuestra base. Sirve para contrastar lo que una
+ * persona declara desde el panel contra lo que realmente hay (ver
+ * `resolverIncierto`).
+ *
+ * QUÉ DOCUMENTO CIERRA depende del modo: en el flujo completo es la ENTRADA (la
+ * salida sola deja la mercancía en tránsito, fuera de las dos bodegas); con
+ * `SIESA_SOLO_SALIDA` la entrada se hace a mano a propósito, así que lo que se
+ * puede exigir es la salida.
+ *
+ * OJO CON `existe` VS `doc`. No son lo mismo y la diferencia importa:
+ * `buscarSalida` devuelve null cuando hay VARIAS salidas del despacho — se niega
+ * a elegir una, y con razón. Pero "hay tres" no es "no hay ninguna": tomar ese
+ * null por ausencia haría que el panel le dijera a una persona que el documento
+ * no está, justo en los despachos más rotos. Por eso la existencia se pregunta
+ * aparte, y `doc` queda en null cuando no se puede señalar UNO solo.
+ *
+ * @returns {Promise<{cara:"entrada"|"salida", existe:boolean, doc:object|null}>}
+ * @throws {Error} si no se pudo preguntar — "no sé" NO es "no está"
+ */
+async function buscarCierreEnSiesa(despachoId) {
+  const cara = soloSalida() ? "salida" : "entrada";
+
+  if (!consultaConfigurada()) {
+    const err = new Error("No se puede verificar en SIESA: falta SIESA_CONSULTA_TRANSITO.");
+    err.noSePudoVerificar = true;
+    throw err;
+  }
+
+  try {
+    // `refrescar`: el documento pudo crearse hace segundos, justo antes de que la
+    // persona apretara el botón. Un cache viejo diría "no está" sobre algo que sí.
+    if (cara === "salida") {
+      const existe = await existeSalida(despachoId, { refrescar: true });
+      const doc = existe ? await buscarSalida(despachoId) : null;
+      return { cara, existe, doc };
+    }
+
+    const doc = await buscarEntrada(despachoId, { refrescar: true });
+    return { cara, existe: Boolean(doc), doc };
+  } catch (e) {
+    const err = new Error(`No se pudo consultar SIESA: ${e.message}`);
+    err.noSePudoVerificar = true;
+    throw err;
+  }
+}
+
 /** Marca el estado del envío en la cabecera del despacho. */
 async function marcar(despachoId, patch) {
   const { error } = await supabase.from(TABLE).update(patch).eq("id", despachoId);
@@ -486,6 +535,77 @@ async function enviarTransito(despacho) {
  *   siesaData?:any, httpStatus?:number}>} `siesaData` es la respuesta CRUDA de SIESA
  *   cuando el fallo vino del ERP (ausente en timeouts y fallos de red).
  */
+/** Rechazo de una declaración que SIESA contradice. 409 + `expose` para que el panel lo muestre. */
+function errorVerificacion(mensaje) {
+  const e = new Error(mensaje);
+  e.statusCode = 409;
+  e.expose = true;
+  e.verificacion = "contradicha";
+  return e;
+}
+
+/**
+ * Contrasta contra SIESA lo que la persona declara desde el panel.
+ *
+ * Devuelve el `sello` que queda escrito en el historial: la frase que, dentro de
+ * seis meses, le va a decir a quien audite si ese cierre se comprobó o se creyó.
+ *
+ * @param {string} despachoId
+ * @param {"enviado"|"reintentar"} resultado
+ * @param {boolean} forzar - cerrar aunque SIESA no confirme
+ * @returns {Promise<{estado:string, sello:string, doc:object|null}>}
+ * @throws {Error} 409 si SIESA contradice la declaración y no se forzó
+ */
+async function verificarDeclaracion(despachoId, resultado, forzar) {
+  let hallazgo;
+  try {
+    hallazgo = await buscarCierreEnSiesa(despachoId);
+  } catch (e) {
+    // NO SE PUDO PREGUNTAR ≠ NO ESTÁ. Frenar todos los cierres porque Connekta no
+    // responde deja a la gente sin salida frente a un panel en rojo; aceptar en
+    // silencio es lo que vinimos a arreglar. Se acepta y se deja dicho.
+    if (!e.noSePudoVerificar) throw e;
+    console.warn(`[requisicion] despacho ${despachoId}: no se pudo verificar — ${e.message}`);
+    return { estado: "no-verificable", sello: `SIN VERIFICAR (${e.message})`, doc: null };
+  }
+
+  const { cara, existe, doc } = hallazgo;
+  const nombre = cara === "salida" ? "la salida" : "la entrada";
+
+  if (resultado === "enviado") {
+    if (existe) {
+      return {
+        estado: "confirmada",
+        sello: `verificado en SIESA: ${nombre} ${doc?.nro ?? "existe (duplicada)"}`,
+        doc,
+      };
+    }
+    if (forzar) {
+      return { estado: "forzada", sello: `FORZADO: SIESA no encuentra ${nombre}`, doc: null };
+    }
+    throw errorVerificacion(
+      `SIESA no encuentra ${nombre} de este traslado, así que no se puede dar por subido. ` +
+        `Marcarlo igual lo deja como TERMINAL y la mercancía queda en tránsito, fuera de las dos ` +
+        `bodegas, sin que nadie lo vuelva a ver. Creá ${nombre} en el ERP y volvé a intentar; ` +
+        `si estás segura de que está y la consulta no la ve, usá "cerrar sin verificar".`,
+    );
+  }
+
+  // "reintentar" — devolverlo a la cola sobre un documento que SÍ existe lo manda
+  // de nuevo y duplica el movimiento. Es el 19/08 hecho a mano.
+  if (existe && !forzar) {
+    throw errorVerificacion(
+      `SIESA SÍ tiene ${nombre} de este traslado${doc?.nro ? ` (${doc.nro})` : ""}. ` +
+        `Devolverlo a la cola lo subiría por segunda vez y duplicaría el movimiento de inventario. ` +
+        `Si el documento del ERP está mal, anulalo allá primero.`,
+    );
+  }
+  if (existe) {
+    return { estado: "forzada", sello: `FORZADO: vuelve a la cola con ${nombre} ya en SIESA`, doc: null };
+  }
+  return { estado: "confirmada", sello: `verificado en SIESA: ${nombre} no está`, doc: null };
+}
+
 /**
  * Cierra un envío trabado con lo que una persona vio en SIESA.
  *
@@ -497,13 +617,35 @@ async function enviarTransito(despacho) {
  *     mandado OTRA VEZ y duplicado el movimiento. Marcarlos cierra esa puerta,
  *     porque "enviado" sí es terminal.
  *
- * Los dos caminos exigen que alguien haya MIRADO el ERP — por eso no hay forma
- * automática:
+ * Los dos caminos declaran algo sobre el ERP:
  *
- *   "enviado"    → la salida SÍ está en SIESA. Se marca enviado y no se manda
+ *   "enviado"    → el documento SÍ está en SIESA. Se marca enviado y no se manda
  *                  nada más. Es terminal, así que ya nadie lo vuelve a tocar.
- *   "reintentar" → la salida NO está. Vuelve a "pendiente" y el cron lo retoma
- *                  por el camino normal.
+ *   "reintentar" → NO está. Vuelve a "pendiente" y el cron lo retoma por el
+ *                  camino normal.
+ *
+ * ── LA DECLARACIÓN SE CONTRASTA CONTRA SIESA (2026-09-04) ──
+ * Antes se creía sin más, y las dos direcciones podían hacer daño:
+ *
+ *   · Un "enviado" sobre algo que NO está deja la mercancía en tránsito —fuera
+ *     de la bodega origen y de la destino— y `enviado` es TERMINAL: el despacho
+ *     desaparece de los tableros, el cron no lo levanta, nadie lo vuelve a ver.
+ *     Es un hueco de inventario que se apaga solo.
+ *   · Un "reintentar" sobre algo que SÍ está manda el documento de nuevo y
+ *     DUPLICA el movimiento. Es el desastre del 19/08 servido a mano.
+ *
+ * Así que se le pregunta a SIESA y se exige que la realidad coincida con lo que
+ * la persona dice haber visto. No es desconfianza: es que a las 6 de la mañana,
+ * con veinte despachos en rojo, cualquiera se confunde de fila.
+ *
+ * `forzar` deja pasar igual — hay casos legítimos donde la consulta no ve el
+ * documento (fuera de la ventana del SQL, o creado sin el uuid en las notas) —
+ * pero queda escrito en el log que se cerró SIN verificar. La escapatoria existe;
+ * silenciosa, no.
+ *
+ * Cuando la verificación encuentra el documento, se guarda su consecutivo en
+ * `siesa_docto`. Antes quedaba en null y no había forma de saber, mirando la
+ * base, con qué documento se había cerrado el despacho.
  *
  * No se toca `siesa_intentos`: el historial tiene que seguir mostrando que hubo
  * un envío sin respuesta. Borrar ese rastro es perder la única pista de por qué
@@ -512,8 +654,10 @@ async function enviarTransito(despacho) {
  * @param {string} despachoId
  * @param {"enviado"|"reintentar"} resultado - lo que la persona verificó
  * @param {string} [quien] - correo de quien lo resolvió (queda como constancia)
+ * @param {object} [opts]
+ * @param {boolean} [opts.forzar] - cerrar aunque SIESA no confirme
  */
-export async function resolverIncierto(despachoId, resultado, quien = null) {
+export async function resolverIncierto(despachoId, resultado, quien = null, { forzar = false } = {}) {
   const { data: despacho } = await supabase
     .from(TABLE)
     .select("id, siesa_estado, siesa_intentos, siesa_intentos_log")
@@ -542,8 +686,16 @@ export async function resolverIncierto(despachoId, resultado, quien = null) {
     throw e;
   }
 
+  const verificacion = await verificarDeclaracion(despachoId, resultado, forzar);
+
   const estado = resultado === "enviado" ? "enviado" : "pendiente";
-  await marcar(despachoId, {
+  const firma = quien ? " — " + quien : "";
+  const sello =
+    resultado === "enviado"
+      ? `Resuelto A MANO en SIESA (venia de "${despacho.siesa_estado}") · ${verificacion.sello}${firma}`
+      : `Vuelve a la cola (venia de "${despacho.siesa_estado}") · ${verificacion.sello}${firma}`;
+
+  const patch = {
     siesa_estado: estado,
     siesa_enviado_at: resultado === "enviado" ? new Date().toISOString() : null,
     siesa_error: null,
@@ -552,20 +704,25 @@ export async function resolverIncierto(despachoId, resultado, quien = null) {
       at: new Date().toISOString(),
       estado,
       fase: "resolucion-manual",
-      error:
-        resultado === "enviado"
-          ? `Resuelto A MANO en SIESA (venia de "${despacho.siesa_estado}")${
-              quien ? " — " + quien : ""
-            }`
-          : `Verificado en SIESA: NO esta, vuelve a la cola${quien ? " — " + quien : ""}`,
+      verificacion: verificacion.estado,
+      error: sello,
     }),
-  });
+  };
+
+  // El consecutivo que confirmó la verificación. Sin esto `siesa_docto` quedaba
+  // en null y no había forma de saber, mirando la base, con qué documento del ERP
+  // se cerró el despacho.
+  if (resultado === "enviado" && verificacion.doc?.nro) {
+    patch.siesa_docto = String(verificacion.doc.nro);
+  }
+
+  await marcar(despachoId, patch);
 
   console.log(
-    `[requisicion] 🔎 despacho ${despachoId} resuelto a mano: ${resultado}` +
-      (quien ? ` (${quien})` : ""),
+    `[requisicion] 🔎 despacho ${despachoId} resuelto a mano: ${resultado} ` +
+      `(${verificacion.sello})${quien ? ` (${quien})` : ""}`,
   );
-  return { estado, resultado };
+  return { estado, resultado, verificacion: verificacion.estado, docto: verificacion.doc?.nro ?? null };
 }
 
 export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {

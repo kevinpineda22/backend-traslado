@@ -154,18 +154,26 @@ export async function estadoAjusteCtrl(req, res, next) {
 /**
  * POST /api/siesa/requisiciones/:despachoId/resolver
  * Cierra un envio que quedo INCIERTO (SIESA no respondio y no se sabe si entro).
- * Body: { resultado: "enviado" | "reintentar", correo? }
+ * Body: { resultado: "enviado" | "reintentar", correo?, forzar? }
  *
- * Lo dispara una persona DESPUES de mirar el ERP. No hay forma automatica: el
- * sistema no puede saber si el documento entro (ver sql/033).
+ * Lo dispara una persona DESPUES de mirar el ERP. Lo que declara se contrasta
+ * contra SIESA antes de aceptarlo (ver `resolverIncierto`): un cierre sobre un
+ * documento que no existe deja mercancia en transito y es TERMINAL, y un
+ * "reintentar" sobre uno que si existe duplica el movimiento.
+ *
+ * Responde 409 con el motivo cuando SIESA contradice la declaracion. `forzar`
+ * pasa por encima y queda anotado en el historial.
  */
 export async function resolverInciertoCtrl(req, res, next) {
   try {
-    const { resultado, correo } = req.body || {};
+    const { resultado, correo, forzar } = req.body || {};
+    // `forzar` cierra aunque SIESA no confirme lo declarado. Explícito y a mano:
+    // el default verifica, y el atajo queda escrito en el historial del despacho.
     const data = await resolverIncierto(
       req.params.despachoId,
       String(resultado || "").trim(),
       typeof correo === "string" ? correo.trim().toLowerCase() : null,
+      { forzar: forzar === true || ["1", "true"].includes(String(forzar).toLowerCase()) },
     );
     res.json({ ok: true, data });
   } catch (error) {

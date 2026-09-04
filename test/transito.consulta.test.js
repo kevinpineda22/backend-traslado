@@ -125,3 +125,57 @@ test("el uuid se compara sin importar mayúsculas", async () => {
   filas = [{ CO: "003", Tipo: "CTS", Nro: 1754, Fecha: null, Notas: nota(A.toUpperCase()) }];
   assert.equal((await mod.buscarSalida(A)).nro, "1754");
 });
+
+/* -----------------------------------------------------------------------------
+   FILA REPETIDA ≠ DOCUMENTO REPETIDO (2026-09-04)
+
+   El verificador informaba "CTS 1757, 1757" y "CTE 1419, 1419" como duplicados
+   y pedía borrar las sobrantes — sobre traslados sanos. Pero (C.O., tipo,
+   consecutivo) es la LLAVE del documento en SIESA: dos filas con el mismo número
+   son la misma fila devuelta dos veces por la consulta.
+
+   Los duplicados de verdad (los del 19/08) se distinguen solos: llevan números
+   DISTINTOS.
+   -------------------------------------------------------------------------- */
+
+test("el mismo documento repetido en la consulta cuenta UNA vez", async () => {
+  filas = [
+    { CO: "003", Tipo: "CTS", Nro: 1757, Fecha: "2026-09-04T00:00:00", Notas: nota(A) },
+    { CO: "003", Tipo: "CTS", Nro: 1757, Fecha: "2026-09-04T00:00:00", Notas: nota(A) },
+  ];
+
+  const salida = await mod.buscarSalida(A);
+  assert.ok(salida, "una fila repetida no puede dejar al despacho sin consecutivo");
+  assert.equal(salida.nro, "1757");
+});
+
+test("pero dos documentos DISTINTOS siguen siendo duplicados", async () => {
+  filas = [
+    { CO: "001", Tipo: "CTS", Nro: 4773, Fecha: null, Notas: nota(A) },
+    { CO: "001", Tipo: "CTS", Nro: 4773, Fecha: null, Notas: nota(A) },
+    { CO: "001", Tipo: "CTS", Nro: 4775, Fecha: null, Notas: nota(A) },
+  ];
+
+  assert.equal(await mod.buscarSalida(A), null, "4773 y 4775 son dos documentos de verdad");
+});
+
+test("el mismo número en OTRO C.O. sí son dos documentos", async () => {
+  // El consecutivo es por centro de operación: 003-CTS-1757 y 001-CTS-1757 son
+  // dos documentos, no uno repetido. La llave incluye el C.O.
+  filas = [
+    { CO: "003", Tipo: "CTS", Nro: 1757, Fecha: null, Notas: nota(A) },
+    { CO: "001", Tipo: "CTS", Nro: 1757, Fecha: null, Notas: nota(A) },
+  ];
+
+  assert.equal(await mod.buscarSalida(A), null);
+});
+
+test("la deduplicación no cruza las caras: una CTS y una CTE con el mismo nro conviven", async () => {
+  filas = [
+    { CO: "003", Tipo: "CTS", Nro: 1757, Fecha: null, Notas: nota(A) },
+    { CO: "003", Tipo: "CTE", Nro: 1757, Fecha: null, Notas: nota(A) },
+  ];
+
+  assert.equal((await mod.buscarSalida(A)).nro, "1757");
+  assert.equal((await mod.buscarEntrada(A)).nro, "1757");
+});

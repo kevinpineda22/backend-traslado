@@ -97,6 +97,8 @@ let cache = null; // { at:number, salidas:Map, entradas:Map }
 function indexar(filas) {
   const salidas = new Map();
   const entradas = new Map();
+  // Un documento ya visto, por su identidad real. Ver la nota de abajo.
+  const vistos = new Set();
 
   for (const f of filas) {
     const id = despachoIdDeNotas(f?.Notas);
@@ -109,7 +111,28 @@ function indexar(filas) {
     const nro = String(f?.Nro ?? "").trim();
     if (!nro || nro === "0") continue; // sin consecutivo no sirve para nada
 
-    const doc = { nro, co: String(f?.CO ?? "").trim(), fecha: f?.Fecha ?? null };
+    const co = String(f?.CO ?? "").trim();
+
+    // UNA FILA REPETIDA NO ES UN DOCUMENTO REPETIDO.
+    //
+    // La identidad de un documento en SIESA es (C.O., tipo, consecutivo): es su
+    // llave, no puede haber dos. Así que dos filas con el MISMO número son la
+    // misma fila devuelta dos veces por la consulta, no dos documentos.
+    //
+    // Sin este filtro (2026-09-04) el verificador informaba "CTS 1757, 1757" y
+    // "CTE 1419, 1419" como duplicados y pedía borrar las sobrantes — sobre
+    // traslados sanos. Anular uno de esos habría roto un par que estaba bien.
+    // Los duplicados de verdad son los del 19/08, y se ven solos: llevan números
+    // DISTINTOS (CTS 4773, 4775, 4777).
+    //
+    // Además rompía funcionalidad, no solo el reporte: `buscarSalida` se niega a
+    // elegir cuando ve más de una salida, así que un documento contado dos veces
+    // dejaba al despacho sin consecutivo que referenciar.
+    const clave = `${tipo}|${co}|${nro}`;
+    if (vistos.has(clave)) continue;
+    vistos.add(clave);
+
+    const doc = { nro, co, fecha: f?.Fecha ?? null };
     const lista = indice.get(id);
     if (lista) lista.push(doc);
     else indice.set(id, [doc]);
