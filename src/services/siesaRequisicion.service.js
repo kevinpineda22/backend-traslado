@@ -35,14 +35,36 @@ import { sandboxOn } from "../config/sandbox.js";
    El JSON solo lleva los campos VARIABLES; los fijos viven en la definición del
    conector y NO viajan:
 
-     f350_ind_estado    = 1   → Aprobado/Contabilizado (mueve inventario al instante)
      F_CIA              = 001
      F_CONSEC_AUTO_REG  = 1   → el consecutivo lo asigna SIESA
+     f350_ind_estado    = 0   → EN ELABORACIÓN (ver abajo)
 
-   OJO: `ind_estado = 1` significa que los documentos NO entran como borrador.
-   Entran aprobados y contabilizados: mueven inventario apenas SIESA los acepta.
-   No hay instancia intermedia donde alguien revise. Por eso todo este flujo está
-   armado alrededor de no enviar dos veces y de no enviar basura.
+   ⚠️ f350_ind_estado — SE LEYÓ EL CONECTOR EL 2026-09-04. ES UN CAMPO FIJO.
+   Este bloque venía copiado del conector VIEJO (249486, transferencia directa
+   clase 67), donde el estado era 1. En el de TRÁNSITO (252844) el campo fijo
+   estaba en 0 = En elaboración, y los dos documentos entraban como borrador.
+
+   Eso rompe el par, porque la entrada tiene que MODIFICAR la salida para
+   consumir el tránsito, y un documento en elaboración no se deja:
+
+     [HTTP 400] f_tipo_reg 450 — "46079-El estado del documento de salida en
+     tránsito no permite su modificación."
+
+   Nunca se notó antes porque hasta el 2026-09-03 las entradas las creaba una
+   persona a mano en el ERP, aprobando la salida en el camino.
+
+   NO SE ARREGLA DESDE ACÁ y no hay que intentarlo: `f350_ind_estado` es CAMPO
+   FIJO del conector (posición 60, largo 1), no viaja en el JSON. Se corrige en
+   la definición del 252844 → zona Documentos → dejar el campo fijo en 1. Un
+   único cambio cubre las dos caras: el conector es el mismo y la clase 65/66
+   viaja como variable en CLASE_DOCTO.
+
+   Si el conector volviera a 0, la mitigación conocida es `SIESA_SOLO_SALIDA=true`
+   (sube la salida, la entrada se hace a mano) — el estado previo al 2026-09-03.
+
+   OJO con el 1: los documentos dejan de ser borrador y mueven inventario apenas
+   SIESA los acepta. No hay instancia intermedia donde alguien revise. Por eso
+   este flujo está armado alrededor de no enviar dos veces y de no enviar basura.
 
    Configuración (.env):
      SIESA_IMPORTAR_URL        base del conector
@@ -234,8 +256,75 @@ function notaDoc(despacho, cara) {
 }
 
 /**
- * Movimientos (una línea por ítem). Salida y entrada comparten estructura y
- * difieren solo en C.O., tipo de docto, bodega y motivo.
+ * Total en UND de UN renglón. `cantidad_despachador` vive en la unidad de ese
+ * renglón, no en UND; el `factor` de esa misma fila es el que convierte.
+ */
+function cantidadEnUnd(it) {
+  return (Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1);
+}
+
+/** Decimales que acepta `f470_cant_base` (spec del registro 470). */
+const DECIMALES_CANTIDAD = 4;
+
+/**
+ * Cantidad en el formato que acepta el conector.
+ *
+ * `f470_cant_base` es "15 enteros + punto + 4 decimales". Más de 4 decimales no
+ * es un número feo: es un campo fuera de formato.
+ *
+ * Y llegar a más de 4 es fácil, porque acá se multiplica y se SUMA en punto
+ * flotante. `0.1 + 0.2` da `0.30000000000000004` — dieciséis decimales que
+ * `String()` escribe enteros. Con un pesable de factor decimal repetido en dos
+ * renglones (que es justo lo que consolidarPorItem junta) el caso deja de ser
+ * teórico. Se redondea acá, en el borde, y no antes: sumar redondeados arrastra
+ * el error de cada renglón al total.
+ *
+ * `Number()` al final saca los ceros de relleno que mete `toFixed` — el conector
+ * completa el ancho del campo; mandar "46.0000" y mandar "46" es lo mismo para
+ * él, y "46" es lo que se puede leer en un log.
+ */
+function cantidadSiesa(n) {
+  return String(Number(n.toFixed(DECIMALES_CANTIDAD)));
+}
+
+/**
+ * Consolida los renglones por código de ítem, sumando lo ya convertido a UND.
+ *
+ * POR QUÉ EXISTE. En traslados un ítem son VARIOS renglones: uno por unidad de
+ * medida (el mismo producto contado en UND y en CAJA son dos filas, cada una con
+ * su factor). Al mandarlos a SIESA todos se convierten a UND, y el documento
+ * terminaba con dos movimientos INDISTINGUIBLES salvo por la cantidad: mismo
+ * ITEM, misma BODEGA, misma UNIDAD_MEDIDA, mismo MOTIVO.
+ *
+ * La SALIDA los aceptaba. La ENTRADA no, y ahí explotaba (2026-09-04):
+ *
+ *   [HTTP 400] f_tipo_reg 470 — "Movto Inventario: Existen varios movimientos
+ *   con las mismas características en el documento base"
+ *
+ * La entrada tiene que aparear renglón contra renglón del documento base (la
+ * salida). Con dos filas iguales no hay apareo posible y SIESA rechaza el
+ * documento ENTERO — no el renglón. Un ítem, un movimiento, y desaparece.
+ *
+ * Se conserva el orden de primera aparición: el plano queda comparable con el
+ * carrito del despacho, que es lo que mira quien audita.
+ */
+function consolidarPorItem(items) {
+  const porItem = new Map();
+
+  for (const it of items) {
+    const codigo = String(it.codigo_item || "");
+    const acumulado = porItem.get(codigo);
+    if (acumulado) acumulado.cantidad += cantidadEnUnd(it);
+    else porItem.set(codigo, { codigo, cantidad: cantidadEnUnd(it) });
+  }
+
+  return [...porItem.values()];
+}
+
+/**
+ * Movimientos: UNA línea por ítem, no una por renglón (ver consolidarPorItem).
+ * Salida y entrada comparten estructura y difieren solo en C.O., tipo de docto,
+ * bodega y motivo.
  *
  * OJO con la UNIDAD: `cantidad_despachador` está guardada en la unidad del ítem,
  * NO en UND. `cantidad_despachador × factor` da el total real en UND (el factor
@@ -247,7 +336,7 @@ function notaDoc(despacho, cara) {
  * documento (ver armarEntrada).
  */
 function construirMovimientos(items, { co, tipoDocto, bodega, motivo }) {
-  return items.map((it, i) => ({
+  return consolidarPorItem(items).map((it, i) => ({
     "C.O_DOCUMENTO": co,
     "TIPO DOCTO": tipoDocto,
     "NRO DOCTO": 0,
@@ -256,8 +345,8 @@ function construirMovimientos(items, { co, tipoDocto, bodega, motivo }) {
     MOTIVO: motivo,
     "C.O MOVIMIENTO": co,
     UNIDAD_MEDIDA: "UND",
-    CANTIDAD: String((Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1)),
-    ITEM: String(it.codigo_item || ""),
+    CANTIDAD: cantidadSiesa(it.cantidad),
+    ITEM: it.codigo,
   }));
 }
 
