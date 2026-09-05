@@ -9,3 +9,7 @@ node_modules/
 # Correos volcados por el modo sandbox (TRASLADOS_SANDBOX). Son copias de
 # correos reales: llevan destinatarios y datos de despachos, no van al repo.
 cache-data/sandbox/
+
+# Pares conniKey/conniToken para probar consultas (scripts/probar-keys-inventario.mjs).
+# NUNCA se commitean.
+keys.txt

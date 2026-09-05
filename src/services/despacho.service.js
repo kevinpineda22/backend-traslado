@@ -275,9 +275,25 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
             sede: despacho.origen,
             items: pendientes.map((it) => it.codigo_item),
           });
+          // UN FALLO DE LA CONSULTA NO ES UN CERO.
+          //
+          // `getStockLote` devuelve `{ disponible: 0, error: true }` cuando SIESA no
+          // contesta —un 401 de permisos sobre la consulta estándar, por ejemplo—, y
+          // leer ese 0 como "no hay stock" marcaba TODOS los pendientes como Agotado.
+          // Eso no es un motivo mal puesto: es inventar la novedad que compras y la
+          // API de integraciones leen como verdad, y borra por completo el caso
+          // Inventario Fantasma — que es justo el que hay que perseguir.
+          //
+          // Sin dato no se clasifica. El renglón queda sin motivo y lo resuelve una
+          // persona, como antes de que existiera esta automatización.
+          let sinDato = 0;
           for (const item of pendientes) {
             const s = stock[item.codigo_item];
-            const disponible = Number(s?.disponible ?? 0);
+            if (!s || s.error) {
+              sinDato++;
+              continue;
+            }
+            const disponible = Number(s.disponible ?? 0);
             if (disponible <= 0) {
               // Sin stock → Agotado
               await ItemModel.updateCantidadDespachador(item.id, 0, true, "sin_stock");
@@ -285,6 +301,12 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
               // Hay stock pero no se recolectó → Fantasma
               await ItemModel.updateCantidadDespachador(item.id, 0, false, "inventario_inflado");
             }
+          }
+          if (sinDato > 0) {
+            console.error(
+              `[despacho] llano ${id}: ${sinDato} faltante(s) SIN clasificar — la consulta ` +
+                `de stock a SIESA falló. Revisar permisos de la consulta estándar.`,
+            );
           }
         }
 

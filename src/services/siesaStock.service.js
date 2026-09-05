@@ -11,10 +11,20 @@ import "dotenv/config";
 
    Mismo patrón probado en backend-gestor-ecommerce/services/siesa/siesa.stock.js.
 
-   Credenciales (reusa las que ya tenés; el v3 y el legacy comparten cuenta Connekta):
+   CREDENCIALES — LA CONSULTA ESTÁNDAR SE AUTORIZA APARTE.
+   Connekta autoriza por KEY y por consulta: la misma cuenta que lee la consulta
+   REGISTRADA del snapshot (`merkahorro_traslados_dev`, ver config/connekta.js)
+   puede NO tener asignada esta consulta ESTÁNDAR de SIESA, y entonces acá llega
+   un 401 mientras el resto del módulo anda perfecto. Ya pasó: el panel del
+   despachador mostró todo en cero durante un despacho entero.
+
+   Por eso el par de esta consulta se puede poner por separado, sin tocar el que
+   usan el snapshot y las requisiciones:
+     SIESA_STOCK_CONNI_KEY / SIESA_STOCK_CONNI_TOKEN  ← el de ESTA consulta
+   y si no están, cae a los de siempre:
+     CONNEKTA_KEY | CONNI_KEY   /   CONNEKTA_TOKEN | CONNI_TOKEN
+   Resto:
      CONNEKTA_BASE_URL      (ya requerido por connekta.js)
-     CONNEKTA_KEY  | CONNI_KEY     (header conniKey)
-     CONNEKTA_TOKEN| CONNI_TOKEN   (header conniToken)
      CONNEKTA_ID_COMPANIA   (ya requerido; fallback 7375)
    ============================================= */
 
@@ -41,8 +51,12 @@ const siesaApi = axios.create({
   baseURL: resolverHost(),
   timeout: 45000,
   headers: {
-    conniKey: process.env.CONNEKTA_KEY || process.env.CONNI_KEY,
-    conniToken: process.env.CONNEKTA_TOKEN || process.env.CONNI_TOKEN,
+    conniKey:
+      process.env.SIESA_STOCK_CONNI_KEY || process.env.CONNEKTA_KEY || process.env.CONNI_KEY,
+    conniToken:
+      process.env.SIESA_STOCK_CONNI_TOKEN ||
+      process.env.CONNEKTA_TOKEN ||
+      process.env.CONNI_TOKEN,
     "Content-Type": "application/json",
   },
 });
@@ -152,6 +166,15 @@ export async function getStockLote({ sede, items }) {
   const out = {};
   let cursor = 0;
 
+  // EL FALLO SE DICE, NO SE ENTIERRA.
+  //
+  // Cada ítem falla por su cuenta para que uno malo no tumbe el lote — bien. Pero
+  // el catch era mudo, y cuando SIESA revocó el permiso de la consulta estándar
+  // TODOS los ítems fallaron sin una sola línea de log: el 401 solo se vio en la
+  // cara del despachador, como "0 disponible" en cada producto del despacho.
+  // Guardamos el primer error y lo logueamos una vez por lote (una vez, no 200).
+  let primerError = null;
+
   async function worker() {
     while (cursor < unicos.length) {
       const codigo = unicos[cursor++];
@@ -159,6 +182,7 @@ export async function getStockLote({ sede, items }) {
         const { disponible, existencia } = await getLiveStockForItem({ item: codigo, sede });
         out[codigo] = { disponible, existencia };
       } catch (e) {
+        if (!primerError) primerError = e;
         out[codigo] = { disponible: 0, existencia: 0, error: true };
       }
     }
@@ -167,5 +191,21 @@ export async function getStockLote({ sede, items }) {
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCIA, unicos.length || 1) }, worker),
   );
+
+  if (primerError) {
+    const fallidos = Object.values(out).filter((v) => v.error).length;
+    const status = primerError.response?.status;
+    const detalle = primerError.response?.data?.detalle || primerError.message;
+    console.error(
+      `[siesaStock] ${fallidos}/${unicos.length} ítem(s) sin stock en sede ${sede}` +
+        `${status ? ` [HTTP ${status}]` : ""}: ${detalle}` +
+        (status === 401
+          ? ` — un 401 acá significa que la consulta estándar "${DESC_INVENTARIO}" no ` +
+            `existe con ese nombre O que nuestra conniKey no la tiene asignada. ` +
+            `Se puede apuntar solo esta consulta con SIESA_STOCK_CONNI_KEY/_TOKEN.`
+          : ""),
+    );
+  }
+
   return out;
 }
