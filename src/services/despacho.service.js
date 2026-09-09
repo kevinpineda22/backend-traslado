@@ -7,9 +7,11 @@ import {
   notificarRecoleccionCerrada,
   enviarComparativoAuditoria,
   enviarErrorSiesa,
+  enviarInciertoSiesa,
   enviarManifiestoCarga,
 } from "./notificacionesTraslado.service.js";
 import { enviarRequisicion } from "./requisicion.service.js";
+import { consultaConfigurada } from "./siesaTransito.consulta.js";
 import { getStockLote } from "./siesaStock.service.js";
 import { fichaDeItem } from "./siesa.service.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
@@ -354,9 +356,31 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
       const despacho = await DespachoModel.findById(id);
       // Nunca lanza; { estado, motivo, siesaData?, httpStatus? }
       const r = await enviarRequisicion(despacho);
-      // Si la subida NO salió (fallido/pendiente), avisar al líder de inventarios
-      // con el JSON del error. Los 'omitido' son benignos (ya enviado / carrera).
-      if (r && (r.estado === "fallido" || r.estado === "pendiente")) {
+      // Si la subida NO salió, avisar al líder de inventarios. Los 'omitido' son
+      // benignos (ya enviado / carrera).
+      //
+      // 'incierto' va por otro correo, y esa separación es el arreglo de un
+      // incidente concreto (09/09/2026, despacho 5f4ed946). Hasta hoy este `if`
+      // no lo incluía: el ÚNICO estado que exige una persona era el único que no
+      // le avisaba a ninguna. Y no alcanza con agregarlo acá, porque el mensaje
+      // que hace falta es el opuesto — un "error al subir" empuja a ir al ERP y
+      // hacer el documento a mano, que es exactamente lo que pasó y lo que
+      // duplica movimientos. El correo de incierto pide lo contrario: esperar,
+      // porque el barrido lo verifica contra SIESA en los próximos minutos.
+      if (r && r.estado === "incierto") {
+        // Sin la consulta de tránsito no hay barrido que lo resuelva, así que no
+        // se le promete a nadie una verificación que no va a ocurrir.
+        const situacion = consultaConfigurada() ? "detectado" : "trabado";
+        await enviarInciertoSiesa(despacho, { situacion, detalle: r.motivo }).catch((e) =>
+          console.error("[despacho] correo de incierto SIESA falló:", e.message),
+        );
+      } else if (r?.esperandoEntrada) {
+        // NO es un error: la salida entró y la entrada sale sola en unos minutos
+        // (SIESA necesita ese rato para dejar la salida lista). Sin esta rama,
+        // el cierre normal de CADA despacho mandaría un correo de error, y una
+        // alarma que suena siempre es una alarma que nadie mira.
+        console.log(`[despacho] ${id}: salida en SIESA, la entrada queda en cola.`);
+      } else if (r && (r.estado === "fallido" || r.estado === "pendiente")) {
         await enviarErrorSiesa(despacho, r).catch((e) =>
           console.error("[despacho] correo de error SIESA falló:", e.message),
         );

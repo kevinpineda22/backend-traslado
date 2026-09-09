@@ -666,3 +666,142 @@ export async function enviarManifiestoCarga(despacho, manifiesto, pdfBase64) {
     attachments,
   });
 }
+
+/* =============================================
+   Envío INCIERTO: SIESA no respondió
+
+   Un timeout no es un fallo, es una incógnita: SIESA pudo haber procesado la
+   salida y haberse cortado solo la respuesta. El despacho queda en 'incierto' y
+   el cron no lo levanta (ver sql/033).
+
+   POR QUÉ ESTE CORREO EXISTE, con nombre y fecha. El 09/09/2026 el despacho
+   5f4ed946 (Copacabana → Girardota Parque) dio timeout a las 07:24. La salida
+   SÍ había entrado (CTS 4808) y nuestra base no se enteró. Nadie recibió nada:
+   `enviarErrorSiesa` solo se dispara con 'fallido' o 'pendiente', así que el
+   único estado que EXIGE una persona era el único que no llamaba a ninguna. El
+   traslado estuvo parado 1 h 40 hasta que alguien en Parque lo notó solo, entró
+   al ERP y creó la entrada (CTE 1474) a mano.
+
+   Son CUATRO momentos distintos y cada uno pide algo distinto de quien lee. Un
+   correo único que dijera "hubo un problema" reproduciría el incidente: la
+   persona va al ERP y hace a mano lo que el sistema estaba por hacer solo.
+   ============================================= */
+
+const INCIERTO_COPY = {
+  // Recién ocurrió el timeout. Lo IMPORTANTE es pedir que NO toque el ERP
+  // todavía: el barrido verifica contra SIESA en los próximos minutos.
+  detectado: {
+    titulo: "SIESA no respondió — verificando",
+    acento: MARCA.ambar,
+    encabezado:
+      "El envío a SIESA no recibió respuesta, así que <b>no se sabe</b> si la salida entró. " +
+      "No se reintenta a ciegas: mandarla de nuevo dejaría el movimiento duplicado en el ERP.",
+    accion:
+      "<b>No cree la entrada a mano todavía.</b> El sistema le pregunta a SIESA qué documentos " +
+      "existen y lo resuelve solo en los próximos minutos. Le llega un segundo correo con el " +
+      "resultado, sea cual sea.",
+  },
+  // El par ya estaba cerrado en el ERP. No hay nada que hacer.
+  resuelto: {
+    titulo: "Resuelto solo — el traslado ya está en SIESA",
+    acento: MARCA.verde,
+    encabezado:
+      "Se verificó contra el ERP: los dos documentos del tránsito existen. El despacho quedó " +
+      "cerrado como subido.",
+    accion: "<b>No hay que hacer nada.</b> Este correo cierra el aviso anterior.",
+  },
+  // La salida estaba; falta la entrada y el sistema la va a crear.
+  continua: {
+    titulo: "Salida confirmada — el sistema completa la entrada",
+    acento: MARCA.verde,
+    encabezado:
+      "Se verificó contra el ERP: la <b>salida sí entró</b> a SIESA. La entrada todavía no existe, " +
+      "así que el traslado volvió a la cola para que el sistema la cree.",
+    accion:
+      "<b>No cree la entrada a mano.</b> La salida ya quedó anclada, así que no se va a subir dos " +
+      "veces. Si en una hora el panel sigue sin cerrar, ahí sí revise.",
+  },
+  // El sistema no puede seguir solo. Acá SÍ hace falta una persona.
+  trabado: {
+    titulo: "SIESA no respondió — hace falta revisarlo",
+    acento: MARCA.rojo,
+    encabezado:
+      "El envío no recibió respuesta y la verificación contra el ERP <b>no alcanzó</b> para " +
+      "destrabarlo solo.",
+    accion:
+      "Busque este traslado en SIESA y resuélvalo desde el panel del despacho, en " +
+      "<b>Envío a SIESA</b>. Lo que responda se contrasta contra el ERP antes de aplicarse.",
+  },
+};
+
+/**
+ * Correo del envío INCIERTO, en sus cuatro momentos.
+ *
+ * Best-effort como todos: una caída de SMTP no cambia el estado del despacho.
+ *
+ * @param {object} despacho - cabecera (id, origen, destino, siesa_error, updated_at)
+ * @param {object} p
+ * @param {"detectado"|"resuelto"|"continua"|"trabado"} p.situacion
+ * @param {string} [p.detalle]      - el porqué concreto (mensaje de error o del barrido)
+ * @param {string} [p.salidaDocto]  - consecutivo de la CTS, si se conoce
+ * @param {string} [p.entradaDocto] - consecutivo de la CTE, si se conoce
+ */
+export async function enviarInciertoSiesa(despacho, { situacion, detalle, salidaDocto, entradaDocto } = {}) {
+  const copy = INCIERTO_COPY[situacion];
+  if (!copy) {
+    console.error(`[traslados] situación de incierto desconocida: ${situacion}`);
+    return { success: false };
+  }
+  if (!emailConfigurado()) {
+    console.error(
+      `[traslados] ⚠️ incierto (${situacion}) NO notificado (despacho ${despacho?.id}): falta EMAIL_USER/PASS`,
+    );
+    return { success: false };
+  }
+
+  const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
+  const texto = detalle || despacho?.siesa_error || "Sin detalle.";
+
+  // El uuid COMPLETO, no los primeros 8. Es lo que se busca en las notas del
+  // documento dentro del ERP, y medio uuid no sirve para buscar.
+  const filas = [
+    filaDato("Despacho", `<span style="font-family:monospace;">${esc(String(despacho.id))}</span>`, true),
+    filaDato("Ruta", esc(ruta)),
+    filaDato("Fecha", esc(fechaHoraLegible(despacho.updated_at || Date.now()))),
+    salidaDocto ? filaDato("Salida (CTS)", `<b>${esc(salidaDocto)}</b>`) : "",
+    entradaDocto ? filaDato("Entrada (CTE)", `<b>${esc(entradaDocto)}</b>`) : "",
+  ].join("");
+
+  const html = envolverMarca(`
+    ${encabezadoMarca({ titulo: copy.titulo, acento: copy.acento })}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td style="padding:20px 26px 6px;">
+          <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${MARCA.texto};">${copy.encabezado}</p>
+
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 18px;">
+            ${filas}
+          </table>
+
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                 style="background:#f8fafc;border:1px solid ${MARCA.borde};border-radius:10px;margin-bottom:18px;">
+            <tr>
+              <td style="padding:14px 18px;font-size:13px;line-height:1.6;color:${MARCA.texto};">
+                ${copy.accion}
+              </td>
+            </tr>
+          </table>
+
+          <p style="margin:0 0 6px;font-size:12px;font-weight:700;color:${MARCA.textoSuave};">Detalle técnico</p>
+          <pre style="background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;font-size:12px;white-space:pre-wrap;word-break:break-word;margin:0;">${esc(texto)}</pre>
+        </td>
+      </tr>
+    </table>
+    ${pieMarca()}`);
+
+  return sendEmail({
+    to: DESTINATARIOS.inventarios,
+    subject: `${copy.acento === MARCA.verde ? "✅" : "⚠️"} ${copy.titulo} — ${ruta} (despacho ${String(despacho.id).slice(0, 8)})`,
+    html,
+  });
+}

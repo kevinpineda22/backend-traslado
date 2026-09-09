@@ -127,6 +127,11 @@ beforeEach(() => {
   };
   delete process.env.SIESA_SOLO_SALIDA;
   delete process.env.SIESA_ENTRADA_VERIFICAR;
+  // Estos tests miran la LÓGICA de la entrada (guard, consecutivos, adopción),
+  // no el reloj. Sin esto, con la espera real de 5 min el par nunca se cerraría
+  // en una sola pasada y todos probarían lo mismo: que se está esperando.
+  // La espera tiene sus propios tests abajo.
+  process.env.SIESA_ENTRADA_ESPERA_MS = "0";
 
   // Camino feliz: conector devuelve consecutivo, consulta disponible, sin entrada previa.
   impl.importarSalida = async () => ({ ok: true, docto: "S1", respuesta: {}, payload: { s: 1 } });
@@ -274,6 +279,98 @@ test("si la consulta falla, la segunda red no bloquea el envío", async () => {
   await enviarRequisicion("D1");
 
   assert.equal(calls.salida, 1, "sigue con el guard de la base — no frena todos los traslados");
+});
+
+test("si el conector no devuelve el consecutivo de la ENTRADA, se lo pide a SIESA", async () => {
+  // Medido en producción el 09/09/2026: los 9 despachos del 05 al 09 cerraron el
+  // par en SIESA y los 9 quedaron con `siesa_docto` en null. `doctoDe()` tampoco
+  // lee el número de la entrada — el mismo punto ciego que tuvo la salida.
+  impl.importarEntrada = async () => ({ ok: true, docto: "", respuesta: {}, payload: {} });
+
+  // La primera consulta es el guard anti-duplicado (todavía no existe); la
+  // segunda es la recuperación del número, ya con la entrada creada.
+  let vueltas = 0;
+  impl.buscarEntrada = async () => {
+    vueltas += 1;
+    return vueltas === 1 ? null : { nro: "1426", co: "004", fecha: "2026-09-09" };
+  };
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(calls.entrada, 1, "se creó UNA entrada: la recuperación solo LEE");
+  assert.equal(r.estado, "enviado");
+  assert.equal(row.siesa_docto, "1426", "el número que el conector no devolvió, leído del ERP");
+});
+
+test("y si tampoco se puede leer, el envío vale igual: se pierde el número, no el traslado", async () => {
+  impl.importarEntrada = async () => ({ ok: true, docto: "", respuesta: {}, payload: {} });
+  let vueltas = 0;
+  impl.buscarEntrada = async () => {
+    vueltas += 1;
+    if (vueltas === 1) return null;
+    throw new Error("Connekta caído");
+  };
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(r.estado, "enviado", "el par está cerrado en el ERP aunque no sepamos el número");
+  assert.equal(row.siesa_docto, null);
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   LA ESPERA ENTRE LA SALIDA Y LA ENTRADA
+
+   Que el conector acepte la salida no significa que SIESA la tenga lista para
+   que la entrada le consuma el tránsito. La entrada MODIFICA la salida, y si
+   llega antes de tiempo el ERP la rechaza.
+
+   No se puede dormir dentro del request (serverless), así que la espera se hace
+   soltando el traslado: queda 'pendiente' con la salida ANCLADA y el cron lo
+   retoma. Lo delicado es que esperar no cuente como intento fallido.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+test("LA ESPERA: la salida sube, la entrada NO se manda todavía", async () => {
+  process.env.SIESA_ENTRADA_ESPERA_MS = "300000";
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(calls.salida, 1, "la salida sí se mandó");
+  assert.equal(calls.entrada, 0, "la entrada NO: SIESA todavía no dejó lista la salida");
+  assert.equal(r.esperandoEntrada, true);
+  assert.equal(row.siesa_estado, "pendiente", "vuelve a la cola, el cron la retoma");
+  assert.ok(row.siesa_salida_at, "la salida queda ANCLADA: en la próxima pasada no se re-manda");
+});
+
+test("esperar NO consume intento: si no, cinco esperas lo dejan en 'fallido'", async () => {
+  process.env.SIESA_ENTRADA_ESPERA_MS = "300000";
+  row.siesa_intentos = 2;
+
+  await enviarRequisicion("D1");
+
+  assert.equal(row.siesa_intentos, 2, "el contador vuelve a donde estaba: no hubo fallo");
+});
+
+test("cumplida la espera, la pasada siguiente manda SOLO la entrada", async () => {
+  process.env.SIESA_ENTRADA_ESPERA_MS = "300000";
+  // Como si la salida hubiera entrado hace media hora.
+  row.siesa_salida_at = new Date(Date.now() - 30 * 60_000).toISOString();
+  row.siesa_salida_docto = "S1";
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(calls.salida, 0, "la salida ya estaba: NO se re-manda");
+  assert.equal(calls.entrada, 1);
+  assert.equal(r.estado, "enviado");
+});
+
+test("la espera no bloquea el modo SOLO SALIDA: ahí no hay entrada que esperar", async () => {
+  process.env.SIESA_ENTRADA_ESPERA_MS = "300000";
+  process.env.SIESA_SOLO_SALIDA = "1";
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(r.soloSalida, true);
+  assert.equal(row.siesa_estado, "enviado", "terminal en la misma pasada, como siempre");
 });
 
 test("modo SOLO SALIDA sigue funcionando como freno de emergencia", async () => {

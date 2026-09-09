@@ -19,6 +19,7 @@ import {
   existeSalida,
   consultaConfigurada,
 } from "./siesaTransito.consulta.js";
+import { enviarInciertoSiesa } from "./notificacionesTraslado.service.js";
 
 /* =============================================
    Orquestación del envío de requisiciones a SIESA
@@ -97,6 +98,19 @@ function soloSalida() {
  * Prendido por default, y se apaga a propósito solo cuando ya no queda nadie
  * creando entradas a mano. Ver `verificarEntradaPrevia` para qué protege.
  */
+/**
+ * Cuánto se espera, desde que SIESA acepta la SALIDA, antes de mandarle la
+ * ENTRADA. La entrada consume el tránsito de la salida, y la salida no queda
+ * lista para eso en el mismo instante en que el conector la acepta.
+ *
+ * En 0 se manda de corrido (es lo que hacía hasta el 09/09/2026, y lo que usan
+ * los tests que miran otra cosa).
+ */
+const esperaEntradaMs = () => {
+  const v = Number(process.env.SIESA_ENTRADA_ESPERA_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 5 * 60_000;
+};
+
 function verificarEntrada() {
   const v = String(process.env.SIESA_ENTRADA_VERIFICAR ?? "1").trim().toLowerCase();
   return !["0", "false", "off", "no"].includes(v);
@@ -498,6 +512,41 @@ async function enviarTransito(despacho) {
     };
   }
 
+  // ── LA SALIDA NECESITA UNOS MINUTOS ANTES DE QUE SE LE PUEDA COLGAR LA ENTRADA ──
+  //
+  // Que el conector acepte la salida no significa que SIESA ya la tenga lista
+  // para que otro documento la consuma. La entrada MODIFICA la salida (le come
+  // el tránsito), y si llega antes de tiempo el ERP la rechaza.
+  //
+  // Medido el 09/09/2026 sobre los despachos reales: los que cerraron bien lo
+  // hicieron con 10 a 50 segundos de brecha. Funciona, pero sin margen ninguno.
+  // Los dos del 04/09 muestran cómo se ve cuando no alcanza: la entrada falló
+  // cuatro veces seguidas, agotó los 5 intentos y terminó cerrándola una persona
+  // a mano. (Ojo: ESOS dos fueron el conector con `ind_estado` en 0, que es otra
+  // causa y se arregló en el ERP. No los habría salvado esperar. Pero enseñan
+  // qué pasa cuando la entrada llega y la salida no está lista: se come el cupo
+  // de reintentos y termina en trabajo manual.)
+  //
+  // POR QUÉ NO ES UN `sleep`. Esto corre dentro del request que cierra el
+  // despacho, en una función serverless: dormir cinco minutos ahí revienta por
+  // timeout y encima deja al despachador esperando una pantalla. La espera se
+  // hace SOLTANDO el traslado: la salida ya está anclada, el despacho queda
+  // 'pendiente' y el cron lo retoma. En la pasada siguiente `salidaYaEnviada` es
+  // true, la salida se saltea y se manda solo la entrada.
+  //
+  // Y NO CONSUME INTENTO (lo devuelve `enviarRequisicion`): esperar no es fallar.
+  // Si gastara cupo, cinco esperas dejarían el despacho en 'fallido' sin que
+  // nada hubiera salido mal.
+  if (despacho.siesa_salida_at) {
+    const esperados = Date.now() - Date.parse(despacho.siesa_salida_at);
+    const faltan = esperaEntradaMs() - esperados;
+    // `esperados < 0` = reloj raro (la fila viene del futuro). No se espera:
+    // frenar por un dato incoherente sería peor que intentar.
+    if (faltan > 0 && esperados >= 0) {
+      return { esperandoEntrada: true, faltanMs: faltan, salidaDocto, salidaRespuesta, payload: { salida: salidaPayload } };
+    }
+  }
+
   // FLUJO COMPLETO — la entrada referencia el consecutivo de la salida.
   //
   // Si el conector no devolvió el consecutivo, se lo pedimos a SIESA leyendo los
@@ -537,12 +586,62 @@ async function enviarTransito(despacho) {
     throw e;
   }
 
+  // EL MISMO PUNTO CIEGO QUE TUVO LA SALIDA, DEL OTRO LADO DEL TRÁNSITO.
+  //
+  // `doctoDe()` tampoco lee el consecutivo en la respuesta del conector para la
+  // entrada. Medido el 09/09/2026: los 9 despachos subidos entre el 05 y el 09
+  // cerraron bien en SIESA (par completo, verificado documento por documento) y
+  // los 9 quedaron con `siesa_docto` en NULL.
+  //
+  // No es un problema de inventario: los documentos existen y están apareados.
+  // Es ceguera de auditoría — desde la base no se puede decir qué CTE cerró qué
+  // despacho, y hay que ir a preguntarle al ERP de a uno. Lo mismo que pasaba
+  // con la salida antes de la mig 030, y se arregla igual: el número siempre
+  // estuvo en SIESA, solo faltaba ir a buscarlo.
+  let entradaDocto = entrada.docto || null;
+  if (!entradaDocto) {
+    entradaDocto = await resolverConsecutivoEntrada(despacho);
+  }
+
   return {
-    docto: entrada.docto,
+    docto: entradaDocto,
     salidaDocto,
     salidaRespuesta,
     payload: { salida: salidaPayload, entrada: entrada.payload },
   };
+}
+
+/**
+ * Consigue el consecutivo de la ENTRADA cuando la respuesta del conector no lo
+ * trajo. Espejo de `resolverConsecutivoSalida`; NO manda nada al ERP: lee.
+ *
+ * A diferencia de la salida, acá el número no hace falta para seguir — la
+ * entrada es el último documento de la cadena, nadie la referencia. Por eso el
+ * agujero pasó desapercibido: todo funcionaba, solo que la base no se enteraba
+ * de con qué documento había cerrado. Que no rompa nada hoy no lo hace gratis:
+ * es el dato que cualquiera va a pedir el día que haya que auditar un traslado.
+ *
+ * @returns {Promise<string|null>} el consecutivo, o null si no se pudo resolver
+ */
+async function resolverConsecutivoEntrada(despacho) {
+  if (!consultaConfigurada()) return null;
+  try {
+    // `refrescar` porque la entrada se acaba de importar: un cache de hace unos
+    // segundos es anterior al documento que estamos buscando.
+    const doc = await buscarEntrada(despacho.id, { refrescar: true });
+    if (!doc) return null;
+    console.log(
+      `[requisicion] 🔎 despacho ${despacho.id}: consecutivo de entrada recuperado de SIESA (${doc.nro}).`,
+    );
+    return doc.nro;
+  } catch (e) {
+    // Que no se pueda leer NO invalida el envío: la entrada ya se creó y el par
+    // está cerrado. Se pierde el número, no el traslado.
+    console.warn(
+      `[requisicion] no se pudo consultar el consecutivo de entrada de ${despacho.id}: ${e.message}`,
+    );
+    return null;
+  }
 }
 
 /**
@@ -853,6 +952,39 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
         return { estado: "enviado", motivo: "sin ítems recolectados" };
       }
 
+      if (r.esperandoEntrada) {
+        // La salida ya está en SIESA y anclada; falta que el ERP la deje lista.
+        // Vuelve a la cola y el cron la retoma. NO se marca error: no hubo
+        // ninguno, y pintarlo en rojo mandaría a alguien a revisar algo sano.
+        //
+        // `siesa_intentos` se DEVUELVE al valor previo. La reserva de arriba lo
+        // subió para ganar la carrera contra otra instancia, pero esperar no es
+        // un intento fallido: si consumiera cupo, cinco esperas dejarían el
+        // despacho en 'fallido' sin que nada hubiera salido mal.
+        const min = Math.ceil(r.faltanMs / 60_000);
+        await marcar(id, {
+          siesa_intentos: intentos,
+          siesa_estado: "pendiente",
+          siesa_salida_docto: r.salidaDocto || null,
+          siesa_salida_respuesta: r.salidaRespuesta || null,
+          siesa_error: `Salida en SIESA. La entrada se manda en ~${min} min, cuando el ERP la tenga lista.`,
+          siesa_intentos_log: anexarIntento(despacho, {
+            n: intentos + 1,
+            at: ahora,
+            estado: "pendiente",
+            fase: "espera-entrada",
+            resultado: `esperando ${min} min para mandar la entrada`,
+            salida_docto: r.salidaDocto || null,
+          }),
+        });
+        console.log(
+          `[requisicion] ⏳ despacho ${id}: salida arriba (docto ${
+            r.salidaDocto || "s/n"
+          }). La entrada espera ~${min} min a que SIESA la deje lista.`,
+        );
+        return { estado: "pendiente", esperandoEntrada: true, faltanMs: r.faltanMs };
+      }
+
       if (r.soloSalida) {
         // MODO SOLO SALIDA — terminal apenas SIESA acepta la salida. `siesa_docto`
         // toma el consecutivo de la SALIDA (no hay entrada que cierre el par), y
@@ -998,6 +1130,358 @@ export async function reintentarPendientes(limite = 20) {
   const enviados = resultados.filter((r) => r.estado === "enviado").length;
   console.log(`[requisicion] reintento: ${enviados}/${resultados.length} enviados`);
   return { procesados: resultados.length, enviados, resultados };
+}
+
+/* =============================================
+   BARRIDO DE INCIERTOS — destrabar solo lo que se puede COMPROBAR
+
+   El estado 'incierto' (sql/033) frena en seco cuando SIESA no contesta, y hace
+   bien: un timeout puede haber movido inventario. Pero frenar no es lo mismo que
+   quedarse quieto para siempre, y hasta ahora era lo mismo — el cron solo levanta
+   'pendiente', así que un incierto esperaba a que una persona lo mirara.
+
+   El 09/09/2026 eso costó 1 h 40 y una entrada digitada a mano: el despacho
+   5f4ed946 dio timeout en la fase SALIDA, la salida SÍ había entrado (CTS 4808),
+   y la respuesta estaba a UNA lectura del ERP de distancia.
+
+   LO QUE HACE: le pregunta a SIESA qué documentos existen de verdad y actúa solo
+   cuando la respuesta es inequívoca.
+
+     entrada en el ERP  → el par está cerrado. Se marca 'enviado' y listo.
+     solo la salida     → se ANCLA la salida y vuelve a 'pendiente' para que el
+                          cron cree la entrada. Anclar solo puede IMPEDIR envíos,
+                          nunca provocarlos: `enviarTransito` mira `siesa_salida_at`
+                          y salta la salida. Por eso esta rama es estrictamente
+                          más segura que dejarlo parado.
+     nada en el ERP     → NO se toca. Acá "no veo el documento" tendría que
+                          autorizar un envío, y esa es la dirección en la que
+                          equivocarse cuesta un movimiento duplicado que hay que
+                          ir a pedirle a SIESA que borre. Queda para una persona,
+                          salvo que se prenda SIESA_INCIERTO_AUTO_REINTENTO.
+     salida duplicada   → tampoco se toca: hay que elegir un consecutivo para que
+                          la entrada lo referencie y eso no se adivina.
+
+   LA GRACIA existe porque la carrera es real: el timeout se corta a los 60 s y
+   SIESA puede seguir grabando después. Leer el ERP demasiado pronto devolvería
+   "no está" sobre algo que está por estar. Se espera antes de mirar.
+   ============================================= */
+
+/** Cuánto se espera antes de creerle a una lectura del ERP. */
+const GRACIA_INCIERTO_MS = Number(process.env.SIESA_INCIERTO_GRACIA_MS) || 5 * 60_000;
+
+/**
+ * ¿Reintentar el envío completo cuando el ERP no tiene NADA de este despacho?
+ *
+ * Apagado por default, a propósito. Todas las demás lecturas de este módulo usan
+ * el ERP para FRENAR un envío; ésta sería la única que lo autoriza, y el apareo
+ * cuelga del uuid en las notas del documento: si alguien las edita, el documento
+ * queda invisible y "no está" se vuelve mentira. Prenderlo es una decisión de
+ * operación, no un default.
+ */
+function autoReintentoSinRastro() {
+  return ["1", "true", "on", "si", "sí"].includes(
+    String(process.env.SIESA_INCIERTO_AUTO_REINTENTO || "").trim().toLowerCase(),
+  );
+}
+
+/**
+ * Desde cuándo está incierto este despacho, en ms epoch.
+ *
+ * Se lee del log de intentos y no de `updated_at`: `updated_at` se mueve con
+ * cualquier escritura (el barrido mismo lo movería) y entonces la gracia nunca
+ * se cumpliría. El log dice cuándo pasó lo que importa.
+ */
+function inciertoDesde(despacho) {
+  const log = Array.isArray(despacho.siesa_intentos_log) ? despacho.siesa_intentos_log : [];
+  const i = indiceDelIncierto(log);
+  const t = Date.parse((i >= 0 ? log[i]?.at : null) || despacho.updated_at || "");
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/**
+ * Índice del ENVÍO que quedó incierto — el que se cortó de verdad, no las pasadas
+ * del barrido.
+ *
+ * La distinción no es cosmética. `trabar` también anexa una entrada en 'incierto'
+ * (el despacho sigue incierto, y el log tiene que decirlo), así que anclarse en
+ * "la última incierta" haría dos cosas mal: la gracia se recontaría desde cada
+ * barrido en vez de desde el timeout real, y la marca de "ya avisé" quedaría
+ * fuera de la ventana en la corrida siguiente — o sea, un correo cada 10 minutos
+ * para siempre. Se ancla en el envío, que es el hecho que empezó todo.
+ */
+function indiceDelIncierto(log) {
+  for (let i = log.length - 1; i >= 0; i -= 1) {
+    if (log[i]?.estado === "incierto" && log[i]?.fase !== "auto-incierto") return i;
+  }
+  return -1;
+}
+
+/**
+ * ¿Ya se avisó por correo que este despacho quedó trabado?
+ *
+ * Solo cuenta lo que pasó DESPUÉS del último incierto: un despacho que se
+ * destrabó y volvió a caer merece un aviso nuevo. Sin este corte, el segundo
+ * incidente sería silencioso.
+ *
+ * Sirve para no mandar el mismo correo cada 10 minutos, que es la forma más
+ * rápida de que la gente le ponga una regla de archivado a los avisos.
+ */
+function avisadoDesdeElIncierto(despacho) {
+  const log = Array.isArray(despacho.siesa_intentos_log) ? despacho.siesa_intentos_log : [];
+  const i = indiceDelIncierto(log);
+  return log.slice(i < 0 ? 0 : i).some((e) => e?.fase === "auto-incierto" && e?.aviso === true);
+}
+
+/**
+ * Qué dice el ERP sobre este despacho. Es la única fuente que vale acá.
+ *
+ * El orden de las preguntas no es casual: la ENTRADA primero, porque si está, el
+ * par está cerrado y nada más importa. `existeSalida` antes que `buscarSalida`
+ * por la distinción de siempre — la primera contesta "¿se mandó?" y la segunda
+ * "¿cuál referencio?", y con duplicados la segunda devuelve null.
+ *
+ * Las tres consultas comparten el mismo cache: cuestan UNA llamada a Connekta
+ * para todo el barrido, no una por despacho.
+ *
+ * @returns {Promise<{accion:string, salida?:object, entrada?:object}>}
+ */
+async function clasificarIncierto(despachoId, opts) {
+  // `opts.refrescar` va SOLO en la primera pregunta del barrido: releer el ERP
+  // deja el cache caliente para todos los demás despachos de la corrida. Las
+  // consultas de abajo lo aprovechan, así que el barrido entero cuesta UNA
+  // llamada a Connekta, no una por despacho — y Connekta permite unas diez por
+  // ventana, compartidas con el resto del backend.
+  const entrada = await buscarEntrada(despachoId, opts);
+  if (entrada) {
+    // Si la entrada está, la salida también (la entrada la referencia). Se busca
+    // igual para poder anclarla: cerrar sin ella deja una fila que afirma una
+    // entrada sin salida registrada, y eso miente en una auditoría.
+    const salida = await buscarSalida(despachoId);
+    return { accion: "cerrar", entrada, salida };
+  }
+
+  if (!(await existeSalida(despachoId))) return { accion: "sin-rastro" };
+
+  const salida = await buscarSalida(despachoId);
+  if (!salida) return { accion: "salida-duplicada" };
+
+  return { accion: "continuar", salida };
+}
+
+/**
+ * Barre los despachos en 'incierto' y destraba los que el ERP permite destrabar.
+ *
+ * Lo llama el cron, DESPUÉS de `reintentarPendientes`: lo que este barrido pasa a
+ * 'pendiente' lo toma la corrida siguiente. Es a propósito — mandarlo en la misma
+ * pasada gastaría dos intentos del cupo en un segundo, y esperar 10 minutos no le
+ * hace daño a nadie comparado con la hora y media que costaba antes.
+ *
+ * Nunca lanza por un despacho: uno que no se puede leer no puede frenar al resto.
+ *
+ * @param {number} limite - cuántos mirar por corrida
+ */
+export async function resolverInciertosAutomaticamente(limite = 10) {
+  const vacio = { procesados: 0, resueltos: 0, encolados: 0, trabados: 0, resultados: [] };
+
+  // Sin consulta no hay nada que preguntar, y sin preguntar no se toca nada.
+  // El correo del timeout ya salió; esto queda para una persona.
+  if (!consultaConfigurada()) {
+    return { ...vacio, motivo: "falta SIESA_CONSULTA_TRANSITO" };
+  }
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("id, origen, destino, siesa_estado, siesa_error, siesa_intentos, siesa_intentos_log, siesa_salida_at, siesa_salida_docto, updated_at")
+    .eq("siesa_estado", "incierto")
+    .order("updated_at", { ascending: true })
+    .limit(limite);
+
+  if (error) throw new Error(`Error al listar requisiciones inciertas: ${error.message}`);
+  if (!data?.length) return vacio;
+
+  const ahora = Date.now();
+  const resultados = [];
+  let primera = true;
+
+  for (const despacho of data) {
+    const esperando = ahora - inciertoDesde(despacho);
+    if (esperando < GRACIA_INCIERTO_MS) {
+      resultados.push({ id: despacho.id, accion: "en-gracia" });
+      continue;
+    }
+
+    try {
+      // La primera relee el ERP; las demás usan ese mismo cache.
+      resultados.push({ id: despacho.id, ...(await aplicarIncierto(despacho, { refrescar: primera })) });
+      primera = false;
+    } catch (e) {
+      console.error(`[requisicion] barrido: falló el despacho ${despacho.id} — ${e.message}`);
+      resultados.push({ id: despacho.id, accion: "error", motivo: e.message });
+
+      // SI FALLA LA PRIMERA, SE CORTA. Acá lo único que lanza es la lectura del
+      // ERP (`marcar` no lanza, loguea), y con el cache frío las demás van a
+      // fallar igual. Seguir sería gastar llamadas de Connekta para juntar el
+      // mismo error diez veces. Se vuelve a intentar en la corrida siguiente.
+      if (primera) return { ...vacio, resultados, motivo: `no se pudo leer SIESA: ${e.message}` };
+    }
+  }
+
+  const cuenta = (a) => resultados.filter((r) => r.accion === a).length;
+  const resumen = {
+    procesados: resultados.length,
+    resueltos: cuenta("cerrar"),
+    encolados: cuenta("continuar") + cuenta("sin-rastro-reencolado"),
+    trabados: cuenta("sin-rastro") + cuenta("salida-duplicada"),
+    resultados,
+  };
+  if (resumen.procesados) {
+    console.log(
+      `[requisicion] barrido de inciertos: ${resumen.procesados} mirados · ` +
+        `${resumen.resueltos} cerrados · ${resumen.encolados} devueltos a la cola · ` +
+        `${resumen.trabados} necesitan una persona`,
+    );
+  }
+  return resumen;
+}
+
+/**
+ * Aplica la decisión sobre UN despacho incierto. Separado del barrido para que
+ * cada rama se lea sola y se pueda probar sola.
+ *
+ * @param {object} despacho - fila leída por el barrido (trae `siesa_intentos_log`)
+ */
+async function aplicarIncierto(despacho, opts) {
+  const { accion, salida, entrada } = await clasificarIncierto(despacho.id, opts);
+  const at = new Date().toISOString();
+  const n = Number(despacho.siesa_intentos) || 0;
+
+  // Anclar la salida cuando el ERP la muestra. Va en las dos ramas que la ven, y
+  // se escribe SIEMPRE que falte: es el dato que impide que se vuelva a mandar.
+  const anclaSalida = {};
+  if (salida) {
+    if (!despacho.siesa_salida_at) anclaSalida.siesa_salida_at = at;
+    if (!despacho.siesa_salida_docto) anclaSalida.siesa_salida_docto = salida.nro;
+  }
+
+  if (accion === "cerrar") {
+    await marcar(despacho.id, {
+      ...anclaSalida,
+      siesa_estado: "enviado",
+      siesa_docto: entrada.nro,
+      siesa_error: null,
+      siesa_enviado_at: at,
+      siesa_intentos_log: anexarIntento(despacho, {
+        n,
+        at,
+        estado: "enviado",
+        fase: "auto-incierto",
+        resultado: "par cerrado en el ERP",
+        salida_docto: salida?.nro || despacho.siesa_salida_docto || null,
+        entrada_docto: entrada.nro,
+      }),
+    });
+    console.log(
+      `[requisicion] ✅ despacho ${despacho.id}: incierto resuelto solo — el par ya estaba en ` +
+        `SIESA (salida ${salida?.nro || "s/n"} → entrada ${entrada.nro}).`,
+    );
+    await avisar(despacho, {
+      situacion: "resuelto",
+      detalle: `Verificado contra el ERP: el par ya estaba completo (CTS ${salida?.nro || "s/n"} → CTE ${entrada.nro}).`,
+      salidaDocto: salida?.nro,
+      entradaDocto: entrada.nro,
+    });
+    return { accion, entradaDocto: entrada.nro };
+  }
+
+  if (accion === "continuar") {
+    const motivo =
+      `La salida ${salida.nro} está en SIESA: el envío sí había entrado. ` +
+      `Vuelve a la cola solo para crear la entrada.`;
+    await marcar(despacho.id, {
+      ...anclaSalida,
+      siesa_estado: "pendiente",
+      siesa_error: motivo,
+      siesa_intentos_log: anexarIntento(despacho, {
+        n,
+        at,
+        estado: "pendiente",
+        fase: "auto-incierto",
+        resultado: "salida confirmada en el ERP — falta la entrada",
+        salida_docto: salida.nro,
+      }),
+    });
+    console.log(
+      `[requisicion] ↪️ despacho ${despacho.id}: incierto destrabado — salida ${salida.nro} ` +
+        `confirmada y anclada. Vuelve a 'pendiente' para la entrada.`,
+    );
+    await avisar(despacho, { situacion: "continua", detalle: motivo, salidaDocto: salida.nro });
+    return { accion, salidaDocto: salida.nro };
+  }
+
+  if (accion === "salida-duplicada") {
+    const motivo =
+      "SIESA tiene MÁS DE UNA salida de este despacho. No se elige ninguna para que la " +
+      "entrada la referencie: hay que borrar las sobrantes en el ERP y después resolverlo " +
+      "desde el panel.";
+    return trabar(despacho, motivo, n, at, accion);
+  }
+
+  // sin-rastro: el ERP no tiene nada de este despacho.
+  if (autoReintentoSinRastro()) {
+    const motivo =
+      "El ERP no tiene ningún documento de este despacho, así que el envío no llegó. " +
+      "Vuelve a la cola (SIESA_INCIERTO_AUTO_REINTENTO está prendido).";
+    await marcar(despacho.id, {
+      siesa_estado: "pendiente",
+      siesa_error: motivo,
+      siesa_intentos_log: anexarIntento(despacho, {
+        n,
+        at,
+        estado: "pendiente",
+        fase: "auto-incierto",
+        resultado: "sin rastro en el ERP — reencolado por configuración",
+      }),
+    });
+    console.warn(`[requisicion] ↪️ despacho ${despacho.id}: sin rastro en SIESA, reencolado.`);
+    return { accion: "sin-rastro-reencolado" };
+  }
+
+  const motivo =
+    "El ERP no muestra ni la salida ni la entrada de este despacho. Puede ser que el envío " +
+    "nunca llegó, o que el documento exista con las notas editadas y ya no se lo pueda aparear. " +
+    "No se reintenta solo porque equivocarse acá duplica un movimiento de inventario.";
+  return trabar(despacho, motivo, n, at, accion);
+}
+
+/** Deja el despacho en 'incierto' y avisa UNA vez. */
+async function trabar(despacho, motivo, n, at, accion) {
+  const avisa = !avisadoDesdeElIncierto(despacho);
+
+  await marcar(despacho.id, {
+    siesa_error: motivo,
+    siesa_intentos_log: anexarIntento(despacho, {
+      n,
+      at,
+      estado: "incierto",
+      fase: "auto-incierto",
+      resultado: accion,
+      error: motivo,
+      aviso: avisa,
+    }),
+  });
+  console.warn(`[requisicion] ⚠️ despacho ${despacho.id}: incierto sin resolver — ${motivo}`);
+
+  if (avisa) await avisar(despacho, { situacion: "trabado", detalle: motivo });
+  return { accion, motivo };
+}
+
+/** Correo best-effort: que falle el SMTP no puede tumbar el barrido. */
+async function avisar(despacho, payload) {
+  try {
+    await enviarInciertoSiesa(despacho, payload);
+  } catch (e) {
+    console.error(`[requisicion] aviso de incierto no salió (${despacho.id}): ${e.message}`);
+  }
 }
 
 /**

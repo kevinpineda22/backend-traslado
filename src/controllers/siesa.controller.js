@@ -6,6 +6,7 @@ import {
   estadoRequisiciones,
   enviarRequisicion,
   resolverIncierto,
+  resolverInciertosAutomaticamente,
 } from "../services/requisicion.service.js";
 import {
   refrescarSnapshotUnico,
@@ -103,12 +104,34 @@ export async function estado(_req, res, next) {
 /**
  * GET/POST /api/siesa/requisiciones/reintentar
  * Reintenta las requisiciones que no llegaron a SIESA. Lo llama el cron.
+ *
+ * Son DOS pasadas y el orden importa:
+ *
+ *   1. `reintentarPendientes` — la cola normal.
+ *   2. `resolverInciertosAutomaticamente` — los que quedaron sin respuesta de
+ *      SIESA. Lo que este barrido devuelve a 'pendiente' lo toma la corrida
+ *      SIGUIENTE, no ésta. Es a propósito: mandarlo en la misma pasada gastaría
+ *      dos intentos del cupo en un segundo, y diez minutos de espera no son nada
+ *      al lado de la hora y media que costaba que lo destrabara una persona.
+ *
+ * El barrido nunca lanza por un despacho suelto, pero si no puede ni leer el ERP
+ * devuelve `motivo` y no toca nada. Va en su propio try para que un problema de
+ * Connekta no se lleve puesto el resultado de los reintentos, que ya ocurrieron.
  */
 export async function reintentarRequisiciones(req, res, next) {
   try {
     const limite = Math.min(Number(req.query.limite) || 20, 50);
     const resultado = await reintentarPendientes(limite);
-    res.json({ ok: true, ...resultado });
+
+    let inciertos = null;
+    try {
+      inciertos = await resolverInciertosAutomaticamente(Math.min(limite, 10));
+    } catch (e) {
+      console.error("[siesa] barrido de inciertos falló:", e.message);
+      inciertos = { error: e.message };
+    }
+
+    res.json({ ok: true, ...resultado, inciertos });
   } catch (error) {
     next(error);
   }

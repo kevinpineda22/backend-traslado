@@ -117,6 +117,9 @@ beforeEach(() => {
   };
   delete process.env.SIESA_SOLO_SALIDA;
   delete process.env.SIESA_ENTRADA_VERIFICAR;
+  // Lo que se certifica acá es que a SIESA se sube UNA vez, no la pausa entre
+  // las dos caras. Con la espera real el par no se cierra en una sola pasada.
+  process.env.SIESA_ENTRADA_ESPERA_MS = "0";
   // Este archivo NO mockea siesaTransito.consulta: sin esto, y con la consulta
   // configurada en el .env de la máquina, los tests saldrían a Connekta de verdad.
   delete process.env.SIESA_CONSULTA_TRANSITO;
