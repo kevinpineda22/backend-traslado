@@ -26,6 +26,12 @@ import { sandboxOn, volcarCorreo } from "../config/sandbox.js";
                                     inventarios + los extra. Está separada para
                                     poder sumar a alguien al manifiesto sin
                                     suscribirlo a las alertas técnicas.
+
+   Y un MAPA sede → correos (no una lista: el destinatario depende del despacho):
+
+     TRASLADOS_MAIL_COMPARATIVO_POR_SEDE
+       → comparativo del recibo para el líder de la bodega ORIGEN, además de
+         inventarios. Formato "SEDE:correo,correo;SEDE:correo".
    ============================================= */
 
 const transporter = nodemailer.createTransport({
@@ -94,6 +100,94 @@ export const DESTINATARIOS = {
   ),
 };
 
+/* ─── Comparativo del recibo, por SEDE ORIGEN ──────────────────────────────
+   El líder de cada bodega responde por lo que SALE de su bodega, así que pidió
+   ver el comparativo de esos recibos — no el de todas las sedes. `inventarios`
+   no sirve para eso: esa lista recibe TODO, y sumarlo ahí lo suscribiría también
+   a los traslados de las otras sedes y a las alertas técnicas de SIESA.
+
+   Es un MAPA sede → correos, no una lista, porque el destinatario depende del
+   despacho que se está cerrando. Se resuelve por `despacho.origen`.
+
+   Formato: `SEDE:correo,correo;SEDE:correo`
+     - `;` separa sedes — la coma ya separa correos dentro de una sede.
+     - La sede es el código de bodega de `SEDES` (PV001, 00301, …), NO el C.O.
+
+   Hoy solo Plaza (PV001 = Principal Copacabana). Sumar al líder de otra sede es
+   cargar la variable de entorno; no hace falta tocar código ni desplegar. */
+const COMPARATIVO_POR_SEDE_DEFAULT = "PV001:Liderbodegaplaza@merkahorrosas.com";
+
+/**
+ * Parsea el mapa sede → correos. Una entrada mal escrita (sin `:`, sin sede o
+ * sin correos) se ignora con un warning en vez de tumbar el arranque: es una
+ * variable de entorno que edita una persona, y un typo no puede dejar el backend
+ * sin levantar. Pero se AVISA — un destinatario que se cae en silencio es el
+ * mismo tipo de falla silenciosa que el modo prueba.
+ */
+const mapaPorSede = (valor, porDefecto) => {
+  const mapa = new Map();
+  for (const entrada of String(valor || porDefecto).split(";")) {
+    const crudo = entrada.trim();
+    if (!crudo) continue;
+    const corte = crudo.indexOf(":");
+    const sede = corte === -1 ? "" : crudo.slice(0, corte).trim();
+    const correos = corte === -1 ? [] : lista(crudo.slice(corte + 1), "");
+    if (!sede || correos.length === 0) {
+      console.warn(
+        `[email] ⚠️ TRASLADOS_MAIL_COMPARATIVO_POR_SEDE: entrada ignorada "${crudo}" ` +
+          '(se espera "SEDE:correo,correo", sedes separadas por ";").',
+      );
+      continue;
+    }
+    // Misma sede repetida: se acumulan los correos en vez de pisarse. Perder
+    // destinatarios por un duplicado en la variable no se notaría nunca.
+    mapa.set(sede, unirDestinatarios(mapa.get(sede) || [], correos));
+  }
+  return mapa;
+};
+
+/**
+ * Une listas de destinatarios deduplicando sin distinguir mayúsculas.
+ *
+ * `lista` ya deduplica DENTRO de una lista, pero acá se combinan dos que se
+ * arman por separado (la de inventarios y la de la sede). Si el líder de la sede
+ * también está en inventarios, sin esto le llega el mismo correo dos veces.
+ */
+export function unirDestinatarios(...listas) {
+  const vistos = new Set();
+  const salida = [];
+  for (const correo of listas.flat()) {
+    const limpio = String(correo || "").trim();
+    if (!limpio) continue;
+    const clave = limpio.toLowerCase();
+    if (vistos.has(clave)) continue;
+    vistos.add(clave);
+    salida.push(limpio);
+  }
+  return salida;
+}
+
+const COMPARATIVO_POR_SEDE = mapaPorSede(
+  process.env.TRASLADOS_MAIL_COMPARATIVO_POR_SEDE,
+  COMPARATIVO_POR_SEDE_DEFAULT,
+);
+
+/**
+ * Correos que deben recibir el comparativo de un recibo cuyo ORIGEN es `sede`.
+ * Devuelve [] si esa sede no tiene nadie configurado (el caso de casi todas).
+ *
+ * @param {string} sede - código de bodega origen (ej: "PV001")
+ * @returns {string[]}
+ */
+export function destinatariosComparativoDeSede(sede) {
+  return COMPARATIVO_POR_SEDE.get(String(sede || "").trim()) || [];
+}
+
+/** Mapa completo sede → correos. Solo para el diagnóstico de /health/email. */
+export function comparativoPorSede() {
+  return Object.fromEntries(COMPARATIVO_POR_SEDE);
+}
+
 /**
  * ¿Está el correo configurado? Si no, todo envío se omite silenciosamente y el
  * sistema parece "no mandar correos" sin ninguna pista. Lo exponemos para poder
@@ -138,6 +232,10 @@ export async function verificarEmail() {
     host: process.env.EMAIL_HOST || "smtp.office365.com",
     puerto: Number(process.env.EMAIL_PORT) || 587,
     destinatarios: DESTINATARIOS,
+    // Mapa sede → correos del comparativo. Va aparte de `destinatarios` porque
+    // no es una lista fija: se resuelve por el origen de cada despacho, y sin
+    // verlo acá no hay forma de comprobar que la variable quedó bien escrita.
+    comparativo_por_sede: comparativoPorSede(),
     modo_prueba: prueba,
     // Cuando el desvío está activo lo decimos con todas las letras. Un modo de
     // prueba que no se ve es un modo de prueba que se queda prendido.

@@ -1,4 +1,10 @@
-import { sendEmail, DESTINATARIOS, emailConfigurado } from "./email.service.js";
+import {
+  sendEmail,
+  DESTINATARIOS,
+  emailConfigurado,
+  destinatariosComparativoDeSede,
+  unirDestinatarios,
+} from "./email.service.js";
 import { nombreSede } from "../config/flujos.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
 import {
@@ -299,8 +305,17 @@ export async function enviarComparativoAuditoria(despacho, decision) {
   }
   const ruta = `${nombreSede(despacho.origen)} → ${nombreSede(despacho.destino)}`;
   const decisionTxt = DECISION_LABEL[decision] || decision || "—";
+
+  // Además de inventarios (que ve TODOS los recibos), el líder de la bodega de
+  // donde SALIÓ la mercancía. Se resuelve por `origen` y no por `destino` a
+  // propósito: quien responde por el conteo del despacho es la bodega que lo
+  // armó, y es ahí donde una diferencia se puede corregir. Sedes sin nadie
+  // configurado devuelven [] y el correo sale igual que antes.
+  const lideresDeSede = destinatariosComparativoDeSede(despacho?.origen);
+  const to = unirDestinatarios(DESTINATARIOS.inventarios, lideresDeSede);
+
   return sendEmail({
-    to: DESTINATARIOS.inventarios,
+    to,
     subject: `Recibo finalizado — ${ruta} (${decisionTxt})`,
     html: armarHtml({
       despacho,
