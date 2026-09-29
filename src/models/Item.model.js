@@ -118,22 +118,85 @@ export async function estadisticasMotivos() {
  * En ese caso NO se valida el dueño y NO se sella ninguno — un renglón que resolvió
  * el sistema no es de nadie, y sellarlo dejaría al despachador sin poder corregirlo.
  *
+ * EL RENGLÓN TIENE QUE SER DEL DESPACHO QUE SE ESTÁ RECOLECTANDO (`despachoId`)
+ *
+ * Antes se escribía por `id` a secas, y eso se comió un traslado real (27/09/2026,
+ * ad75f5e5 → parte 2 818290c6): mientras un celular cerraba la recolección (un
+ * POST con TODOS los renglones, que se procesa de a uno durante varios segundos),
+ * otro apretó "Enviar primera parte" y los pendientes se mudaron al traslado
+ * nuevo. El POST en curso siguió escribiendo por id y le estampó cantidad 0 y
+ * dueño a 74 renglones que ya eran de la parte 2: el traslado nuevo nació
+ * "contado en cero" sin que nadie lo tocara. Con el filtro, un renglón que se
+ * mudó a mitad de camino no se toca: vuelve como RENGLON_FUERA_DEL_DESPACHO.
+ *
+ * ESCRITURA CONDICIONAL (compare-and-swap)
+ * Entre leer el renglón y escribirlo pasan milisegundos en los que otra persona
+ * puede tomarlo, o un "dividir" puede mudarlo. El UPDATE se ata a lo que se leyó
+ * (mismo despacho, mismo dueño): si algo cambió, no escribe, se relee y se decide
+ * de nuevo. Sin esto, dos personas que cuentan el mismo producto a la vez pasaban
+ * las dos el chequeo del candado y ganaba la última.
+ *
  * @param {string} itemId
  * @param {number} cantidad  - Cantidad real recolectada
  * @param {boolean} [agotado] - true si no hubo stock suficiente en bodega
  * @param {string|null} [motivo] - motivo del faltante: uno de MOTIVOS_FALTANTE, o null
  * @param {string|null} [recolectadoPor] - correo de quien cuenta; null = el sistema
- * @throws 409 si el renglón ya lo está contando otra persona
+ * @param {string|null} [despachoId] - despacho al que TIENE que pertenecer el renglón
+ * @throws 409 RENGLON_TOMADO si el renglón ya lo está contando otra persona
+ * @throws 409 RENGLON_FUERA_DEL_DESPACHO si el renglón no es (o dejó de ser) del despacho
  */
-export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null) {
-  // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
-  const { data: item, error: errGet } = await supabase
-    .from(TABLE)
-    .select("cantidad_admin, unidad_medida, recolectado_por")
-    .eq("id", itemId)
-    .single();
+export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null) {
+  const pedidoEscritura = { itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId };
 
-  if (errGet || !item) throw createError(404, "Item no encontrado");
+  // Dos vueltas alcanzan: la segunda relee el renglón y, si lo que cambió fue el
+  // dueño o el despacho, lanza el error que corresponde. Si vuelve a perder la
+  // carrera es porque el renglón se está escribiendo en ráfaga desde otro lado, y
+  // lo honesto es decirlo (409) para que el front reintente, no escribir a ciegas.
+  for (let intento = 0; intento < 2; intento += 1) {
+    const escrito = await intentarEscrituraDespachador(pedidoEscritura);
+    if (escrito) return escrito;
+  }
+  const e = createError(
+    409,
+    "El producto cambió mientras se guardaba. Se va a reintentar solo.",
+  );
+  e.codigo = "RENGLON_EN_CARRERA";
+  e.item_id = itemId;
+  throw e;
+}
+
+/** Error de un renglón que no pertenece (o ya no) al despacho de la escritura. */
+function renglonFueraDelDespacho(itemId, despachoId) {
+  const e = createError(
+    409,
+    "Este producto ya no es parte de este traslado (se movió a otra parte o se quitó). No se guardó nada sobre él.",
+  );
+  e.codigo = "RENGLON_FUERA_DEL_DESPACHO";
+  e.item_id = itemId;
+  e.despacho_id = despachoId;
+  return e;
+}
+
+/**
+ * Un intento de escritura. Devuelve la fila escrita, o `null` si el renglón cambió
+ * entre la lectura y la escritura (el llamador reintenta y la relectura decide).
+ */
+async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId }) {
+  // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
+  let lectura = supabase
+    .from(TABLE)
+    .select("cantidad_admin, unidad_medida, recolectado_por, despacho_id")
+    .eq("id", itemId);
+  if (despachoId) lectura = lectura.eq("despacho_id", despachoId);
+  const { data: item, error: errGet } = await lectura.maybeSingle();
+
+  // Un error de lectura NO es "no existe": disfrazarlo de 404 hacía que un corte de
+  // red se leyera como un renglón borrado.
+  if (errGet) throw new Error(`Error al leer el ítem: ${errGet.message}`);
+  if (!item) {
+    if (despachoId) throw renglonFueraDelDespacho(itemId, despachoId);
+    throw createError(404, "Item no encontrado");
+  }
 
   // El dueño del renglón se compara normalizado: el correo puede venir con otra
   // capitalización según de dónde salga la sesión, y un "Luis@" contra un "luis@"
@@ -185,15 +248,23 @@ export async function updateCantidadDespachador(itemId, cantidad, agotado = fals
     if (nuevo_factor) updatePayload.factor = nuevo_factor;
   }
 
-  const { data, error } = await supabase
+  // UPDATE atado a lo que se leyó: mismo despacho y mismo dueño. Si otra escritura
+  // se metió en el medio, no matchea ninguna fila y devolvemos null para releer.
+  let escritura = supabase
     .from(TABLE)
     .update(updatePayload)
     .eq("id", itemId)
-    .select()
-    .single();
+    .eq("despacho_id", item.despacho_id);
+  if (recolectadoPor) {
+    escritura =
+      item.recolectado_por == null
+        ? escritura.is("recolectado_por", null)
+        : escritura.eq("recolectado_por", item.recolectado_por);
+  }
+  const { data, error } = await escritura.select().maybeSingle();
 
   if (error) throw new Error(`Error al actualizar cantidad despachador: ${error.message}`);
-  return data;
+  return data || null;
 }
 
 /**
@@ -304,59 +375,73 @@ export async function insertItemAuditor(despachoId, item) {
  * Lee el ítem primero para calcular diferencia correcta, setea cantidad_auditor=0
  * y no_recibido=true. #5.
  */
-export async function marcarNoRecibido(itemId) {
-  const { data: item } = await supabase
-    .from(TABLE)
-    .select("cantidad_despachador, factor")
-    .eq("id", itemId)
-    .single();
-
-  if (!item) throw new Error("Item no encontrado");
+export async function marcarNoRecibido(itemId, despachoId = null) {
+  const item = await leerParaAuditoria(itemId, despachoId);
 
   // Contado 0 (no llegó) menos lo despachado, ambos en UND.
   const diferencia = 0 - despachadoEnUnd(item);
 
-  const { data, error } = await supabase
+  let q = supabase
     .from(TABLE)
     .update({
       cantidad_auditor: 0,
       diferencia,
       no_recibido: true,
     })
-    .eq("id", itemId)
-    .select()
-    .single();
+    .eq("id", itemId);
+  if (despachoId) q = q.eq("despacho_id", despachoId);
+  const { data, error } = await q.select().single();
 
   if (error) throw new Error(`Error al marcar no recibido: ${error.message}`);
   return data;
 }
 
 /**
+ * Lee lo que la auditoría necesita de un renglón para calcular la diferencia.
+ * Con `despachoId` exige que el renglón sea de ese despacho: el conteo del auditor
+ * de un traslado no puede terminar escrito en otro.
+ */
+async function leerParaAuditoria(itemId, despachoId) {
+  let q = supabase.from(TABLE).select("cantidad_despachador, factor").eq("id", itemId);
+  if (despachoId) q = q.eq("despacho_id", despachoId);
+  const { data: item, error } = await q.maybeSingle();
+  if (error) throw new Error(`Error al leer el ítem: ${error.message}`);
+  if (!item) {
+    throw createError(
+      422,
+      despachoId
+        ? "Un producto del conteo no pertenece a este traslado. Recargá la recepción."
+        : "Item no encontrado",
+    );
+  }
+  return item;
+}
+
+/**
  * Actualizar cantidad_auditor y diferencia de un item.
  * `cantidadAuditor` ya viene en UND (el auditor cuenta y envía en UND), así que lo
  * despachado se canonicaliza para comparar en la misma unidad.
+ *
+ * `no_recibido` se apaga a propósito: si hay un conteo, el producto llegó. Sin
+ * esto, un renglón marcado "no recibido" en un intento anterior conservaba la
+ * marca aunque el auditor después lo contara.
  */
-export async function updateCantidadAuditor(itemId, cantidadAuditor) {
+export async function updateCantidadAuditor(itemId, cantidadAuditor, despachoId = null) {
   // Primero obtenemos el item para calcular diferencia (con factor: ver despachadoEnUnd)
-  const { data: item } = await supabase
-    .from(TABLE)
-    .select("cantidad_despachador, factor")
-    .eq("id", itemId)
-    .single();
-
-  if (!item) throw new Error("Item no encontrado");
+  const item = await leerParaAuditoria(itemId, despachoId);
 
   const diferencia = (Number(cantidadAuditor) || 0) - despachadoEnUnd(item);
 
-  const { data, error } = await supabase
+  let q = supabase
     .from(TABLE)
     .update({
       cantidad_auditor: cantidadAuditor,
       diferencia,
+      no_recibido: false,
     })
-    .eq("id", itemId)
-    .select()
-    .single();
+    .eq("id", itemId);
+  if (despachoId) q = q.eq("despacho_id", despachoId);
+  const { data, error } = await q.select().single();
 
   if (error) throw new Error(`Error al actualizar cantidad auditor: ${error.message}`);
   return data;

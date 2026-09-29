@@ -422,52 +422,25 @@ export async function abandonar(req, res, next) {
  * POST /api/despachos/:id/recolectar
  * Registrar la recolección de un item por el despachador.
  * Body: { items: [{ id, cantidad, agotado? }], despachador_id? }
+ * Resp: { ok, data: [renglones escritos], conflictos: [...], fuera_de_despacho: [...] }
+ *
+ * UN RENGLÓN AJENO NO PUEDE TUMBAR EL LOTE: el front sincroniza de a tandas (ver
+ * useRecoleccionOffline) y reintenta el mismo lote si falla. Si un choque de
+ * candado o un renglón que se mudó a otro traslado tirara el POST entero, la
+ * tanda quedaría trabada para siempre y la persona seguiría contando sin que se
+ * guarde nada. Los choques esperables vuelven aparte; el detalle, en
+ * `DespachoService.registrarLoteRecoleccion`.
  */
 export async function recolectar(req, res, next) {
   try {
     const { items, despachador_id } = req.body;
-
-    // Guarda del despacho: que exista, no esté inactivo y esté En_recoleccion.
-    // Ya NO valida propiedad — el despacho es compartido (migración 023) y el
-    // candado bajó al renglón. Va antes de escribir nada: si el despacho no admite
-    // recolección, no tiene sentido intentar ítem por ítem.
-    await DespachoService.assertPuedeRecolectar(req.params.id, despachador_id ?? null);
-
-    const resultados = [];
-    const conflictos = [];
-
-    // UN RENGLÓN AJENO NO PUEDE TUMBAR EL LOTE.
-    //
-    // El front sincroniza de a tandas (ver useRecoleccionOffline). Si un solo ítem
-    // choca con el candado de otra persona y se propaga la excepción, se pierden
-    // las escrituras de TODOS los demás — y como el syncer reintenta el mismo lote,
-    // vuelve a chocar en el mismo ítem para siempre: la tanda queda trabada y la
-    // persona sigue contando sin que se guarde nada.
-    //
-    // Así que cada ítem va por su cuenta: los que entran, entran; los que chocan
-    // se devuelven aparte para que el front los marque como ajenos y deje de
-    // reintentarlos. Cualquier otro error (red, 422 de tope) sí se propaga: ese no
-    // es un choque esperable y esconderlo sería el mismo error de siempre.
-    for (const item of items) {
-      try {
-        const actualizado = await DespachoService.registrarRecoleccion(
-          item.id,
-          item.cantidad,
-          item.agotado,
-          item.motivo,
-          item.nueva_unidad_medida,
-          item.nueva_cantidad_admin,
-          item.nuevo_factor,
-          despachador_id ?? null,
-        );
-        resultados.push(actualizado);
-      } catch (err) {
-        if (err?.codigo !== "RENGLON_TOMADO") throw err;
-        conflictos.push({ item_id: item.id, dueno: err.dueno, error: err.message });
-      }
-    }
-
-    res.json({ ok: true, data: resultados, conflictos });
+    const { resultados, conflictos, fuera_de_despacho } =
+      await DespachoService.registrarLoteRecoleccion(
+        req.params.id,
+        items,
+        despachador_id ?? null,
+      );
+    res.json({ ok: true, data: resultados, conflictos, fuera_de_despacho });
   } catch (error) {
     next(error);
   }

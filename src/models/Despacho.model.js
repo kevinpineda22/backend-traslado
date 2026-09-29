@@ -118,7 +118,9 @@ export async function findById(id) {
     .eq("id", id)
     .order("grupo", { referencedTable: "traslados_items", ascending: true })
     .order("descripcion", { referencedTable: "traslados_items", ascending: true })
-    .single();
+    // `maybeSingle` y no `single`: un id que no existe es `null` (los llamadores
+    // responden 404), no un error de base que sale como 500.
+    .maybeSingle();
 
   if (error) throw new Error(`Error al obtener despacho: ${error.message}`);
   return despacho;
@@ -203,7 +205,18 @@ export async function create(payload) {
       .from("traslados_items")
       .insert(items.map((item) => aFilaItem(despacho.id, item)));
 
-    if (errItems) throw new Error(`Error al insertar items: ${errItems.message}`);
+    if (errItems) {
+      // Sin los ítems, la cabecera es un traslado fantasma: aparece en el pool del
+      // despachador como una lista vacía (o bloquea la ruta, si es un borrador) y
+      // el admin cree que se guardó. Se borra para que el reintento empiece limpio.
+      const { error: errLimpiar } = await supabase.from(TABLE).delete().eq("id", despacho.id);
+      if (errLimpiar) {
+        console.error(
+          `[despacho] quedó la cabecera ${despacho.id} sin ítems y no se pudo borrar: ${errLimpiar.message}`,
+        );
+      }
+      throw new Error(`Error al insertar items: ${errItems.message}`);
+    }
   }
 
   // Respondemos con la cabecera (rápido). NO hacemos read-back con join de todos
@@ -627,6 +640,19 @@ export async function abandonarRecoleccion(id, despachadorId) {
  * contando nadie todavía. Si quedara sellado, el que la tome mañana se comería
  * un "lo está contando otra persona" sobre un renglón que nadie tiene.
  *
+ * `cantidad_despachador` también vuelve a null: lo que se muda es por definición
+ * lo que nadie recolectó, y un 0 sin motivo es eso mismo. Si viajara el 0, la
+ * parte 2 nacería "contada en cero" — el despachador la vería como faltantes ya
+ * registrados, no como productos por recorrer.
+ *
+ * EL MOVIMIENTO ES UNA SOLA ESCRITURA CONDICIONAL
+ * No se mudan "los ids que se leyeron": se mudan las filas que, AL MOMENTO DE
+ * ESCRIBIR, siguen en este despacho y siguen sin tocar. Entre la lectura y el
+ * UPDATE alguien puede estar contando: si registró un producto en ese instante,
+ * ese producto ya no cumple la condición y se queda en la primera parte con su
+ * conteo. Leer la lista y mudar por id se llevaba a la parte 2 renglones recién
+ * contados (con su cantidad adentro) sin que nadie lo notara.
+ *
  * @param {string} id - despacho a dividir
  * @returns {Promise<{ despacho: object, parte2: object, movidos: number }>}
  */
@@ -694,6 +720,29 @@ export async function dividirEnPartes(id) {
 
   const ahora = new Date().toISOString();
 
+  // Cerca: el despacho tiene que SEGUIR en recolección al momento de partirlo. La
+  // lectura de arriba puede tener segundos; si en el medio otro celular cerró la
+  // recolección, partir ahora dejaría un traslado cerrado sin la mitad de sus
+  // renglones. Se ata a un UPDATE condicional para que la verificación y el
+  // "sigo adelante" sean la misma operación.
+  const { data: sigue, error: errCerca } = await supabase
+    .from(TABLE)
+    .update({ updated_at: ahora })
+    .eq("id", id)
+    .eq("estado", "En_recoleccion")
+    .eq("inactivo", false)
+    .select("id")
+    .maybeSingle();
+  if (errCerca) throw new Error(`Error al verificar el traslado: ${errCerca.message}`);
+  if (!sigue) {
+    const e = new Error(
+      "El traslado cambió de estado mientras se enviaba la primera parte (alguien lo cerró o lo inactivó). No se partió nada.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
+
   // La parte 2 nace en "Creado" y SIN dueño: va al pool. El que empezó puede
   // estar de descanso o en otra sede mañana, y un traslado reservado a alguien
   // que no viene es un traslado que no sale.
@@ -716,23 +765,53 @@ export async function dividirEnPartes(id) {
     .single();
   if (errCab) throw new Error(`Error al crear la parte 2: ${errCab.message}`);
 
-  // Mover los pendientes. Si esto falla, la parte 2 queda vacía: se borra para no
-  // dejar un traslado fantasma de 0 renglones en el pool de mañana.
-  const { error: errMover } = await supabase
+  // Mover los pendientes — UNA escritura condicional (ver el encabezado). La
+  // condición es la misma de `sinTocar`, re-evaluada por la base al escribir.
+  // Tampoco se pasa la lista de ids: además de estar vieja, con cientos de
+  // renglones rompía el largo máximo de la URL.
+  const { data: movidos, error: errMover } = await supabase
     .from("traslados_items")
-    .update({ despacho_id: parte2.id, recolectado_por: null })
-    .in(
-      "id",
-      sinTocar.map((it) => it.id),
-    );
-  if (errMover) {
+    .update({ despacho_id: parte2.id, recolectado_por: null, cantidad_despachador: null })
+    .eq("despacho_id", id)
+    .is("motivo", null)
+    .not("agotado", "is", true)
+    .or("cantidad_despachador.is.null,cantidad_despachador.eq.0")
+    .select("id");
+
+  // Si esto falla o no movió nada, la parte 2 quedó vacía: se borra para no dejar
+  // un traslado fantasma de 0 renglones en el pool de mañana.
+  if (errMover || !movidos?.length) {
     await supabase.from(TABLE).delete().eq("id", parte2.id);
-    throw new Error(`Error al mover los pendientes: ${errMover.message}`);
+    if (errMover) throw new Error(`Error al mover los pendientes: ${errMover.message}`);
+    const e = new Error(
+      "Mientras se enviaba la primera parte se registraron los productos que faltaban: ya no queda nada pendiente. Cerrá la recolección normalmente.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
   }
 
-  await supabase.from(TABLE).update({ updated_at: ahora }).eq("id", id);
+  // La lectura exigía al menos un renglón atendido, pero eso se miró ANTES de
+  // mudar. Si en el medio alguien devolvió a 0 lo único que había contado, la
+  // mudanza se llevó todo y la primera parte quedó vacía: un traslado de 0
+  // renglones que igual se cerraría y subiría a SIESA. Se deshace entera.
+  const { data: quedan, error: errQuedan } = await supabase
+    .from("traslados_items")
+    .select("id")
+    .eq("despacho_id", id)
+    .limit(1);
+  if (!errQuedan && !quedan?.length) {
+    await supabase.from("traslados_items").update({ despacho_id: id }).eq("despacho_id", parte2.id);
+    await supabase.from(TABLE).delete().eq("id", parte2.id);
+    const e = new Error(
+      "La primera parte quedaría vacía: no hay ningún producto registrado. No se partió nada.",
+    );
+    e.statusCode = 409;
+    e.expose = true;
+    throw e;
+  }
 
-  return { despacho: await findById(id), parte2, movidos: sinTocar.length };
+  return { despacho: await findById(id), parte2, movidos: movidos.length };
 }
 
 /**
@@ -781,26 +860,53 @@ export async function editarItems(id, items) {
     throw e;
   }
 
-  const { data: actuales } = await supabase
+  const { data: actuales, error: errLeer } = await supabase
     .from("traslados_items")
     .select("id")
     .eq("despacho_id", id);
+  // Sin la lista actual no se puede calcular qué se quitó: seguir con `[]` era
+  // seguro de casualidad; se corta explícito.
+  if (errLeer) throw new Error(`Error al leer los ítems: ${errLeer.message}`);
 
-  const keep = new Set(items.map((i) => i.id).filter(Boolean));
-  const removidos = (actuales || []).map((r) => r.id).filter((x) => !keep.has(x));
+  // Los ids llegan del cliente: solo cuentan los que SON de este despacho. Un id
+  // de otro traslado (pantalla vieja, dos pestañas) no puede editar un renglón ajeno.
+  const propios = new Set((actuales || []).map((r) => r.id));
+  const keep = new Set(items.map((i) => i.id).filter((x) => x && propios.has(x)));
+  const removidos = [...propios].filter((x) => !keep.has(x));
+
+  // Una lista que no deja nada no es "editar": borraría todos los renglones y
+  // dejaría un traslado de 0 productos circulando. Para eso está Eliminar. Se
+  // cuenta DESPUÉS de filtrar los ids ajenos: una lista hecha solo de ids de otro
+  // traslado también vaciaría este.
+  const nuevosValidos = items.filter(
+    (it) => !it.id && it.codigo_item != null && String(it.codigo_item).trim() !== "",
+  );
+  if (keep.size === 0 && nuevosValidos.length === 0) {
+    const e = new Error(
+      "El traslado quedaría sin productos. Si ya no se necesita, eliminalo en vez de vaciarlo.",
+    );
+    e.statusCode = 422;
+    e.expose = true;
+    throw e;
+  }
 
   if (removidos.length) {
-    const { error } = await supabase.from("traslados_items").delete().in("id", removidos);
+    const { error } = await supabase
+      .from("traslados_items")
+      .delete()
+      .eq("despacho_id", id)
+      .in("id", removidos);
     if (error) throw new Error(`Error al quitar ítems: ${error.message}`);
   }
 
   // Ítems existentes: solo se toca la cantidad del admin.
   for (const it of items) {
-    if (!it.id) continue;
+    if (!it.id || !propios.has(it.id)) continue;
     const { error } = await supabase
       .from("traslados_items")
       .update({ cantidad_admin: Number(it.cantidad) || 0 })
-      .eq("id", it.id);
+      .eq("id", it.id)
+      .eq("despacho_id", id);
     if (error) throw new Error(`Error al actualizar ítem: ${error.message}`);
   }
 
@@ -931,11 +1037,47 @@ export async function marcarItemsSiesaOmitido(id, itemIds, omitido, correo = nul
 }
 
 /**
+ * Estados en los que un despacho se puede ELIMINAR: nadie contó nada todavía.
+ *
+ * Borrar es irreversible y arrastra por cascade los renglones, las firmas y el
+ * manifiesto. Desde `En_recoleccion` en adelante eso es trabajo de personas
+ * (conteos, firmas) y, desde `Recolectado`, un movimiento que ya existe en SIESA:
+ * borrarlo deja al ERP con un documento que el sistema ya no puede explicar. Para
+ * sacar de circulación un traslado que ya arrancó está Inactivar, que no borra
+ * nada y se puede revertir.
+ */
+const ESTADOS_ELIMINABLES = ["Borrador", "Creado"];
+
+/**
  * Eliminar un despacho (los items y firmas se borran por FK ON DELETE CASCADE).
+ * Solo en `ESTADOS_ELIMINABLES`, y atado al mismo DELETE: si alguien lo inicia
+ * entre que el admin abrió el diálogo y confirmó, no se borra.
  */
 export async function eliminar(id) {
-  const { error } = await supabase.from(TABLE).delete().eq("id", id);
+  const { data, error } = await supabase
+    .from(TABLE)
+    .delete()
+    .eq("id", id)
+    .in("estado", ESTADOS_ELIMINABLES)
+    .select("id")
+    .maybeSingle();
   if (error) throw new Error(`Error al eliminar despacho: ${error.message}`);
+
+  if (!data) {
+    const { data: actual } = await supabase
+      .from(TABLE)
+      .select("estado")
+      .eq("id", id)
+      .maybeSingle();
+    const e = new Error(
+      actual
+        ? `No se puede eliminar un traslado en ${actual.estado}: ya tiene trabajo registrado. Usá Inactivar para sacarlo de circulación sin perder nada.`
+        : "Despacho no encontrado",
+    );
+    e.statusCode = actual ? 409 : 404;
+    e.expose = true;
+    throw e;
+  }
   return { id, eliminado: true };
 }
 
@@ -1489,8 +1631,13 @@ export async function descartarBorrador(id) {
  * @param {string} id
  * @param {boolean} activo - true = reactivar, false = inactivar
  * @param {string} [motivo] - por qué se inactivó (queda para el panel)
+ * @param {object} [opts]
+ * @param {string} [opts.soloSiEstado] - inactiva SOLO si el despacho sigue en este
+ *   estado y activo. Lo usa el barrido: entre que leyó "estancado en Creado" y que
+ *   escribe, alguien pudo iniciar la recolección, y congelar un traslado con una
+ *   persona contando la deja sin poder guardar. Si no matchea devuelve `null`.
  */
-export async function setActivo(id, activo, motivo = null) {
+export async function setActivo(id, activo, motivo = null, { soloSiEstado } = {}) {
   const ahora = new Date().toISOString();
   const patch = activo
     ? {
@@ -1509,15 +1656,16 @@ export async function setActivo(id, activo, motivo = null) {
         updated_at: ahora,
       };
 
-  const { data, error } = await supabase
-    .from(TABLE)
-    .update(patch)
-    .eq("id", id)
-    .select()
-    .single();
+  let q = supabase.from(TABLE).update(patch).eq("id", id);
+  if (soloSiEstado) q = q.eq("estado", soloSiEstado).eq("inactivo", false);
+  const { data, error } = await q.select().maybeSingle();
 
-  if (error || !data) {
-    throw new Error(`Error al cambiar la actividad del traslado: ${error?.message}`);
+  if (error) {
+    throw new Error(`Error al cambiar la actividad del traslado: ${error.message}`);
+  }
+  if (!data) {
+    if (soloSiEstado) return null;
+    throw new Error("Error al cambiar la actividad del traslado: despacho no encontrado");
   }
   return data;
 }

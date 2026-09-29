@@ -69,9 +69,15 @@ const compararSchema = z.object({
 });
 
 // Ítem existente que cuenta el auditor.
+//
+// `no_recibido` TIENE que estar declarado: Zod descarta las claves que el esquema
+// no nombra (ver el aviso de `despachadorSchema`). Faltaba, y la marca "No
+// recibido" del auditor (#5) se borraba acá antes de llegar al servicio: el
+// renglón se guardaba como "contado 0" y la novedad nunca existió en la base.
 const itemAuditorExistenteSchema = z.object({
   id: z.string().uuid(),
   cantidad_auditor: z.number().min(0, "cantidad_auditor no puede ser negativa"),
+  no_recibido: z.boolean().optional(),
 });
 
 // Ítem NUEVO agregado por el auditor (no venía en la lista original). Sin `id`.

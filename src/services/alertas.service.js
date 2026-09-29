@@ -163,11 +163,19 @@ async function correrReglaInactivar(cfg) {
     const etapa =
       despacho.estado === "Recolectado" ? "sin auditar" : "sin iniciar la recolección";
     try {
-      await DespachoModel.setActivo(
+      const hecho = await DespachoModel.setActivo(
         despacho.id,
         false,
         `Inactivado automáticamente: ${horasReales} h ${etapa} (umbral ${cfg.horas} h)`,
+        // Solo si SIGUE donde lo vio la consulta. Entre leer y escribir alguien
+        // pudo tomarlo; congelarlo ahí deja a esa persona contando sin poder
+        // guardar nada.
+        { soloSiEstado: despacho.estado },
       );
+      if (!hecho) {
+        console.log(`[alertas] ${despacho.id} se movió antes de inactivarlo: se deja como está`);
+        continue;
+      }
       inactivados += 1;
       console.log(
         `[alertas] 🔒 traslado ${despacho.id} inactivado — ${horasReales} h ${etapa}`,

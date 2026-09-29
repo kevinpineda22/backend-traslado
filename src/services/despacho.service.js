@@ -263,12 +263,19 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
           return recogido > 0 && pedido > 0 && recogido < pedido;
         });
 
+        // Escrituras del SISTEMA (sin dueño), acotadas a este despacho igual que
+        // las de una persona.
         for (const item of parciales) {
           await ItemModel.updateCantidadDespachador(
             item.id,
             Number(item.cantidad_despachador),
             false,
             "surtido_parcial",
+            null,
+            null,
+            null,
+            null,
+            id,
           );
         }
 
@@ -298,10 +305,10 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
             const disponible = Number(s.disponible ?? 0);
             if (disponible <= 0) {
               // Sin stock → Agotado
-              await ItemModel.updateCantidadDespachador(item.id, 0, true, "sin_stock");
+              await ItemModel.updateCantidadDespachador(item.id, 0, true, "sin_stock", null, null, null, null, id);
             } else {
               // Hay stock pero no se recolectó → Fantasma
-              await ItemModel.updateCantidadDespachador(item.id, 0, false, "inventario_inflado");
+              await ItemModel.updateCantidadDespachador(item.id, 0, false, "inventario_inflado", null, null, null, null, id);
             }
           }
           if (sinDato > 0) {
@@ -579,9 +586,100 @@ export async function obtenerManifiesto(despachoId) {
 /**
  * Registrar cantidad recolectada por el despachador para un item.
  * `motivo` (opcional): motivo del faltante — ver ItemModel.MOTIVOS_FALTANTE.
+ * `despachoId`: el renglón TIENE que ser de ese despacho (ver el modelo).
  */
-export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null) {
-  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor);
+export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null) {
+  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId);
+}
+
+/** Renglones por tanda en `registrarLoteRecoleccion`. */
+export const TANDA_RECOLECCION = 8;
+
+/**
+ * Escribe un lote de conteos del despachador (`POST /:id/recolectar`).
+ *
+ * TRES RESPUESTAS POR RENGLÓN, y solo una es un error de verdad:
+ *   · escrito                     → va en `resultados`.
+ *   · RENGLON_TOMADO              → lo cuenta otra persona: va en `conflictos`
+ *                                   para que el front lo marque como ajeno.
+ *   · RENGLON_FUERA_DEL_DESPACHO  → ya no es de este traslado (se mudó a la parte
+ *                                   2 o se quitó): va en `fuera_de_despacho`. No
+ *                                   se escribe en ningún lado, y el front deja de
+ *                                   reintentarlo porque la respuesta es 200.
+ * Cualquier otro error (red, 422 de tope) se propaga: no es un choque esperable y
+ * esconderlo sería perder el conteo en silencio.
+ *
+ * POR QUÉ DE A TANDAS, CON UNA CERCA ENTRE TANDA Y TANDA
+ * El cierre del front manda TODOS los renglones en un solo POST, y escribirlos
+ * lleva segundos. Antes el estado del despacho se miraba una sola vez al entrar:
+ * si en ese rato otro celular cerraba, abandonaba o partía el traslado, el POST
+ * seguía escribiendo como si nada — así fue como un cierre le escribió ceros a la
+ * parte 2 de otro traslado. Ahora, antes de cada tanda se vuelve a verificar que
+ * el despacho siga En_recoleccion; si cambió, se corta con 409 y lo que no se
+ * escribió queda pendiente en el celular (el front no lo borra ante un error).
+ *
+ * Dentro de la tanda se escribe en paralelo: son renglones distintos (el lote se
+ * deduplica antes, gana la última aparición de cada id) y así un cierre de 300
+ * renglones no se acerca al tiempo máximo de la función en Vercel.
+ *
+ * @param {string} despachoId
+ * @param {Array<object>} items - [{ id, cantidad, agotado?, motivo?, nueva_unidad_medida?, ... }]
+ * @param {string|null} despachadorId - correo de quien cuenta
+ * @returns {Promise<{resultados: object[], conflictos: object[], fuera_de_despacho: object[]}>}
+ */
+export async function registrarLoteRecoleccion(despachoId, items, despachadorId = null) {
+  await DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
+
+  const unicos = [...new Map((items || []).map((it) => [it.id, it])).values()];
+
+  const resultados = [];
+  const conflictos = [];
+  const fuera = [];
+
+  for (let desde = 0; desde < unicos.length; desde += TANDA_RECOLECCION) {
+    if (desde > 0) await DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
+
+    const tanda = unicos.slice(desde, desde + TANDA_RECOLECCION);
+    const salidas = await Promise.allSettled(
+      tanda.map((item) =>
+        registrarRecoleccion(
+          item.id,
+          item.cantidad,
+          item.agotado,
+          item.motivo,
+          item.nueva_unidad_medida,
+          item.nueva_cantidad_admin,
+          item.nuevo_factor,
+          despachadorId,
+          despachoId,
+        ),
+      ),
+    );
+
+    let errorGrave = null;
+    salidas.forEach((s, i) => {
+      if (s.status === "fulfilled") {
+        resultados.push(s.value);
+        return;
+      }
+      const err = s.reason;
+      if (err?.codigo === "RENGLON_TOMADO") {
+        conflictos.push({ item_id: tanda[i].id, dueno: err.dueno, error: err.message });
+      } else if (err?.codigo === "RENGLON_FUERA_DEL_DESPACHO") {
+        fuera.push({ item_id: tanda[i].id, error: err.message });
+        console.warn(
+          `[recolectar] ${despachoId}: el renglón ${tanda[i].id} ya no es de este despacho — no se escribió`,
+        );
+      } else if (!errorGrave) {
+        errorGrave = err;
+      }
+    });
+    // Se espera a que termine la tanda entera antes de propagar: lo que ya se
+    // escribió queda escrito, y el reintento del front es idempotente.
+    if (errorGrave) throw errorGrave;
+  }
+
+  return { resultados, conflictos, fuera_de_despacho: fuera };
 }
 
 /**
@@ -730,6 +828,15 @@ async function completarFichaItem(item) {
  * @param {Array<{id, cantidad_auditor}>} payload.items
  * @returns {{ estado: string }}
  */
+/** Estados en los que se puede confirmar la recepción. */
+const ESTADOS_AUDITABLES = ["Recolectado", "En_recepcion"];
+
+/** Código sin el relleno de ceros de SIESA ("0189202" → "189202"). */
+const codigoSinCeros = (c) => {
+  const t = String(c ?? "").trim();
+  return t.replace(/^0+/, "") || t;
+};
+
 export async function confirmarAuditoria(despachoId, { decision, auditorId, firmaData, items }) {
   const ESTADO_POR_DECISION = {
     aprobado: "Auditado",
@@ -739,25 +846,106 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
   const estadoFinal = ESTADO_POR_DECISION[decision];
   if (!estadoFinal) throw createError(400, `Decisión inválida: ${decision}`);
 
-  // Persistir cantidades del auditor. Tres clases de ítem:
-  //  - Nuevos (traen `nuevo:true`, sin `id`) → mercancía que NO venía en la lista
-  //    original; se inserta marcada como agregado_por_auditor.
-  //  - No recibidos (traen `no_recibido:true`) → el auditor reporta que no llegó
-  //    físicamente; se marca como cantidad_auditor=0 + no_recibido=true (#5).
-  //  - Existentes (traen `id`)  → se actualiza cantidad_auditor + diferencia.
-  for (const item of items) {
-    if (item?.nuevo || item?.id == null) {
-      // Se completa la ficha ANTES de insertar. El auditor agrega escaneando, y lo
-      // que devuelve el lector suele ser un EAN sin descripción: guardarlo crudo
-      // deja un renglón sin nombre en la comparativa, sin nombre en el correo y sin
-      // imagen (el catálogo de fotos se busca por código SIESA). Lo que el front ya
-      // resolvió tiene prioridad; esto solo rellena lo que llegó vacío.
-      await ItemModel.insertItemAuditor(despachoId, await completarFichaItem(item));
-    } else if (item?.no_recibido) {
-      await ItemModel.marcarNoRecibido(item.id);
+  // GUARDA ANTES DE ESCRIBIR. Antes el estado se validaba recién al final
+  // (`updateStatus`), DESPUÉS de haber pisado los conteos: un segundo confirmar
+  // —el reintento de una red lenta, dos pestañas— reescribía la recepción de un
+  // traslado ya cerrado y recién ahí rebotaba con 409. Los datos ya estaban
+  // cambiados.
+  const despacho = await DespachoModel.findById(despachoId);
+  if (!despacho) throw createError(404, "Despacho no encontrado");
+  if (despacho.inactivo) {
+    throw createError(
+      409,
+      "Este traslado está inactivo. Reactivalo desde el panel de alertas para continuar.",
+    );
+  }
+  if (!ESTADOS_AUDITABLES.includes(despacho.estado)) {
+    throw createError(
+      409,
+      `Este traslado ya está en ${despacho.estado}: la recepción se confirmó antes. No se modificó nada.`,
+    );
+  }
+
+  const renglones = despacho.traslados_items || [];
+  const renglonPorId = new Map(renglones.map((r) => [r.id, r]));
+
+  // Pertenencia, también ANTES de escribir: un id que no es de este traslado no
+  // puede terminar con el conteo de otro. Se rechaza entero y no se ignora: el
+  // conteo sigue en el dispositivo del auditor y una recarga lo resuelve.
+  const existentes = items.filter((it) => !(it?.nuevo || it?.id == null));
+  const ajenos = existentes.filter((it) => !renglonPorId.has(it.id));
+  if (ajenos.length > 0) {
+    throw createError(
+      422,
+      `${ajenos.length} producto(s) del conteo no pertenecen a este traslado. Recargá la recepción antes de firmar: no se guardó nada.`,
+    );
+  }
+
+  // PLAN DEL VALOR FINAL DE CADA RENGLÓN, calculado solo con lo que trae ESTE
+  // confirmar — nunca sumando sobre lo que ya hay en la base. Así un reintento
+  // escribe exactamente lo mismo que el primer intento.
+  //
+  // Antes el sobrante que coincidía con un renglón existente se SUMABA a su
+  // `cantidad_auditor` guardado: si el primer intento escribía y fallaba después
+  // (red, firma), el reintento volvía a sumar y la recepción quedaba con el doble.
+  //
+  //  - Existentes (traen `id`) → cantidad_auditor + diferencia.
+  //  - No recibidos (`no_recibido:true`) → el auditor reporta que no llegó
+  //    físicamente; cantidad_auditor=0 + no_recibido=true (#5).
+  //  - Nuevos (`nuevo:true`, sin `id`) → mercancía que NO venía en la lista. Si
+  //    su código ya es un renglón del traslado, se suma a lo que ESTE conteo dice
+  //    de ese renglón; si no, se inserta marcado como agregado_por_auditor.
+  const plan = new Map(); // renglonId → { cantidad, noRecibido }
+  for (const it of existentes) {
+    plan.set(
+      it.id,
+      it.no_recibido
+        ? { cantidad: 0, noRecibido: true }
+        : { cantidad: Number(it.cantidad_auditor) || 0, noRecibido: false },
+    );
+  }
+
+  // Se completa la ficha ANTES de decidir. El auditor agrega escaneando, y lo que
+  // devuelve el lector suele ser un EAN sin descripción: resolverlo a código SIESA
+  // es lo que permite reconocer que ese "extra" es un renglón que ya estaba, y lo
+  // que evita un renglón sin nombre ni imagen en la comparativa y en el correo.
+  // De a uno, no en paralelo: cada ficha es una consulta a Connekta, que tiene
+  // límite de peticiones, y los sobrantes de una recepción son pocos.
+  const nuevos = [];
+  for (const it of items.filter((x) => x?.nuevo || x?.id == null)) {
+    nuevos.push(await completarFichaItem(it));
+  }
+
+  const aInsertar = new Map(); // código normalizado → ítem nuevo (con cantidades sumadas)
+  for (const extra of nuevos) {
+    const clave = codigoSinCeros(extra.codigo_item);
+    const cantidad = Number(extra.cantidad_auditor) || 0;
+    const renglon = renglones.find((r) => codigoSinCeros(r.codigo_item) === clave);
+    if (renglon) {
+      const previo = plan.get(renglon.id);
+      // Si se contó algo, llegó: el conteo anula un "no recibido" del mismo renglón.
+      plan.set(renglon.id, {
+        cantidad: (previo && !previo.noRecibido ? previo.cantidad : 0) + cantidad,
+        noRecibido: false,
+      });
+      console.warn(
+        `[auditoría] ${extra.codigo_item} ya es un renglón del despacho ${despachoId}: se suma a ese renglón en vez de duplicarlo.`,
+      );
+    } else if (aInsertar.has(clave)) {
+      const acumulado = aInsertar.get(clave);
+      acumulado.cantidad_auditor = (Number(acumulado.cantidad_auditor) || 0) + cantidad;
     } else {
-      await ItemModel.updateCantidadAuditor(item.id, item.cantidad_auditor);
+      aInsertar.set(clave, { ...extra, cantidad_auditor: cantidad });
     }
+  }
+
+  // Escritura del plan.
+  for (const [renglonId, { cantidad, noRecibido }] of plan) {
+    if (noRecibido) await ItemModel.marcarNoRecibido(renglonId, despachoId);
+    else await ItemModel.updateCantidadAuditor(renglonId, cantidad, despachoId);
+  }
+  for (const extra of aInsertar.values()) {
+    await ItemModel.insertItemAuditor(despachoId, extra);
   }
 
   // Firma del auditor
