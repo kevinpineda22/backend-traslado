@@ -1,4 +1,5 @@
 import { supabase } from "../config/supabase.js";
+import * as ConteoModel from "./RecepcionConteo.model.js";
 
 const TABLE = "traslados_despachos";
 
@@ -771,7 +772,14 @@ export async function dividirEnPartes(id) {
   // renglones rompía el largo máximo de la URL.
   const { data: movidos, error: errMover } = await supabase
     .from("traslados_items")
-    .update({ despacho_id: parte2.id, recolectado_por: null, cantidad_despachador: null })
+    // `cantidad_suelta` acompaña al total (037): un renglón sin tocar no tiene
+    // nada suelto, y nada en contenedores (un contenedor nunca guarda un 0).
+    .update({
+      despacho_id: parte2.id,
+      recolectado_por: null,
+      cantidad_despachador: null,
+      cantidad_suelta: null,
+    })
     .eq("despacho_id", id)
     .is("motivo", null)
     .not("agotado", "is", true)
@@ -1212,14 +1220,23 @@ export async function findAllWithResumen(filters = {}) {
   //
   // El corte no avisa: la consulta responde OK con menos filas. Por eso se nota
   // recién cuando alguien mira la pantalla y no cuadra.
+  //
+  // PAGINAR EXIGE ORDEN ESTABLE. Sin `.order("id")` Postgres devuelve las filas en
+  // el orden físico del heap, y ese orden CAMBIA cada vez que un renglón se
+  // actualiza (un UPDATE escribe una versión nueva de la fila en otro lugar). Con
+  // gente recolectando, cada poll de 10 s del monitor partía las páginas distinto:
+  // unos renglones salían dos veces y otros ninguna, y el "completos/total" de la
+  // tarjeta bailaba de un número a otro sin que nadie tocara el traslado. Es el
+  // mismo bug que tuvo la paginación de Connekta (CONTEXTO-Y-PENDIENTES §4.1).
   const ids = despachos.map((d) => d.id);
   const PAGINA = 1000;
   const items = [];
   for (let desde = 0; ; desde += PAGINA) {
     const { data, error: errItems } = await supabase
       .from("traslados_items")
-      .select("despacho_id, cantidad_despachador, agotado, cantidad_admin, motivo")
+      .select("id, despacho_id, cantidad_despachador, agotado, cantidad_admin, motivo, siesa_omitido")
       .in("despacho_id", ids)
+      .order("id", { ascending: true })
       .range(desde, desde + PAGINA - 1);
 
     if (errItems) throw new Error(`Error al obtener resumen de items: ${errItems.message}`);
@@ -1256,12 +1273,101 @@ export async function findAllWithResumen(filters = {}) {
     }
   }
 
+  const recepcion = await avanceRecepcion(despachos, items);
+
   return despachos.map((d) => ({
     ...d,
     resumen: agg[d.id] || {
       total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0, motivos: {},
     },
+    // Solo los que están esperando o en recepción; el resto no lo trae.
+    ...(recepcion[d.id] && { recepcion: recepcion[d.id] }),
   }));
+}
+
+/** Estados en los que el monitor muestra el avance de la recepción. */
+const ESTADOS_RECEPCION = ["Recolectado", "En_recepcion"];
+
+/**
+ * Avance de la recepción por despacho (migración 036): cuántos de los productos
+ * que el auditor tiene en su lista ya se contaron (o se declararon no recibidos)
+ * y quiénes están contando.
+ *
+ * El denominador es lo que el AUDITOR ve, no el despacho entero: los agotados,
+ * los recolectados en 0 y los excluidos no le llegan (misma regla que
+ * `DespachoService.ocultoParaAuditor`, repetida acá porque el servicio importa
+ * este modelo). Contra el total del despacho, una recepción terminada se vería
+ * a medias para siempre.
+ *
+ * Best-effort: si la tabla no existe todavía (migración sin correr) o la lectura
+ * falla, el monitor sigue mostrando todo lo demás.
+ *
+ * @returns {Promise<Record<string,{visibles:number, contados:number, auditores:string[]}>>}
+ */
+async function avanceRecepcion(despachos, items) {
+  const ids = despachos.filter((d) => ESTADOS_RECEPCION.includes(d.estado)).map((d) => d.id);
+  if (!ids.length) return {};
+
+  let filas;
+  try {
+    filas = await ConteoModel.listarResumenPorDespachos(ids);
+  } catch (err) {
+    console.error("[monitor] no se pudo leer el avance de recepción:", err.message);
+    return {};
+  }
+
+  const oculto = (it) =>
+    it.agotado === true ||
+    (it.cantidad_despachador != null && Number(it.cantidad_despachador) === 0) ||
+    it.siesa_omitido === true;
+
+  const salida = {};
+  for (const id of ids) salida[id] = { visibles: 0, contados: 0, auditores: [] };
+
+  const visibles = new Set();
+  for (const it of items) {
+    if (!salida[it.despacho_id] || oculto(it)) continue;
+    salida[it.despacho_id].visibles++;
+    visibles.add(it.id);
+  }
+
+  // Por renglón: suma de todos los auditores y si alguien lo declaró no recibido.
+  const porRenglon = new Map();
+  const auditores = {};
+  for (const f of filas) {
+    (auditores[f.despacho_id] ||= new Set()).add(f.contado_por);
+    if (!f.item_id || !visibles.has(f.item_id)) continue;
+    const acc = porRenglon.get(f.item_id) || { despacho_id: f.despacho_id, cantidad: 0, noRec: false };
+    acc.cantidad += Number(f.cantidad) || 0;
+    if (f.no_recibido) acc.noRec = true;
+    porRenglon.set(f.item_id, acc);
+  }
+  for (const acc of porRenglon.values()) {
+    if (acc.cantidad > 0 || acc.noRec) salida[acc.despacho_id].contados++;
+  }
+  for (const [id, set] of Object.entries(auditores)) {
+    if (salida[id]) salida[id].auditores = [...set].filter(Boolean).sort();
+  }
+
+  // Canastillas recibidas (038): "2 de 5" dice más que el conteo de productos
+  // cuando el camión se descarga canastilla por canastilla.
+  try {
+    const { data: canastillas } = await supabase
+      .from("traslados_contenedores")
+      .select("despacho_id, recepcion_estado")
+      .in("despacho_id", ids);
+    for (const c of canastillas || []) {
+      const s = salida[c.despacho_id];
+      if (!s) continue;
+      s.canastillas = (s.canastillas || 0) + 1;
+      if (["cerrado", "no_recibido"].includes(c.recepcion_estado)) {
+        s.canastillas_recibidas = (s.canastillas_recibidas || 0) + 1;
+      }
+    }
+  } catch (err) {
+    console.error("[monitor] no se pudo leer las canastillas:", err.message);
+  }
+  return salida;
 }
 
 /**

@@ -12,6 +12,9 @@ export function errorHandler(err, req, res, _next) {
   res.status(statusCode).json({
     ok: false,
     error: mensaje,
+    // Código de negocio (ej. RECEPCION_CERRADA): deja al front distinguir un
+    // rechazo definitivo de una falla de red que vale la pena reintentar.
+    ...(err.expose && err.codigo && { codigo: err.codigo }),
     ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
   });
 }

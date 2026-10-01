@@ -78,6 +78,13 @@ class Consulta {
     this.op = "delete";
     return this;
   }
+  /** Como PostgREST: reemplaza SOLO las columnas que trae la fila. */
+  upsert(filas, { onConflict } = {}) {
+    this.op = "upsert";
+    this.filas = Array.isArray(filas) ? filas : [filas];
+    this.onConflict = String(onConflict || "id").split(",").map((c) => c.trim());
+    return this;
+  }
 
   eq(c, v) {
     this.filtros.push((r) => igual(r[c], v));
@@ -188,6 +195,18 @@ class Consulta {
         const fila = { id: randomUUID(), ...(this.bd.defaults[this.tabla] || {}), ...clonar(f) };
         tabla.push(fila);
         salida.push(clonar(fila));
+      }
+    } else if (this.op === "upsert") {
+      for (const f of this.filas) {
+        const existente = tabla.find((r) => this.onConflict.every((c) => igual(r[c], f[c])));
+        if (existente) {
+          Object.assign(existente, clonar(f));
+          salida.push(clonar(existente));
+        } else {
+          const fila = { id: randomUUID(), ...(this.bd.defaults[this.tabla] || {}), ...clonar(f) };
+          tabla.push(fila);
+          salida.push(clonar(fila));
+        }
       }
     } else if (this.op === "delete") {
       const quedan = [];

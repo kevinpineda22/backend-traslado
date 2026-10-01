@@ -1,5 +1,6 @@
 import { supabase } from "../config/supabase.js";
 import { createError } from "../middleware/errorHandler.js";
+import * as ContenedorModel from "./Contenedor.model.js";
 
 const TABLE = "traslados_items";
 
@@ -47,6 +48,8 @@ export async function estadisticasMotivos() {
       .from(TABLE)
       .select("codigo_item, descripcion, motivo")
       .not("motivo", "is", null)
+      // Orden estable o las páginas se pisan (ver Despacho.findAllWithResumen).
+      .order("id", { ascending: true })
       .range(desde, desde + PAGE - 1);
     if (error) throw new Error(`Error al leer motivos: ${error.message}`);
     if (!data || data.length === 0) break;
@@ -140,13 +143,25 @@ export async function estadisticasMotivos() {
  * @param {number} cantidad  - Cantidad real recolectada
  * @param {boolean} [agotado] - true si no hubo stock suficiente en bodega
  * @param {string|null} [motivo] - motivo del faltante: uno de MOTIVOS_FALTANTE, o null
+ * CONTENEDORES (migración 037)
+ * El total del renglón es `cantidad_suelta + Σ contenedores`. Esta escritura toca
+ * SOLO la parte suelta:
+ *   · con `cantidadSuelta` (el panel nuevo la manda siempre) se guarda tal cual y
+ *     el total se arma acá con lo que hay en contenedores AHORA en la base;
+ *   · sin ella (panel viejo, o la auto-clasificación del sistema), `cantidad` es el
+ *     total de siempre y lo suelto se deduce restando los contenedores.
+ * Con producto en contenedores no se puede marcar agotado ni cambiar la unidad:
+ * agotado dice "no hay nada" y hay unidades en una canastilla; y las cantidades de
+ * las canastillas están en la unidad actual del renglón.
+ *
  * @param {string|null} [recolectadoPor] - correo de quien cuenta; null = el sistema
  * @param {string|null} [despachoId] - despacho al que TIENE que pertenecer el renglón
+ * @param {number|null} [cantidadSuelta] - parte sin contenedor (UM del renglón)
  * @throws 409 RENGLON_TOMADO si el renglón ya lo está contando otra persona
  * @throws 409 RENGLON_FUERA_DEL_DESPACHO si el renglón no es (o dejó de ser) del despacho
  */
-export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null) {
-  const pedidoEscritura = { itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId };
+export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null, cantidadSuelta = null) {
+  const pedidoEscritura = { itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta };
 
   // Dos vueltas alcanzan: la segunda relee el renglón y, si lo que cambió fue el
   // dueño o el despacho, lanza el error que corresponde. Si vuelve a perder la
@@ -181,11 +196,11 @@ function renglonFueraDelDespacho(itemId, despachoId) {
  * Un intento de escritura. Devuelve la fila escrita, o `null` si el renglón cambió
  * entre la lectura y la escritura (el llamador reintenta y la relectura decide).
  */
-async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId }) {
+async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta }) {
   // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
   let lectura = supabase
     .from(TABLE)
-    .select("cantidad_admin, unidad_medida, recolectado_por, despacho_id")
+    .select("cantidad_admin, unidad_medida, recolectado_por, despacho_id, cantidad_despachador")
     .eq("id", itemId);
   if (despachoId) lectura = lectura.eq("despacho_id", despachoId);
   const { data: item, error: errGet } = await lectura.maybeSingle();
@@ -217,9 +232,39 @@ async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo,
     throw e;
   }
 
-  const cant = Number(cantidad) || 0;
-  const pedido = nueva_cant_admin !== null && nueva_cant_admin !== undefined 
-    ? Number(nueva_cant_admin) 
+  // Lo que ya está en contenedores (037), leído AHORA de la base.
+  const enContenedores =
+    (await ContenedorModel.sumaPorItem([itemId])).get(itemId) || 0;
+  const cambiaUm = Boolean(nueva_um && nueva_um !== item.unidad_medida);
+
+  if (enContenedores > 0 && agotado) {
+    throw createError(
+      422,
+      `Este producto tiene ${enContenedores} en contenedores: no se puede marcar agotado. Sacalo primero de los contenedores.`,
+    );
+  }
+  if (enContenedores > 0 && cambiaUm) {
+    throw createError(
+      422,
+      "Este producto ya está en contenedores: no se le puede cambiar la unidad. Sacalo primero de los contenedores.",
+    );
+  }
+
+  // Parte suelta y total. Ver el encabezado.
+  const suelta =
+    cantidadSuelta !== null && cantidadSuelta !== undefined
+      ? Math.max(0, Number(cantidadSuelta) || 0)
+      : (Number(cantidad) || 0) - enContenedores;
+  if (suelta < 0) {
+    throw createError(
+      422,
+      `Este producto tiene ${enContenedores} en contenedores: el total no puede quedar en ${Number(cantidad) || 0}. Para bajarlo, sacalo del contenedor.`,
+    );
+  }
+  const cant = suelta + enContenedores;
+
+  const pedido = nueva_cant_admin !== null && nueva_cant_admin !== undefined
+    ? Number(nueva_cant_admin)
     : Number(item.cantidad_admin) || 0;
 
   if (cant > pedido) {
@@ -233,6 +278,7 @@ async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo,
 
   const updatePayload = {
     cantidad_despachador: cant,
+    cantidad_suelta: suelta,
     agotado: !!agotado,
     motivo: motivoLimpio,
   };
@@ -282,7 +328,13 @@ export async function resetRecoleccionByDespacho(despachoId) {
     // cero, los renglones tienen que quedar libres para que los tome quien esté
     // recolectando ahora. Si no, un despacho recontado quedaría trabado por los
     // dueños de la vuelta anterior — gente que quizá ni está en el turno.
-    .update({ cantidad_despachador: null, agotado: false, motivo: null, recolectado_por: null })
+    .update({
+      cantidad_despachador: null,
+      cantidad_suelta: null,
+      agotado: false,
+      motivo: null,
+      recolectado_por: null,
+    })
     .eq("despacho_id", despachoId);
   if (error) throw new Error(`Error al resetear la recolección: ${error.message}`);
 }

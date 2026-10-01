@@ -1,6 +1,9 @@
 import * as DespachoService from "../services/despacho.service.js";
 import * as DespachoModel from "../models/Despacho.model.js";
 import * as DespachadorModel from "../models/Despachador.model.js";
+import * as RecepcionService from "../services/recepcion.service.js";
+import * as RecepcionContenedores from "../services/recepcionContenedores.service.js";
+import * as ContenedorModel from "../models/Contenedor.model.js";
 
 /**
  * GET /api/auditor/despachos
@@ -60,6 +63,25 @@ export async function obtenerDetalle(req, res, next) {
     // Auditoría ciega: ocultar cantidad_despachador y firma del despachador
     const { traslados_firmas, traslados_items, ...cabecera } = despacho;
 
+    // Canastillas (038): al auditor le llegan los NÚMEROS, nunca el contenido.
+    // Y por producto, solo si viaja (también) suelto: es lo que arma la lista de
+    // "Sin canastilla". No revela cantidades ni en qué canastilla va cada cosa.
+    const canastillas = await ContenedorModel.listarPorDespacho(req.params.id).catch(() => []);
+    const enCanastillas = new Map();
+    for (const c of canastillas) {
+      for (const f of c.items) {
+        enCanastillas.set(f.item_id, (enCanastillas.get(f.item_id) || 0) + (Number(f.cantidad) || 0));
+      }
+    }
+    const viajaSuelto = (it) => {
+      if (!canastillas.length) return true;
+      const s =
+        it.cantidad_suelta != null
+          ? Number(it.cantidad_suelta)
+          : (Number(it.cantidad_despachador) || 0) - (enCanastillas.get(it.id) || 0);
+      return s > 0;
+    };
+
     // Los no enviados y los EXCLUIDOS a mano (siesa_omitido) se omiten ENTEROS.
     // Esto no rompe la ceguera: el auditor nunca supo que existían, así que no
     // puede deducir nada de su ausencia (no tiene la lista original del admin).
@@ -87,14 +109,26 @@ export async function obtenerDetalle(req, res, next) {
         grupo: item.grupo,
         categoria: item.categoria,
         no_recibido: item.no_recibido || false,
+        en_suelto: viajaSuelto(item),
         // NOTA: cantidad_despachador y diferencia se ocultan intencionalmente
       }));
+
+    // Lo que ya contaron los auditores (036), para retomar en cualquier celular.
+    // No rompe la ceguera: son conteos de la recepción, no del despacho.
+    // Best-effort: sin esto el panel arranca de su borrador local, como antes.
+    const conteos = await RecepcionService.obtenerConteos(req.params.id).catch((e) => {
+      console.error("[auditoría] no se pudo leer el conteo guardado:", e.message);
+      return null;
+    });
 
     res.json({
       ok: true,
       data: {
         ...cabecera,
         traslados_items: itemsCiegos,
+        // null = no se pudo leer (el panel no debe tomarlo como "no hay nada").
+        recepcion_conteos: conteos,
+        canastillas: canastillas.map(RecepcionContenedores.vistaCiega),
         // Sin firmas del despachador
       },
     });
@@ -132,6 +166,132 @@ export async function comparar(req, res, next) {
       }));
 
     res.json({ ok: true, data: { match, recontar } });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/auditor/despachos/:id/conteos
+ * Las filas de conteo de todos los auditores (para ver lo del compañero).
+ */
+export async function listarConteos(req, res, next) {
+  try {
+    const data = await RecepcionService.obtenerConteos(req.params.id);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/auditor/despachos/:id/conteos
+ * Guarda el conteo de un auditor, escaneo por escaneo (036).
+ * Body: { auditor_id, dispositivo?, conteos: [{ item_id? | codigo_item, cantidad, no_recibido?,
+ *         quitar_no_recibido?, descripcion?, unidad_medida? }] }
+ * Resp: { ok, data: { guardados, fuera: [{ item_id, error }] } }
+ */
+export async function guardarConteos(req, res, next) {
+  try {
+    const { auditor_id, conteos, dispositivo } = req.body;
+    const data = await RecepcionService.registrarConteos(
+      req.params.id,
+      auditor_id,
+      conteos,
+      dispositivo,
+    );
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/auditor/despachos/:id/recontar
+ * El número de quien recuenta pasa a ser el único que vale (ver ConteoModel.recontar).
+ * Body: { auditor_id, dispositivo?, item_ids: [uuid] }
+ * Resp: { ok, data: [filas de conteo del despacho] }
+ */
+export async function recontar(req, res, next) {
+  try {
+    const { auditor_id, item_ids, dispositivo, contenedor_id, todas } = req.body;
+    const data = await RecepcionService.recontar(req.params.id, auditor_id, item_ids, dispositivo, {
+      contenedorId: contenedor_id || null,
+      todas: Boolean(todas),
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* ── Canastillas (038) — ver recepcionContenedores.service ── */
+
+/** GET /api/auditor/despachos/:id/canastillas — números y estado, nunca contenido. */
+export async function listarCanastillas(req, res, next) {
+  try {
+    res.json({ ok: true, data: await RecepcionContenedores.listarParaAuditor(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/** POST /api/auditor/despachos/:id/canastillas/:cid/entrar  Body: { auditor_id, tomar? } */
+export async function entrarCanastilla(req, res, next) {
+  try {
+    const data = await RecepcionContenedores.entrar(req.params.id, req.params.cid, req.body.auditor_id, {
+      tomar: Boolean(req.body.tomar),
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/auditor/despachos/:id/canastillas/:cid/cerrar  Body: { auditor_id, forzar? }
+ * Resp: { ok, data: { cerrado, match, recontar:[{id,codigo_item,descripcion,tipo}], faltantes, confirmadas, sobrantes } }
+ */
+export async function cerrarCanastilla(req, res, next) {
+  try {
+    const data = await RecepcionContenedores.cerrar(req.params.id, req.params.cid, req.body.auditor_id, {
+      forzar: Boolean(req.body.forzar),
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/** POST /api/auditor/despachos/:id/canastillas/:cid/reabrir */
+export async function reabrirCanastilla(req, res, next) {
+  try {
+    const data = await RecepcionContenedores.reabrir(req.params.id, req.params.cid, req.body.auditor_id);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/** POST /api/auditor/despachos/:id/canastillas/:cid/no-recibida */
+export async function canastillaNoRecibida(req, res, next) {
+  try {
+    const data = await RecepcionContenedores.noRecibida(req.params.id, req.params.cid, req.body.auditor_id);
+    res.json({ ok: true, data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/** POST /api/auditor/despachos/:id/canastillas/no-listada  Body: { auditor_id, numero } */
+export async function canastillaNoListada(req, res, next) {
+  try {
+    const data = await RecepcionContenedores.registrarNoListada(
+      req.params.id,
+      req.body.numero,
+      req.body.auditor_id,
+    );
+    res.status(201).json({ ok: true, data });
   } catch (error) {
     next(error);
   }

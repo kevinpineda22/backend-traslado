@@ -99,6 +99,58 @@ const confirmarSchema = z.object({
     .min(1),
 });
 
+// Recepción escaneo por escaneo (036). Cada conteo es el TOTAL que lleva ESE
+// auditor del producto. Un producto de la lista viaja con `item_id`; uno que
+// llegó fuera de lista, con `codigo_item` (y su ficha, si el panel la tiene).
+const conteoRecepcionSchema = z
+  .object({
+    item_id: z.string().uuid().nullable().optional(),
+    codigo_item: z.string().optional(),
+    descripcion: z.string().nullable().optional(),
+    unidad_medida: z.string().nullable().optional(),
+    cantidad: z.number().min(0, "cantidad no puede ser negativa"),
+    no_recibido: z.boolean().optional(),
+    // Canastilla en la que se contó (038). Ausente/null = sin canastilla.
+    contenedor_id: z.string().uuid().nullable().optional(),
+    // "Deshacer no recibido" sobre una marca que puso otra persona.
+    quitar_no_recibido: z.boolean().optional(),
+  })
+  .refine((c) => c.item_id || String(c.codigo_item || "").trim(), {
+    message: "Cada conteo necesita item_id o codigo_item",
+  });
+
+// Id del navegador (las cuentas de sede se comparten entre celulares). DEBE
+// estar declarado: Zod descarta lo que no nombra, y sin él dos celulares de la
+// misma cuenta volverían a pisarse en silencio.
+const dispositivoRecepcion = z.string().trim().max(64).optional().default("");
+
+const conteosRecepcionSchema = z.object({
+  auditor_id: z.string().trim().min(1, "auditor_id es requerido"),
+  dispositivo: dispositivoRecepcion,
+  conteos: z.array(conteoRecepcionSchema).min(1),
+});
+
+const recontarRecepcionSchema = z.object({
+  auditor_id: z.string().trim().min(1, "auditor_id es requerido"),
+  dispositivo: dispositivoRecepcion,
+  item_ids: z.array(z.string().uuid()).min(1),
+  // 038: recontar DENTRO de una canastilla, o el producto en TODAS (comparación final).
+  contenedor_id: z.string().uuid().nullable().optional(),
+  todas: z.boolean().optional(),
+});
+
+// Recepción por canastilla (038).
+const accionCanastillaSchema = z.object({
+  auditor_id: z.string().trim().min(1, "auditor_id es requerido"),
+  tomar: z.boolean().optional(),
+  forzar: z.boolean().optional(),
+});
+
+const canastillaNoListadaSchema = z.object({
+  auditor_id: z.string().trim().min(1, "auditor_id es requerido"),
+  numero: z.string().trim().min(1, "El número de la canastilla es requerido").max(20),
+});
+
 // Esquema para recolección
 // El tope superior (cantidad <= cantidad_admin) se valida en el modelo, contra
 // el valor guardado en la base — Zod no lo conoce en tiempo de request.
@@ -119,9 +171,37 @@ const recolectarSchema = z.object({
         nueva_unidad_medida: z.string().optional(),
         nueva_cantidad_admin: z.number().optional(),
         nuevo_factor: z.number().optional(),
+        // Parte SIN contenedor (037). El panel nuevo la manda siempre; sin ella,
+        // `cantidad` es el total de siempre. DEBE estar declarada: Zod descarta lo
+        // que no nombra, y sin ella el backend volvería a deducir lo suelto desde
+        // un total armado en el celular — justo lo que pisa a un compañero.
+        cantidad_suelta: z.number().min(0, "cantidad_suelta no puede ser negativa").optional(),
       }),
     )
     .min(1),
+});
+
+// Contenedores (037).
+const crearContenedorSchema = z.object({
+  despachador_id: z.string().optional(),
+  numero: z.string().trim().min(1, "El número de la canastilla es requerido").max(20),
+});
+
+const asignarContenedorSchema = z.object({
+  despachador_id: z.string().optional(),
+  asignaciones: z
+    .array(
+      z.object({
+        contenedor_id: z.string().uuid(),
+        item_id: z.string().uuid(),
+        cantidad: z.number().min(0, "cantidad no puede ser negativa"),
+      }),
+    )
+    .min(1),
+});
+
+const accionContenedorSchema = z.object({
+  despachador_id: z.string().optional(),
 });
 
 // Descripción opcional: "" o ausente → undefined (el modelo no toca la existente)
@@ -339,7 +419,14 @@ export const validators = {
   cambiarEstado: validate(cambiarEstadoSchema),
   comparar: validate(compararSchema),
   confirmar: validate(confirmarSchema),
+  conteosRecepcion: validate(conteosRecepcionSchema),
+  recontarRecepcion: validate(recontarRecepcionSchema),
+  accionCanastilla: validate(accionCanastillaSchema),
+  canastillaNoListada: validate(canastillaNoListadaSchema),
   recolectar: validate(recolectarSchema),
+  crearContenedor: validate(crearContenedorSchema),
+  asignarContenedor: validate(asignarContenedorSchema),
+  accionContenedor: validate(accionContenedorSchema),
   capacidadBulk: validate(capacidadBulkSchema),
   capacidadUno: validate(capacidadUnoSchema),
   config: validate(configSchema),

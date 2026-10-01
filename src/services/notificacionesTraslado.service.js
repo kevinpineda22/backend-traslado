@@ -295,8 +295,9 @@ function filasComparativo(items) {
  * sube a SIESA, eso lo hizo el despachador). Best-effort.
  * @param {object} despacho - cabecera + traslados_items (con cantidad_auditor ya persistida)
  * @param {"aprobado"|"inconsistencia"|"rechazado"} decision
+ * @param {{canastillas?: string|null}} [extra] - resumen de canastillas (038)
  */
-export async function enviarComparativoAuditoria(despacho, decision) {
+export async function enviarComparativoAuditoria(despacho, decision, { canastillas = null } = {}) {
   if (!emailConfigurado()) {
     console.error(
       `[traslados] ⚠️ comparativo NO enviado (despacho ${despacho?.id}): falta EMAIL_USER/PASS`,
@@ -320,7 +321,11 @@ export async function enviarComparativoAuditoria(despacho, decision) {
     html: armarHtml({
       despacho,
       titulo: "Comparativo de recibo",
-      intro: `Quien recibe finalizó la revisión (decisión: ${decisionTxt}). Comparativo Enviado vs Contado (UND):`,
+      // `canastillas` (038): una línea con lo que pasó en las canastillas — las
+      // que no cuadraron, no llegaron o llegaron sin estar en la lista.
+      intro: `Quien recibe finalizó la revisión (decisión: ${decisionTxt}).${
+        canastillas ? ` ${canastillas}` : ""
+      } Comparativo Enviado vs Contado (UND):`,
       filas: filasComparativo(despacho?.traslados_items || []),
       encabezados: ENCABEZADOS_COMPARATIVO,
     }),

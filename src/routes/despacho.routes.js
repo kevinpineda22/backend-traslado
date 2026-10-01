@@ -1,5 +1,6 @@
 import { Router } from "express";
 import * as DespachoController from "../controllers/despacho.controller.js";
+import * as ContenedoresController from "../controllers/contenedores.controller.js";
 import { validators } from "../middleware/validators.js";
 
 const router = Router();
@@ -43,6 +44,21 @@ router.post("/:id/recolectar", validators.recolectar, DespachoController.recolec
 // Camión cargado: cierra la recolección CON el manifiesto y dispara SIESA.
 router.post("/:id/cargar", validators.cargarCamion, DespachoController.cargarCamion);
 router.get("/:id/manifiesto", DespachoController.obtenerManifiesto);
+
+// Contenedores (migración 037). "/asignar" va ANTES de "/:cid/...": son rutas de
+// distinto largo así que no chocan, pero queda explícito.
+router.get("/:id/contenedores", ContenedoresController.listar);
+router.post("/:id/contenedores", validators.crearContenedor, ContenedoresController.crear);
+router.post(
+  "/:id/contenedores/asignar",
+  validators.asignarContenedor,
+  ContenedoresController.asignar,
+);
+router.post("/:id/contenedores/:cid/cerrar", validators.accionContenedor, ContenedoresController.cerrar);
+router.post("/:id/contenedores/:cid/reabrir", validators.accionContenedor, ContenedoresController.reabrir);
+router.delete("/:id/contenedores/:cid", ContenedoresController.borrar);
+// Recepción por canastilla, vista del admin (038).
+router.get("/:id/recepcion-canastillas", ContenedoresController.detalleRecepcion);
 router.get("/:id/planilla", DespachoController.planilla);
 
 export default router;

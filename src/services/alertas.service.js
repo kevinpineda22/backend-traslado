@@ -60,11 +60,10 @@ const LOCK_TTL_S = 120;
 
 /** Etapas donde el traslado ESPERA a alguien, por tipo de alerta. */
 const ESTADOS_ESPERA_DESPACHADOR = ["Creado"];
-// El flujo real hoy es Recolectado → Auditado/Rechazado/Inconsistencia: NADIE setea
-// 'En_recepcion' (está declarado en las transiciones y en los validators, pero no
-// hay filas en ese estado). Se lo deja listado para que la regla siga valiendo si
-// algún día se usa, pero NO aporta ninguna red de seguridad hoy — quien distingue
-// "lo están atendiendo" de "está abandonado" es `auditoria_abierta_at`, no el estado.
+// Desde la 036 el primer conteo guardado pasa el traslado a 'En_recepcion'. Sigue
+// en esta lista porque un auditor puede contar y abandonar: quien distingue "lo
+// están atendiendo" de "está abandonado" es la frescura de `auditoria_abierta_at`
+// (que cada conteo re-sella), no el estado.
 const ESTADOS_ESPERA_AUDITOR = ["Recolectado", "En_recepcion"];
 
 /**
@@ -160,8 +159,9 @@ async function correrReglaInactivar(cfg) {
   let inactivados = 0;
   for (const despacho of vencidos) {
     const horasReales = Math.floor(horasDesde(despacho.disponible_at));
-    const etapa =
-      despacho.estado === "Recolectado" ? "sin auditar" : "sin iniciar la recolección";
+    const etapa = ESTADOS_ESPERA_AUDITOR.includes(despacho.estado)
+      ? "sin auditar"
+      : "sin iniciar la recolección";
     try {
       const hecho = await DespachoModel.setActivo(
         despacho.id,

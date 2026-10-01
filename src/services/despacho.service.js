@@ -2,6 +2,10 @@ import * as DespachoModel from "../models/Despacho.model.js";
 import * as ItemModel from "../models/Item.model.js";
 import * as FirmaModel from "../models/Firma.model.js";
 import * as ManifiestoModel from "../models/Manifiesto.model.js";
+import * as ConteoModel from "../models/RecepcionConteo.model.js";
+import * as ContenedoresService from "./contenedores.service.js";
+import * as ContenedorModel from "../models/Contenedor.model.js";
+import * as RecepcionContenedores from "./recepcionContenedores.service.js";
 import { createError } from "../middleware/errorHandler.js";
 import {
   notificarRecoleccionCerrada,
@@ -208,6 +212,13 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
   //
   // La transición se valida ANTES de guardar la firma, para no dejar una firma
   // huérfana si el cierre es rechazado (409).
+  //
+  // Terminar de contar con contenedores (037) exige que estén todos cerrados y
+  // recalcula el total de lo que hay en ellos — ver validarParaFinalizar. Va
+  // antes del cambio de estado: si algo no cuadra, el despacho sigue en
+  // recolección y la persona lo corrige ahí.
+  if (estado === "Pendiente_carga") await ContenedoresService.validarParaFinalizar(id);
+
   const actualizado = await DespachoModel.updateStatus(id, estado);
 
   // Recién con el estado ya avanzado, persistimos la firma.
@@ -433,6 +444,9 @@ export async function abandonarRecoleccion(id, despachadorId) {
   }
   const despacho = await DespachoModel.abandonarRecoleccion(id, despachadorId);
   await ItemModel.resetRecoleccionByDespacho(id);
+  // Los contenedores son parte del conteo: si quedaran, el próximo encontraría
+  // canastillas "llenas" con productos que el reset acaba de poner sin contar.
+  await ContenedoresService.borrarTodos(id);
   return despacho;
 }
 
@@ -460,6 +474,18 @@ export async function dividirEnPartes(id) {
     throw createError(
       409,
       "Enviar por partes es del flujo Llano. En General hay que resolver cada producto antes de cerrar.",
+    );
+  }
+  // Las canastillas CERRADAS viajan en esta primera parte con todo su contenido
+  // (lo que tiene unidades nunca se muda). Una ABIERTA es una que alguien está
+  // llenando: partir ahora dejaría su contenido a medio declarar.
+  const abiertos = await ContenedoresService.hayAbiertos(id);
+  if (abiertos.length) {
+    throw createError(
+      409,
+      `Cerrá ${abiertos.length === 1 ? "la canastilla" : "las canastillas"} ${abiertos
+        .map((c) => c.numero)
+        .join(", ")} antes de enviar la primera parte.`,
     );
   }
   return DespachoModel.dividirEnPartes(id);
@@ -580,7 +606,20 @@ export async function obtenerManifiesto(despachoId) {
     console.error("[despacho] no se pudieron leer las firmas del manifiesto:", e.message);
   }
 
-  return { ...doc, firmas };
+  // Canastillas que viajaron (037), para que la reimpresión las liste igual que
+  // el PDF que se generó al cargar. Best-effort: sin esto sale como antes.
+  let contenedores = null;
+  try {
+    const [despacho, lista] = await Promise.all([
+      DespachoModel.findById(despachoId),
+      ContenedorModel.listarPorDespacho(despachoId),
+    ]);
+    contenedores = ContenedoresService.resumenParaManifiesto(despacho?.traslados_items || [], lista);
+  } catch (e) {
+    console.error("[despacho] no se pudieron leer los contenedores del manifiesto:", e.message);
+  }
+
+  return { ...doc, firmas, contenedores };
 }
 
 /**
@@ -588,8 +627,8 @@ export async function obtenerManifiesto(despachoId) {
  * `motivo` (opcional): motivo del faltante — ver ItemModel.MOTIVOS_FALTANTE.
  * `despachoId`: el renglón TIENE que ser de ese despacho (ver el modelo).
  */
-export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null) {
-  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId);
+export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null, cantidadSuelta = null) {
+  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta);
 }
 
 /** Renglones por tanda en `registrarLoteRecoleccion`. */
@@ -652,6 +691,7 @@ export async function registrarLoteRecoleccion(despachoId, items, despachadorId 
           item.nuevo_factor,
           despachadorId,
           despachoId,
+          item.cantidad_suelta ?? null,
         ),
       ),
     );
@@ -734,6 +774,9 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
   const despacho = await DespachoModel.findById(despachoId);
   if (!despacho) throw createError(404, "Despacho no encontrado");
 
+  // Con canastillas (038), todas cerradas o declaradas no recibidas.
+  await RecepcionContenedores.validarParaComparar(despachoId);
+
   // Trazabilidad (#1): el primer comparar marca el inicio de la auditoría.
   // Best-effort e idempotente — nunca frena la comparación.
   await DespachoModel.marcarAuditoriaIniciada(despachoId).catch((e) =>
@@ -746,9 +789,13 @@ export async function compararAuditoria(despachoId, itemsAuditor) {
   // traslado se inactivaría con la persona todavía contando. Ver migración 015.
   await DespachoModel.marcarAuditoriaAbierta(despachoId).catch(() => {});
 
-  const conteoAuditor = new Map(
-    (itemsAuditor || []).map((i) => [i.id, Number(i.cantidad_auditor) || 0]),
-  );
+  // El conteo que se compara es el del SERVIDOR (todos los auditores sumados)
+  // cuando existe. El del cuerpo queda solo para un panel viejo que todavía no
+  // guarda escaneo por escaneo — ver `conteoDeRecepcion`.
+  const { porItem, hayConteos } = await conteoDeRecepcion(despachoId);
+  const conteoAuditor = hayConteos
+    ? new Map([...porItem].map(([id, c]) => [id, c.cantidad]))
+    : new Map((itemsAuditor || []).map((i) => [i.id, Number(i.cantidad_auditor) || 0]));
 
   let match = true;
   // Devolvemos TODOS los items comparados (no solo los que difieren) para que el
@@ -831,13 +878,70 @@ async function completarFichaItem(item) {
 /** Estados en los que se puede confirmar la recepción. */
 const ESTADOS_AUDITABLES = ["Recolectado", "En_recepcion"];
 
+/**
+ * El conteo de la recepción según el SERVIDOR (migración 036): lo que guardaron
+ * todos los auditores, escaneo por escaneo, consolidado por producto.
+ *
+ * POR QUÉ MANDA SOBRE LO QUE TRAE EL CUERPO
+ * Con varios auditores, el celular que firma no es dueño de todo el conteo: lo
+ * de su compañero está acá, no en su pantalla. Y aunque cuente uno solo, lo que
+ * está en la base es lo que sobrevivió — el borrador del celular puede ser una
+ * foto vieja de otra pestaña.
+ *
+ * `hayConteos = false` es un panel VIEJO (todavía en caché del navegador al
+ * desplegar) que no guarda por escaneo: ahí el cuerpo es la única fuente y se
+ * usa como antes. Sin este respaldo, ese auditor firmaría todo en cero.
+ */
+async function conteoDeRecepcion(despachoId) {
+  try {
+    return ConteoModel.consolidar(await ConteoModel.listarPorDespacho(despachoId));
+  } catch (err) {
+    // Sin la tabla (migración sin correr) o con la base caída a medias, se
+    // comporta como antes. Firmar con el conteo del cuerpo es lo que se hacía
+    // hasta hoy; firmar en cero no se hizo nunca.
+    console.error("[auditoría] no se pudo leer el conteo del servidor:", err.message);
+    return { porItem: new Map(), extras: [], hayConteos: false };
+  }
+}
+
+/**
+ * Arma los ítems a confirmar desde el conteo del servidor, con la MISMA forma
+ * que mandaba el panel (`construirPayloadAuditoria` + `construirPayloadExtras`):
+ *
+ *   · No recibido → cantidad 0 + no_recibido.
+ *   · Contado     → lo contado; si quedó en 0 tras un "Recontar" que nadie
+ *                   volvió a escanear, lo último que alguien contó de verdad
+ *                   (el previo). El 0 del reset no es una medición.
+ *   · Sin filas   → 0, igual que un renglón que el panel mandaba sin contar.
+ *   · Fuera de lista → `nuevo: true`, solo si se contó algo.
+ */
+function itemsDesdeConteo(visibles, { porItem, extras }) {
+  const existentes = visibles.map((it) => {
+    const c = porItem.get(it.id);
+    if (!c) return { id: it.id, cantidad_auditor: 0 };
+    if (c.noRecibido) return { id: it.id, cantidad_auditor: 0, no_recibido: true };
+    const cantidad = c.cantidad > 0 ? c.cantidad : Number(c.previo) || 0;
+    return { id: it.id, cantidad_auditor: cantidad };
+  });
+  const nuevos = extras
+    .filter((e) => e.cantidad > 0)
+    .map((e) => ({
+      nuevo: true,
+      codigo_item: e.codigo_item,
+      descripcion: e.descripcion || undefined,
+      unidad_medida: e.unidad_medida || undefined,
+      cantidad_auditor: e.cantidad,
+    }));
+  return [...existentes, ...nuevos];
+}
+
 /** Código sin el relleno de ceros de SIESA ("0189202" → "189202"). */
 const codigoSinCeros = (c) => {
   const t = String(c ?? "").trim();
   return t.replace(/^0+/, "") || t;
 };
 
-export async function confirmarAuditoria(despachoId, { decision, auditorId, firmaData, items }) {
+export async function confirmarAuditoria(despachoId, { decision, auditorId, firmaData, items: itemsCuerpo }) {
   const ESTADO_POR_DECISION = {
     aprobado: "Auditado",
     inconsistencia: "Recibido_con_inconsistencia",
@@ -866,8 +970,21 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
     );
   }
 
+  // Con canastillas (038), todas resueltas antes de firmar — también acá y no
+  // solo en comparar: confirmar es la puerta que escribe.
+  await RecepcionContenedores.validarParaComparar(despachoId);
+
   const renglones = despacho.traslados_items || [];
   const renglonPorId = new Map(renglones.map((r) => [r.id, r]));
+
+  // Lo que se firma es el conteo del servidor si existe (ver conteoDeRecepcion).
+  const conteo = await conteoDeRecepcion(despachoId);
+  const items = conteo.hayConteos
+    ? itemsDesdeConteo(
+        renglones.filter((r) => !ocultoParaAuditor(r)),
+        conteo,
+      )
+    : itemsCuerpo;
 
   // Pertenencia, también ANTES de escribir: un id que no es de este traslado no
   // puede terminar con el conteo de otro. Se rechaza entero y no se ignora: el
@@ -971,7 +1088,11 @@ export async function confirmarAuditoria(despachoId, { decision, auditorId, firm
   // inventarios. Best-effort: el cierre de la auditoría ya está persistido.
   try {
     const despacho = await DespachoModel.findById(despachoId);
-    await enviarComparativoAuditoria(despacho, decision);
+    // Lo de las canastillas (038) va como una línea más; sin canastillas, null.
+    const canastillas = await RecepcionContenedores.detalleAdmin(despachoId)
+      .then(RecepcionContenedores.textoResumenCorreo)
+      .catch(() => null);
+    await enviarComparativoAuditoria(despacho, decision, { canastillas });
   } catch (err) {
     console.error("[auditoría] correo comparativo falló:", err.message);
   }
