@@ -168,6 +168,7 @@ function aFilaItem(despachoId, item) {
 export async function create(payload) {
   const { items, estado, ...cabecera } = payload;
   const estadoInicial = estado === "Borrador" ? "Borrador" : "Creado";
+  const ahora = new Date().toISOString();
 
   // 1. Insertar cabecera
   const { data: despacho, error: errCab } = await supabase
@@ -180,7 +181,9 @@ export async function create(payload) {
       admin_id: cabecera.admin_id,
       criterios: cabecera.criterios,
       estado: estadoInicial,
-      disponible_at: estadoInicial === "Creado" ? new Date().toISOString() : null,
+      disponible_at: estadoInicial === "Creado" ? ahora : null,
+      // Hito (no reloj): cuándo quedó a la vista del despachador. Ver migración 039.
+      publicado_at: estadoInicial === "Creado" ? ahora : null,
     })
     .select()
     .single();
@@ -321,6 +324,20 @@ export async function updateStatus(id, nuevoEstado, { despachadorId } = {}) {
   // la recolección hasta la carga del camión inflaría el tiempo del despachador
   // con la espera del transporte.
   if (nuevoEstado === "Pendiente_carga") patch.recoleccion_finalizada_at = ahora;
+  // Publicación por la puerta genérica (hoy la hace `finalizarBorrador`, pero la
+  // transición está permitida acá y el hito no puede depender de por dónde entró).
+  if (nuevoEstado === "Creado" && actual.estado === "Borrador") patch.publicado_at = ahora;
+  // Arranque REAL de la recepción (migración 039): la entrada a En_recepcion la
+  // hace `senalarRecepcionActiva` con el primer conteo guardado — escaneo suelto o
+  // canastilla, los tres caminos de recepción pasan por ahí. De En_recepcion no se
+  // vuelve, así que esto ocurre UNA vez por traslado sin necesitar `.is(null)`.
+  //
+  // Se marca acá y no en `auditoria_iniciada_at` porque esa columna cambió de
+  // definición en la 036 (antes: primer Comparar; después: primer escaneo) y mezcla
+  // las dos según la fecha. Esta tiene una sola. Un panel viejo, que no guarda
+  // escaneos, pasa de Recolectado a la firma sin entrar a En_recepcion: no recibe
+  // la marca y queda fuera de las medianas en vez de contaminarlas.
+  if (nuevoEstado === "En_recepcion") patch.recepcion_iniciada_at = ahora;
   if (["Auditado", "Rechazado", "Recibido_con_inconsistencia"].includes(nuevoEstado)) {
     patch.auditoria_finalizada_at = ahora;
   }
@@ -758,6 +775,7 @@ export async function dividirEnPartes(id) {
       despachador_id: null,
       estado: "Creado",
       disponible_at: ahora,
+      publicado_at: ahora, // la parte 2 entra al pool: es una publicación
       parte_de: id,
       // Si ya era una parte 2, la siguiente es la 3: dividir puede pasar de nuevo.
       parte_num: (Number(cab.parte_num) || 1) + 1,
@@ -1577,7 +1595,10 @@ export async function finalizarBorrador(id, { despachadorId } = {}) {
   }
 
   const ahora = new Date().toISOString();
-  const patch = { estado: "Creado", updated_at: ahora, disponible_at: ahora };
+  // `publicado_at` se re-sella si el listado se había reabierto ("Volver a
+  // listado"): mientras estuvo en Borrador el despachador no lo veía, así que la
+  // espera real arranca en la ÚLTIMA publicación, no en la primera.
+  const patch = { estado: "Creado", updated_at: ahora, disponible_at: ahora, publicado_at: ahora };
   if (despachadorId) patch.despachador_id = despachadorId;
 
   const { data, error } = await supabase

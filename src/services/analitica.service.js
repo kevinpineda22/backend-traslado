@@ -113,6 +113,75 @@ function finDelDia(fecha) {
 }
 
 /**
+ * Etapas de "Dónde se traba el flujo". Cada una se mide entre dos HITOS: marcas
+ * que se escriben cuando el paso ocurre y no se vuelven a tocar.
+ *
+ * NUNCA usar un RELOJ, ni una marca que cambió de definición, como extremo de
+ * una etapa. Así estuvo mal hasta la 039:
+ *   · `disponible_at` es el reloj de las alertas — se re-sella al pasar a
+ *     Recolectado, al abandonar y al reactivar. "Esperando despachador" arrancaba
+ *     ahí y quedaba siempre sin datos (la resta daba negativa y se descartaba).
+ *   · `auditoria_iniciada_at` se sellaba en el primer Comparar, con el conteo ya
+ *     hecho: "Recibiendo" medía solo de Comparar a la firma, y todo el conteo se
+ *     sumaba a la etapa anterior. Desde la 036 se sella en el primer escaneo, lo
+ *     que arregla los traslados nuevos — pero los viejos siguen con la definición
+ *     anterior, así que la columna mezcla dos significados y no sirve para una
+ *     mediana.
+ *   · `auditoria_abierta_at` se re-sella en cada apertura (mide frescura).
+ *
+ * Las etapas que usan `publicado_at` o `recepcion_iniciada_at` solo tienen datos
+ * de los traslados cerrados después de la 039: no hay backfill a propósito, para
+ * no mezclar dos definiciones dentro de la misma mediana.
+ *
+ * `total` se queda en created_at → auditoria_finalizada_at: es la base del "n"
+ * de la tarjeta, y pasarlo a los hitos nuevos la dejaría en "muestra
+ * insuficiente" hasta que cerraran cinco traslados nuevos.
+ *
+ * Caso borde conocido: si un despachador toma el traslado y lo abandona,
+ * `recoleccion_iniciada_at` queda en la toma SIGUIENTE, así que el tiempo que lo
+ * tuvo el primero cuenta como "Esperando despachador".
+ */
+export const ETAPAS = [
+  { clave: "espera_despachador", label: "Esperando despachador", de: "publicado_at", a: "recoleccion_iniciada_at" },
+  { clave: "recoleccion", label: "Recolectando", de: "recoleccion_iniciada_at", a: "recoleccion_finalizada_at" },
+  // Antes "Esperando camión". Termina con el PRIMER conteo de quien recibe (escaneo
+  // o canastilla), no al abrir ni al comparar: abrir puede pasar con el camión
+  // todavía en la ruta, y comparar llega con el conteo ya hecho. Cubre la espera
+  // del camión, el viaje y la descarga, y ya no se come el conteo.
+  { clave: "cargue_viaje", label: "Cargue y viaje", de: "recoleccion_finalizada_at", a: "recepcion_iniciada_at" },
+  { clave: "recibo", label: "Recibiendo", de: "recepcion_iniciada_at", a: "auditoria_finalizada_at" },
+  { clave: "total", label: "Ciclo completo", de: "created_at", a: "auditoria_finalizada_at" },
+];
+
+/**
+ * Mediana, p90, etc. de cada etapa sobre una lista de despachos.
+ * @param {object[]} despachos - con las columnas de ETAPAS
+ */
+export function calcularEtapas(despachos) {
+  return ETAPAS.map((e) => ({
+    clave: e.clave,
+    label: e.label,
+    ...resumenNumerico(despachos.map((d) => horas(d[e.de], d[e.a]))),
+  }));
+}
+
+/**
+ * Traslados por estado de la subida a SIESA.
+ *
+ * `incierto` (sql/033) va explícito: SIESA no respondió y no se sabe si el
+ * documento entró. Antes el contador solo tenía pendiente/enviado/fallido y el
+ * `!= null` lo descartaba en silencio — justo el estado que más hay que mirar
+ * quedaba invisible en el Dashboard.
+ *
+ * @param {object[]} despachos - con `siesa_estado`
+ */
+export function contarSiesa(despachos) {
+  const siesa = { pendiente: 0, enviado: 0, fallido: 0, incierto: 0 };
+  for (const d of despachos) if (siesa[d.siesa_estado] != null) siesa[d.siesa_estado] += 1;
+  return siesa;
+}
+
+/**
  * Analítica completa para el Dashboard.
  *
  * @param {object} [opts]
@@ -138,7 +207,7 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
     "traslados_despachos",
     "id, origen, destino, flujo, estado, inactivo, created_at, disponible_at, " +
       "recoleccion_iniciada_at, recoleccion_finalizada_at, auditoria_iniciada_at, " +
-      "auditoria_finalizada_at, siesa_estado",
+      "auditoria_finalizada_at, publicado_at, recepcion_iniciada_at, siesa_estado",
     (q) => {
       let out = q;
       if (desdeISO) out = out.gte("created_at", desdeISO);
@@ -382,20 +451,8 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
   }
 
   /* ── 5. Tiempos por etapa ─────────────────────────────────────────────
-     Dónde se traba el flujo. Cada etapa por separado, porque el total no dice
-     dónde poner gente. */
-  const etapasDef = [
-    { clave: "espera_despachador", label: "Esperando despachador", de: "disponible_at", a: "recoleccion_iniciada_at" },
-    { clave: "recoleccion", label: "Recolectando", de: "recoleccion_iniciada_at", a: "recoleccion_finalizada_at" },
-    { clave: "espera_camion", label: "Esperando camión", de: "recoleccion_finalizada_at", a: "auditoria_iniciada_at" },
-    { clave: "recibo", label: "Recibiendo", de: "auditoria_iniciada_at", a: "auditoria_finalizada_at" },
-    { clave: "total", label: "Ciclo completo", de: "created_at", a: "auditoria_finalizada_at" },
-  ];
-  const etapas = etapasDef.map((e) => ({
-    clave: e.clave,
-    label: e.label,
-    ...resumenNumerico(despachos.map((d) => horas(d[e.de], d[e.a]))),
-  }));
+     Dónde se traba el flujo. Ver ETAPAS y calcularEtapas. */
+  const etapas = calcularEtapas(despachos);
 
   /* ── 6. Exactitud del recibo ──────────────────────────────────────────
      Si lo que salió, llegó. `diferencia` ya está en UND (ver Item.model). */
@@ -435,8 +492,7 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
   /* ── 8. Salud de la subida a SIESA ────────────────────────────────────
      Una requisición que no llegó al ERP es inventario que el sistema cree movido
      y el ERP no. Se cuenta aparte porque no es un problema de bodega. */
-  const siesa = { pendiente: 0, enviado: 0, fallido: 0 };
-  for (const d of despachos) if (siesa[d.siesa_estado] != null) siesa[d.siesa_estado] += 1;
+  const siesa = contarSiesa(despachos);
 
   return {
     generado_at: new Date().toISOString(),
