@@ -1,6 +1,7 @@
 import * as DespachoService from "../services/despacho.service.js";
 import * as DespachadorModel from "../models/Despachador.model.js";
 import { SEDES } from "../config/flujos.js";
+import { createError } from "../middleware/errorHandler.js";
 
 /**
  * GET /api/despachos
@@ -220,8 +221,33 @@ export async function listarManifiestosCtrl(req, res, next) {
   }
 }
 
+/**
+ * ¿Está habilitado "Enviar primera parte"? APAGADO por defecto (decisión de
+ * negocio, 02/10/2026): en Llano el traslado se cierra completo, sin partirlo.
+ *
+ * Se corta acá, en la puerta HTTP, y no en el servicio ni en el modelo: la lógica
+ * de dividir sigue entera y probada (la cerca y la mudanza condicional de
+ * `dividirEnPartes`, que la usan los tests de recolección y contenedores), así que
+ * volver a habilitarla es prender `TRASLADOS_ENVIO_POR_PARTES` en el entorno, sin
+ * tocar código. El front esconde el botón, pero un celular con el bundle viejo en
+ * caché todavía lo tendría: el que manda es el backend.
+ *
+ * Los traslados que YA se partieron no cambian: su parte 2 sigue en el pool.
+ */
+export function envioPorPartesHabilitado() {
+  return ["1", "true", "on", "si", "sí"].includes(
+    String(process.env.TRASLADOS_ENVIO_POR_PARTES || "").trim().toLowerCase(),
+  );
+}
+
 export async function dividir(req, res, next) {
   try {
+    if (!envioPorPartesHabilitado()) {
+      throw createError(
+        409,
+        "Enviar el traslado por partes está deshabilitado: hay que cerrar la recolección completa.",
+      );
+    }
     const data = await DespachoService.dividirEnPartes(req.params.id);
     res.status(201).json({ ok: true, data });
   } catch (error) {
