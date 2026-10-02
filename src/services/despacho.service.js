@@ -18,6 +18,14 @@ import { enviarRequisicion } from "./requisicion.service.js";
 import { consultaConfigurada } from "./siesaTransito.consulta.js";
 import { getStockLote } from "./siesaStock.service.js";
 import { fichaDeItem } from "./siesa.service.js";
+// Namespace a propósito, no import con nombre: los tests de recepción y
+// contenedores mockean siesa.service.js con una lista fija de exports, y un import
+// con nombre que el mock no trae hace fallar el import del servicio ENTERO (se
+// caían 52 tests por una columna informativa). Con el namespace, un mock sin
+// `clasesLlanoDeItems` deja la columna A/B/C vacía — lo mismo que pasa si la
+// lectura falla — en vez de romper todo. En producción el módulo real la exporta.
+import * as SiesaService from "./siesa.service.js";
+import { getFlujoPorDestino } from "../config/flujos.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
 import { analitica as calcularAnalitica } from "./analitica.service.js";
 import ExcelJS from "exceljs";
@@ -55,8 +63,48 @@ export function itemsEnDespachosActivos() {
   return DespachoModel.itemsEnDespachosActivos();
 }
 
-export async function obtener(id) {
-  return DespachoModel.findById(id);
+/**
+ * @param {string} id
+ * @param {object} [opts]
+ * @param {boolean} [opts.conClase] - adjunta la clase A/B/C a los ítems de Llano.
+ *   Opt-in: solo la usa el monitor. El panel del recibidor también lee por acá y
+ *   arma sus ítems con una lista blanca que la descarta, así que calcularla ahí
+ *   eran consultas al snapshot pagadas en el celular para nada.
+ */
+export async function obtener(id, { conClase = false } = {}) {
+  const despacho = await DespachoModel.findById(id);
+  if (!despacho || !conClase) return despacho;
+  return conClaseLlano(despacho);
+}
+
+/**
+ * Adjunta la clase A/B/C a cada ítem de un despacho del flujo Llano, para que el
+ * monitor pueda mostrarla. En General no hay clases: el despacho vuelve intacto.
+ *
+ * Best-effort: si la lectura del snapshot falla, el detalle sale igual sin la
+ * columna. Un dato informativo no puede tumbar la pantalla que se usa para
+ * seguir el traslado. Ver `clasesLlanoDeItems` para por qué se deriva.
+ */
+async function conClaseLlano(despacho) {
+  if (getFlujoPorDestino(despacho.destino)?.logica !== "abc") return despacho;
+  const items = despacho.traslados_items || [];
+  if (items.length === 0) return despacho;
+
+  try {
+    const clases = await SiesaService.clasesLlanoDeItems(
+      despacho.destino,
+      items.map((it) => it.codigo_item),
+    );
+    despacho.traslados_items = items.map((it) => ({
+      ...it,
+      // null (y no "ninguno") cuando el ítem no está en el snapshot: "no sé" y
+      // "no tiene clase" son cosas distintas, y el monitor las pinta distinto.
+      clase: clases.get(String(it.codigo_item).trim()) ?? null,
+    }));
+  } catch (err) {
+    console.error(`[despacho] no se pudo leer la clase A/B/C de ${despacho.id}:`, err.message);
+  }
+  return despacho;
 }
 
 /**

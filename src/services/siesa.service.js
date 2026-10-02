@@ -120,7 +120,8 @@ export async function getCriterios(origen = "PV001") {
 /* ─── Productos pivoteados origen/destino ──────────────────────────── */
 
 /**
- * Productos del ORIGEN cruzados con el DESTINO + sugerido (stock de seguridad).
+ * Productos de la TIENDA DESTINO cruzados con el stock del ORIGEN + sugerido
+ * (stock de seguridad).
  * @param {object} opts
  * @param {string} opts.origen  - Bodega origen
  * @param {string} opts.destino - Bodega destino
@@ -148,10 +149,39 @@ export async function getProductosTraslado({ origen, destino }) {
     }
 
     const productos = [];
-    // Recorremos la UNIÓN origen ∪ destino: así también aparecen los ítems que
-    // el destino necesita aunque el origen principal no tenga stock (para poder
-    // mandarlos desde otra sede). Los ítems solo-destino se incluyen si necesidad > 0.
-    const codigos = new Set([...oMap.keys(), ...dMap.keys()]);
+    // SOLO lo que existe en la TIENDA DESTINO — misma regla que Llano (ver
+    // getProductosLlano). El panel se pide por destino y tiene que mostrar los
+    // productos de esa sede, no el catálogo del CEDI.
+    //
+    // Antes esto recorría la UNIÓN origen ∪ destino, y como en General no hay
+    // filtro de CAT, TODO el catálogo del CEDI (PV001, 17.005 ítems) aparecía para
+    // cada tienda. Medido el 28/09/2026: entre el 27% (Girardota Parque) y el 54%
+    // (San Juan) de la lista eran productos que esa tienda nunca manejó. Entraban
+    // con sugerido 0 —así que "Solo sugeridos" estaba limpio— pero llenaban la
+    // lista al filtrar por Grupo, Proveedor o Marca.
+    //
+    // COSTO ACEPTADO: desde este panel ya no se le puede mandar a una tienda un
+    // producto que nunca tuvo (introducir un producto nuevo, o sacar inventario
+    // muerto del CEDI hacia una tienda que no lo manejaba). Fue una decisión de
+    // negocio explícita. Si ese caso vuelve a hacer falta, la salida no es volver
+    // a la unión: es marcar cada fila con `en_destino` y esconder las `false` por
+    // defecto, con un interruptor para mostrarlas.
+    //
+    // Los AGOTADOS de la tienda NO se pierden: la consulta de Connekta parte de
+    // t400_cm_existencia sin filtrar existencia > 0 (ver docs/CONSULTA_SNAPSHOT_CONNEKTA.md).
+    //
+    // Lo que la tienda tiene y el CEDI no se sigue mostrando si la tienda lo
+    // necesita (necesidad > 0): se puede mandar desde otra sede.
+    // Sin filas del destino no hay nada que mostrar, y una lista vacía con ok:true
+    // se lee como "no hay productos". Casi siempre es otra cosa: una bodega que
+    // está en flujos.js pero no en el WHERE de la consulta de Connekta (ver
+    // docs/CONSULTA_SNAPSHOT_CONNEKTA.md), o una sede nueva. Se dice con todas las
+    // letras; el controlador lo responde como 502.
+    if (dMap.size === 0) {
+      return { error: `Sin datos de inventario para la bodega ${destino} en el snapshot` };
+    }
+
+    const codigos = new Set(dMap.keys());
     for (const codigo of codigos) {
       const o = oMap.get(codigo);
       const d = dMap.get(codigo);
@@ -263,6 +293,36 @@ function claseDeCategoria(cat) {
 }
 
 /**
+ * Clase A/B/C de varios ítems, para mostrarla en el detalle de un despacho Llano.
+ *
+ * POR QUÉ SE DERIVA Y NO SE LEE DEL ÍTEM: la clase nunca se guardó. El panel de
+ * armado mandaba `rotacion: p.rotacion || p.clase`, con la intención de guardar
+ * la clase en Llano, pero `getProductosLlano` devuelve `rotacion` como "N/A"
+ * cuando no hay dato — nunca vacío — así que el `||` siempre se quedaba con la
+ * rotación. Derivarla acá funciona también para los despachos ya creados.
+ *
+ * Es la clase ACTUAL del maestro, no la del día en que se armó el despacho. Una
+ * reclasificación en SIESA cambia lo que se ve en despachos viejos.
+ *
+ * Usa `claseDeCategoria`, la misma función del panel de armado: la clase que se
+ * ve en el monitor es la misma con la que se calculó el sugerido.
+ *
+ * @param {string} destino - bodega destino (el CAT es del ítem, pero se lee de
+ *   la fila del destino por coherencia con getProductosLlano)
+ * @param {string[]} codigos
+ * @returns {Promise<Map<string, "A"|"B"|"C"|"ninguno">>} ítems sin fila en el
+ *   snapshot quedan fuera del mapa (el llamador decide cómo mostrarlos)
+ */
+export async function clasesLlanoDeItems(destino, codigos) {
+  const filas = await leerBodegasItems([destino], codigos);
+  const clases = new Map();
+  for (const r of filas) {
+    clases.set(String(r.codigo_item).trim(), claseDeCategoria(r.criterios?.CAT));
+  }
+  return clases;
+}
+
+/**
  * ¿El ítem está descodificado? (criterio CAT = "DESCODIFICADOS").
  *
  * SOLO SE EXCLUYE EN LLANO. Un descodificado es un producto que se deja de
@@ -288,8 +348,8 @@ function esDescodificado(cat) {
 }
 
 /**
- * Productos del flujo Llano — facetado (todos los ítems del origen, como
- * General) con sugerido A/B/C. La clase sale del criterio CAT del DESTINO
+ * Productos del flujo Llano — facetado (los ítems que maneja el DESTINO, igual
+ * que General) con sugerido A/B/C. La clase sale del criterio CAT del DESTINO
  * (Girardota Llano, 00401) y la capacidad de la tabla `traslados_capacidad`.
  * Ítems sin capacidad cargada → capacidad 0 → sugerido 0.
  *
@@ -318,10 +378,35 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     }
 
     const productos = [];
-    // Unión origen ∪ destino: también aparecen los ítems que Llano necesita
-    // aunque el origen (Girardota Parque) no tenga stock, para mandarlos desde
-    // otra sede. Los ítems solo-destino se incluyen si necesidad > 0.
-    const codigos = new Set([...oMap.keys(), ...dMap.keys()]);
+    // SOLO lo que existe en el DESTINO (Girardota Llano). El panel se pide por
+    // destino: tiene que mostrar los productos de esa sede, no el catálogo del
+    // origen.
+    //
+    // Antes esto recorría la UNIÓN origen ∪ destino, y cualquier ítem de
+    // Girardota Parque entraba aunque Llano no lo manejara. El filtro de CAT de
+    // abajo no lo atajaba: el CAT es del maestro del ítem (no de la bodega), así
+    // que si Llano no tenía el ítem se leía el del origen — que es el mismo — y
+    // "SIN CLASIFICACION" no es vacío, así que también pasaba.
+    //
+    // Los AGOTADOS de Llano NO se pierden: el snapshot incluye los ítems en cero
+    // (verificado el 28/09/2026: 4132 de 9344 ítems de 00401 con inventario ≤ 0,
+    // y por diseño: la consulta no filtra existencia — ver
+    // docs/CONSULTA_SNAPSHOT_CONNEKTA.md). Si algún día esa consulta empezara a
+    // filtrar `existencia > 0`, este recorrido escondería justo lo que más hay
+    // que reponer — revisar esto antes de tocar ese WHERE.
+    //
+    // Lo que Llano tiene y el origen no se sigue mostrando si Llano lo necesita
+    // (necesidad > 0): se puede mandar desde otra sede.
+    // Sin filas del destino no hay nada que mostrar, y una lista vacía con ok:true
+    // se lee como "no hay productos". Casi siempre es otra cosa: una bodega que
+    // está en flujos.js pero no en el WHERE de la consulta de Connekta (ver
+    // docs/CONSULTA_SNAPSHOT_CONNEKTA.md), o una sede nueva. Se dice con todas las
+    // letras; el controlador lo responde como 502.
+    if (dMap.size === 0) {
+      return { error: `Sin datos de inventario para la bodega ${destino} en el snapshot` };
+    }
+
+    const codigos = new Set(dMap.keys());
     for (const codigo of codigos) {
       const o = oMap.get(codigo);
       const d = dMap.get(codigo);

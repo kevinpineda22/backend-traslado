@@ -103,7 +103,8 @@ export async function listar(req, res, next) {
  */
 export async function obtener(req, res, next) {
   try {
-    const data = await DespachoService.obtener(req.params.id);
+    // `conClase`: la columna A/B/C del monitor (Llano). Ver DespachoService.obtener.
+    const data = await DespachoService.obtener(req.params.id, { conClase: true });
     if (!data) return res.status(404).json({ error: "Despacho no encontrado" });
 
     // Auditoría ciega: si viene ?auditor=true, ocultar cantidad_despachador
