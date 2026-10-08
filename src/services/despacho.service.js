@@ -524,18 +524,27 @@ export async function dividirEnPartes(id) {
       "Enviar por partes es del flujo Llano. En General hay que resolver cada producto antes de cerrar.",
     );
   }
-  // Las canastillas CERRADAS viajan en esta primera parte con todo su contenido
-  // (lo que tiene unidades nunca se muda). Una ABIERTA es una que alguien está
-  // llenando: partir ahora dejaría su contenido a medio declarar.
-  const abiertos = await ContenedoresService.hayAbiertos(id);
-  if (abiertos.length) {
-    throw createError(
-      409,
-      `Cerrá ${abiertos.length === 1 ? "la canastilla" : "las canastillas"} ${abiertos
-        .map((c) => c.numero)
-        .join(", ")} antes de enviar la primera parte.`,
-    );
-  }
+  // LAS CANASTILLAS ABIERTAS NO BLOQUEAN — y antes sí.
+  //
+  // El bloqueo tenía sentido cuando el botón lo apretaba el DESPACHADOR: "cerrá
+  // la canastilla 3 antes de enviar" era una instrucción que podía cumplir ahí
+  // mismo. Desde que partir es una acción del ADMIN desde el monitor, ese mismo
+  // mensaje le pide algo que no puede hacer —la canastilla la cierra quien la
+  // está llenando— y lo deja llamando por teléfono justo cuando necesita
+  // resolver rápido. Un portón que solo puede abrir alguien que no lo está
+  // mirando no es un portón: es un bloqueo.
+  //
+  // Y no se pierde nada: una canastilla solo contiene renglones YA contados, y
+  // los contados por definición no se mudan (ver `esMovibleAParte2`). La parte 2
+  // sale igual de limpia, y la canastilla se queda abierta en la parte 1, donde
+  // estaba.
+  //
+  // LA RED SIGUE PUESTA, EN EL LUGAR CORRECTO
+  // `ContenedoresService.validarParaFinalizar` corre al pasar a
+  // `Pendiente_carga` y ahí sí exige que no quede ninguna abierta ni vacía (y
+  // recalcula los topes). O sea: el despachador no puede cerrar la recolección
+  // con una canastilla a medio declarar — que es donde la integridad importaba.
+  // Lo único que cambió es que ya no bloquea una operación que no la ensucia.
   return DespachoModel.dividirEnPartes(id);
 }
 

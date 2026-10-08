@@ -1,7 +1,6 @@
 import * as DespachoService from "../services/despacho.service.js";
 import * as DespachadorModel from "../models/Despachador.model.js";
 import { SEDES } from "../config/flujos.js";
-import { createError } from "../middleware/errorHandler.js";
 
 /**
  * GET /api/despachos
@@ -197,11 +196,6 @@ export async function marcarSiesaOmitido(req, res, next) {
 }
 
 /**
- * POST /api/despachos/:id/dividir
- * Envia la primera parte: lo pendiente se va a un traslado nuevo.
- * Resp: { ok, data: { despacho, parte2, movidos } }
- */
-/**
  * GET /api/despachos/manifiestos?desde=2026-08-01&hasta=2026-08-22
  * Todos los manifiestos, del más nuevo al más viejo. Sin fechas devuelve los
  * más recientes hasta el tope.
@@ -222,32 +216,34 @@ export async function listarManifiestosCtrl(req, res, next) {
 }
 
 /**
- * ¿Está habilitado "Enviar primera parte"? APAGADO por defecto (decisión de
- * negocio, 02/10/2026): en Llano el traslado se cierra completo, sin partirlo.
+ * POST /api/despachos/:id/dividir — GENERAR LA SEGUNDA PARTE.
  *
- * Se corta acá, en la puerta HTTP, y no en el servicio ni en el modelo: la lógica
- * de dividir sigue entera y probada (la cerca y la mudanza condicional de
- * `dividirEnPartes`, que la usan los tests de recolección y contenedores), así que
- * volver a habilitarla es prender `TRASLADOS_ENVIO_POR_PARTES` en el entorno, sin
- * tocar código. El front esconde el botón, pero un celular con el bundle viejo en
- * caché todavía lo tendría: el que manda es el backend.
+ * Es una acción del ADMIN, desde el monitor, sobre un Llano que está en
+ * recolección: lo que ya se contó se queda para salir hoy y lo que nadie tocó
+ * pasa a un traslado nuevo que entra al pool.
  *
- * Los traslados que YA se partieron no cambian: su parte 2 sigue en el pool.
+ * ANTES ESTABA EN EL PANEL DEL DESPACHADOR Y DETRÁS DE UNA VARIABLE DE ENTORNO
+ * Se había apagado con `TRASLADOS_ENVIO_POR_PARTES` (02/10/2026) cortando acá
+ * mismo, en la puerta HTTP, justamente para poder volver a prenderla sin tocar
+ * la lógica. Eso es lo que pasó: la decisión ahora es que partir la toma el
+ * admin, no el despachador, así que el interruptor global se fue — tenerlo
+ * apagado por defecto y pedirle a alguien que lo prenda en Vercel para usar una
+ * función del panel es un pie que nadie se acuerda de levantar.
+ *
+ * YA NO HAY GUARDA EXTRA ACÁ, Y ES A PROPÓSITO
+ * Las condiciones no se aflojaron: viven donde se pueden verificar contra el
+ * estado real. `DespachoService.dividirEnPartes` exige flujo Llano, y
+ * `DespachoModel.dividirEnPartes` exige `En_recoleccion`, no inactivo, al menos
+ * un renglón atendido y al menos uno sin tocar, con una cerca condicional contra
+ * el cierre concurrente. Duplicarlas acá sería tener dos fuentes de verdad para
+ * la misma regla.
+ *
+ * El monitor decide si muestra el botón con `resumen.movibles`, que se calcula
+ * con el MISMO predicado que la mudanza (ver `esMovibleAParte2`). Pero esconder
+ * el botón no es la cerca: el que manda es el backend.
  */
-export function envioPorPartesHabilitado() {
-  return ["1", "true", "on", "si", "sí"].includes(
-    String(process.env.TRASLADOS_ENVIO_POR_PARTES || "").trim().toLowerCase(),
-  );
-}
-
 export async function dividir(req, res, next) {
   try {
-    if (!envioPorPartesHabilitado()) {
-      throw createError(
-        409,
-        "Enviar el traslado por partes está deshabilitado: hay que cerrar la recolección completa.",
-      );
-    }
     const data = await DespachoService.dividirEnPartes(req.params.id);
     res.status(201).json({ ok: true, data });
   } catch (error) {

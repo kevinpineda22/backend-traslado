@@ -633,6 +633,46 @@ export async function abandonarRecoleccion(id, despachadorId) {
 }
 
 /**
+ * ¿Este renglón se mudaría a la parte 2?
+ *
+ * "Sin tocar" = nadie pasó por ese producto: no anotó cantidad, no lo marcó
+ * agotado y no le puso motivo. Un renglón CON motivo sí fue atendido —alguien
+ * fue al pasillo y decidió algo— así que se queda en la primera parte.
+ *
+ * ESTE PREDICADO SE ESCRIBE DOS VECES Y LAS DOS TIENEN QUE DECIR LO MISMO:
+ *   1. acá, en JS, para CONTAR (el `movibles` del resumen del monitor y la cerca
+ *      de `dividirEnPartes`);
+ *   2. en el filtro PostgREST del UPDATE que hace la mudanza, dentro de
+ *      `dividirEnPartes`: `.is("motivo", null).not("agotado", "is", true)
+ *      .or("cantidad_despachador.is.null,cantidad_despachador.eq.0")`.
+ *
+ * La segunda no se puede reusar desde acá: es un filtro que evalúa la base, no
+ * una función. Si se cambia una, HAY QUE CAMBIAR LAS DOS —
+ * `test/despacho.envio-por-partes.test.js` las ata y falla si se separan.
+ *
+ * POR QUÉ IMPORTA QUE COINCIDAN
+ * Desde que partir es una acción del ADMIN y no del despachador, la decisión se
+ * toma mirando un número en el monitor, no la lista renglón por renglón. Si el
+ * número que se ve y el que se mueve no son el mismo, la primera vez que alguien
+ * lo note deja de confiar en el panel — y con razón.
+ *
+ * OJO: NO es lo mismo que el `pendientes` del resumen. Ese cuenta "sin cantidad
+ * anotada" y no mira el motivo, así que incluye renglones con motivo (que NO se
+ * mudan) y excluye los que quedaron en 0 sin motivo (que SÍ se mudan). Son dos
+ * preguntas distintas, las dos son correctas, y por eso conviven.
+ *
+ * @param {object} item - con `motivo`, `agotado` y `cantidad_despachador`
+ * @returns {boolean}
+ */
+export function esMovibleAParte2(item) {
+  return (
+    !item.motivo &&
+    !item.agotado &&
+    (item.cantidad_despachador == null || Number(item.cantidad_despachador) === 0)
+  );
+}
+
+/**
  * DIVIDIR EN PARTES — manda lo que ya está listo y pasa el resto a un traslado
  * nuevo (ver sql/032).
  *
@@ -711,12 +751,8 @@ export async function dividirEnPartes(id) {
     .eq("despacho_id", id);
   if (errItems) throw new Error(`Error al leer los ítems: ${errItems.message}`);
 
-  const sinTocar = (items || []).filter(
-    (it) =>
-      !it.motivo &&
-      !it.agotado &&
-      (it.cantidad_despachador == null || Number(it.cantidad_despachador) === 0),
-  );
+  // Mismo predicado que el `movibles` del monitor — ver `esMovibleAParte2`.
+  const sinTocar = (items || []).filter(esMovibleAParte2);
   const atendidos = (items || []).length - sinTocar.length;
 
   if (sinTocar.length === 0) {
@@ -1138,7 +1174,9 @@ export async function updateAuditor(id, auditorId) {
 
 /**
  * Obtener despachos con resumen de items para el monitor.
- * Devuelve los despachos con conteo de completos/incompletos/agotados/pendientes.
+ * Devuelve los despachos con conteo de completos/incompletos/agotados/pendientes
+ * y `movibles` (cuántos renglones se irían a la parte 2 si el admin partiera
+ * ahora — ver `esMovibleAParte2`; NO es lo mismo que `pendientes`).
  * Acepta los mismos filtros que findAll.
  */
 /**
@@ -1272,10 +1310,17 @@ export async function findAllWithResumen(filters = {}) {
       // "agotados" o "inventario fantasma" sin pedir el detalle de CADA
       // despacho: con 40 traslados en pantalla serían 40 requests por filtro.
       agg[item.despacho_id] = {
-        total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0, motivos: {},
+        total: 0, completos: 0, incompletos: 0, agotados: 0, pendientes: 0, movibles: 0,
+        motivos: {},
       };
     }
     agg[item.despacho_id].total++;
+    // Cuántos renglones se irían a la parte 2 si el admin partiera AHORA. Va
+    // aparte de la cadena de abajo porque responde otra pregunta: `pendientes`
+    // describe el avance de la recolección, `movibles` describe el efecto de una
+    // acción. No son el mismo número y no se pueden derivar uno del otro
+    // (ver `esMovibleAParte2`).
+    if (esMovibleAParte2(item)) agg[item.despacho_id].movibles++;
     if (item.motivo) {
       const m = agg[item.despacho_id].motivos;
       m[item.motivo] = (m[item.motivo] || 0) + 1;

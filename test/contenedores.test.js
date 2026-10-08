@@ -291,12 +291,46 @@ test("abandonar se lleva las canastillas con el conteo", async () => {
   assert.equal(renglon(0).cantidad_suelta, null);
 });
 
-test("enviar primera parte: con canastilla abierta no; cerrada viaja en la parte 1", async () => {
+/*
+ * UNA CANASTILLA ABIERTA YA NO BLOQUEA LA SEGUNDA PARTE — y antes sí.
+ *
+ * El bloqueo existía cuando partir lo hacía el DESPACHADOR: "cerrá la canastilla
+ * 1 antes de enviar" era algo que podía hacer ahí mismo. Ahora parte el ADMIN
+ * desde el monitor, y ese mensaje le pedía algo que no está en sus manos.
+ *
+ * No se perdió ninguna red: lo que está en una canastilla está CONTADO, y lo
+ * contado nunca se muda. La integridad que importaba —no cerrar el conteo con
+ * una canastilla a medio declarar— sigue cubierta en el cierre, por
+ * `validarParaFinalizar` (ver el test "no se finaliza con una canastilla
+ * abierta" más arriba).
+ */
+test("segunda parte con canastilla ABIERTA: se parte igual y lo de la canastilla se queda", async () => {
   const c1 = await nuevo("1");
   await meter(c1, 0, 4);
-  await assert.rejects(DespachoService.dividirEnPartes(D), (e) => e.statusCode === 409);
 
+  const { parte2 } = await DespachoService.dividirEnPartes(D);
+
+  assert.equal(renglon(0).despacho_id, D, "lo que está en la canastilla está contado: se queda");
+  assert.equal(renglon(1).despacho_id, parte2.id, "lo que nadie tocó se va a la parte 2");
+
+  // La canastilla sigue en la parte 1, y sigue abierta: no se tocó.
+  const c = bd.tablas.traslados_contenedores.find((x) => x.id === c1.id);
+  assert.equal(c.despacho_id, D);
+  assert.notEqual(c.estado, "cerrado");
+
+  // Y la parte 1 NO se puede cerrar con ella abierta: la red quedó donde debía.
+  await assert.rejects(
+    DespachoService.cambiarEstado(D, "Pendiente_carga"),
+    (e) => e.codigo === "CONTENEDORES_ABIERTOS",
+    "partir no habilita cerrar con una canastilla abierta",
+  );
+});
+
+test("segunda parte con canastilla CERRADA: igual que antes", async () => {
+  const c1 = await nuevo("1");
+  await meter(c1, 0, 4);
   await Contenedores.cerrar(D, c1.id, ANA);
+
   const { parte2 } = await DespachoService.dividirEnPartes(D);
   assert.equal(renglon(0).despacho_id, D, "lo que está en la canastilla se queda");
   assert.equal(renglon(1).despacho_id, parte2.id);

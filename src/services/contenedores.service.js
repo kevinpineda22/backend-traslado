@@ -302,11 +302,6 @@ export async function borrarTodos(despachoId) {
   return ContenedorModel.borrarDeDespacho(despachoId);
 }
 
-/** ¿Hay alguno abierto? (para enviar la primera parte) */
-export async function hayAbiertos(despachoId) {
-  return (await ContenedorModel.listarPorDespacho(despachoId)).filter((c) => c.estado !== "cerrado");
-}
-
 /**
  * Resumen para el MANIFIESTO: qué canastillas van en el camión, cuántos productos
  * y unidades lleva cada una y cuánto pesa. `null` si el despacho no usó
