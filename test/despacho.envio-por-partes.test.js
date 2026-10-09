@@ -208,3 +208,144 @@ test("movibles en 0 cuando no queda nada por caminar: el monitor no ofrece parti
     "sin renglones movibles no se puede partir",
   );
 });
+
+/* =============================================================================
+   PARTIR DESPUÉS DEL CIERRE
+
+   Pedido del negocio (09/10/2026): poder generar la segunda parte en cualquier
+   momento, aunque el traslado ya esté finalizado, con todo lo que no salió.
+
+   POR QUÉ SE PUEDE AHORA Y ANTES NO
+   Al cerrar, la auto-clasificación del Llano le pone motivo a todo lo que quedó:
+   Agotado si no hay stock, Inventario Fantasma si lo hay. Esa regla asume que la
+   persona FUE al pasillo. Cuando lo que pasó es que se quedó sin turno, la
+   conclusión es falsa — es el error que la segunda parte vino a evitar (sql/032).
+   Partir después del cierre RETRACTA esos motivos automáticos.
+
+   Lo que no viajó no contradice ningún documento ya emitido: la requisición de
+   SIESA solo lleva `cantidad_despachador > 0`, el manifiesto lista lo que salió, y
+   `ocultoParaAuditor` esconde del auditor los renglones en 0.
+   ============================================================================= */
+
+const CERRADO = "Pendiente_carga";
+
+test("cerrado: se mueve lo que no viajó, aunque la auto-clasificación le haya puesto motivo", async () => {
+  bd.tablas.traslados_despachos.push(despacho({ estado: CERRADO }));
+  bd.tablas.traslados_items.push(
+    // Viajaron: se quedan. El de surtido parcial TAMBIÉN (salió mercancía real).
+    item(1, { cantidad_despachador: 10 }),
+    item(2, { cantidad_despachador: 4, motivo: "surtido_parcial" }),
+    // No viajaron: los marcó el sistema al cerrar, no una persona.
+    item(3, { cantidad_despachador: 0, motivo: "inventario_inflado" }),
+    item(4, { cantidad_despachador: 0, agotado: true, motivo: "sin_stock" }),
+    // No viajó y quedó sin clasificar (falló la consulta de stock a SIESA).
+    item(5, { cantidad_despachador: 0 }),
+  );
+
+  const { parte2, movidos } = await DespachoModel.dividirEnPartes(D);
+  assert.equal(movidos, 3);
+
+  const quedan = itemsDe(D).map((it) => it.id);
+  assert.deepEqual(quedan.sort(), [itemId(1), itemId(2)].sort(), "lo que salió se queda");
+
+  const enParte2 = itemsDe(parte2.id);
+  assert.equal(enParte2.length, 3);
+});
+
+test("la parte 2 nace EN BLANCO: sin motivo, sin agotado, sin cantidad", async () => {
+  bd.tablas.traslados_despachos.push(despacho({ estado: CERRADO }));
+  bd.tablas.traslados_items.push(
+    item(1, { cantidad_despachador: 10 }),
+    item(2, { cantidad_despachador: 0, agotado: true, motivo: "sin_stock", recolectado_por: PARQUE }),
+    item(3, { cantidad_despachador: 0, motivo: "inventario_inflado" }),
+  );
+
+  const { parte2 } = await DespachoModel.dividirEnPartes(D);
+
+  for (const it of itemsDe(parte2.id)) {
+    assert.equal(it.motivo, null, `${it.id} tiene que llegar sin motivo`);
+    assert.equal(it.agotado, false, `${it.id} no puede llegar agotado`);
+    assert.equal(it.cantidad_despachador, null);
+    assert.equal(it.recolectado_por, null);
+  }
+});
+
+test("en recolección NO cambió nada: un motivo puesto a mano sigue siendo una decisión", async () => {
+  bd.tablas.traslados_despachos.push(despacho()); // En_recoleccion
+  bd.tablas.traslados_items.push(
+    item(1, { cantidad_despachador: 10 }),
+    item(2, { cantidad_despachador: 0, motivo: "inventario_inflado" }), // lo decidió alguien
+    item(3),
+  );
+
+  const { parte2, movidos } = await DespachoModel.dividirEnPartes(D);
+  assert.equal(movidos, 1, "solo el que nadie tocó");
+  assert.deepEqual(
+    itemsDe(parte2.id).map((it) => it.id),
+    [itemId(3)],
+  );
+});
+
+test("`movibles` del monitor usa el criterio del ESTADO de cada traslado", async () => {
+  const items = [
+    { cantidad_despachador: 10 },
+    { cantidad_despachador: 0, motivo: "inventario_inflado" },
+    { cantidad_despachador: 0, agotado: true, motivo: "sin_stock" },
+    {},
+  ];
+
+  // Mismo armado, dos estados, dos respuestas.
+  bd.tablas.traslados_despachos.push(despacho());
+  items.forEach((o, i) => bd.tablas.traslados_items.push(item(i + 1, o)));
+  const [enCurso] = await DespachoModel.findAllWithResumen({});
+  assert.equal(enCurso.resumen.movibles, 1, "en recolección: solo el sin tocar");
+
+  bd = crearBD({ traslados_despachos: [], traslados_items: [], traslados_firmas: [] });
+  bd.tablas.traslados_despachos.push(despacho({ estado: CERRADO }));
+  items.forEach((o, i) => bd.tablas.traslados_items.push(item(i + 1, o)));
+  const [cerrado] = await DespachoModel.findAllWithResumen({});
+  assert.equal(cerrado.resumen.movibles, 3, "cerrado: todo lo que no viajó");
+});
+
+test("si TODO salió no hay nada que partir, esté cerrado o no", async () => {
+  bd.tablas.traslados_despachos.push(despacho({ estado: CERRADO }));
+  bd.tablas.traslados_items.push(item(1, { cantidad_despachador: 10 }), item(2, { cantidad_despachador: 3 }));
+
+  await assert.rejects(DespachoModel.dividirEnPartes(D), (e) => e.statusCode === 409);
+});
+
+test("si NO salió nada, partir dejaría la parte 1 vacía: se rechaza", async () => {
+  bd.tablas.traslados_despachos.push(despacho({ estado: CERRADO }));
+  bd.tablas.traslados_items.push(
+    item(1, { cantidad_despachador: 0, motivo: "sin_stock", agotado: true }),
+    item(2, { cantidad_despachador: 0, motivo: "inventario_inflado" }),
+  );
+
+  await assert.rejects(DespachoModel.dividirEnPartes(D), (e) => e.statusCode === 409);
+  assert.equal(bd.tablas.traslados_despachos.length, 1, "no queda una parte 2 fantasma");
+});
+
+test("Borrador y Creado siguen bloqueados: no hay primera parte que dejar atrás", async () => {
+  for (const estado of ["Borrador", "Creado"]) {
+    bd = crearBD({ traslados_despachos: [], traslados_items: [], traslados_firmas: [] });
+    bd.tablas.traslados_despachos.push(despacho({ estado }));
+    bd.tablas.traslados_items.push(item(1, { cantidad_despachador: 5 }), item(2));
+    await assert.rejects(
+      DespachoModel.dividirEnPartes(D),
+      (e) => e.statusCode === 409 && new RegExp(estado).test(e.message),
+      `${estado} tiene que rechazarse`,
+    );
+  }
+});
+
+test("se puede partir incluso con el traslado ya recibido", async () => {
+  bd.tablas.traslados_despachos.push(despacho({ estado: "Auditado" }));
+  bd.tablas.traslados_items.push(
+    item(1, { cantidad_despachador: 10 }),
+    item(2, { cantidad_despachador: 0, motivo: "inventario_inflado" }),
+  );
+
+  const { movidos, parte2 } = await DespachoModel.dividirEnPartes(D);
+  assert.equal(movidos, 1);
+  assert.equal(parte2.estado, "Creado", "la parte 2 siempre nace en el pool");
+});

@@ -639,6 +639,26 @@ export async function abandonarRecoleccion(id, despachadorId) {
  * agotado y no le puso motivo. Un renglón CON motivo sí fue atendido —alguien
  * fue al pasillo y decidió algo— así que se queda en la primera parte.
  *
+ * EL MOTIVO SIGNIFICA COSAS DISTINTAS ANTES Y DESPUÉS DE CERRAR, y por eso el
+ * criterio cambia con el estado:
+ *
+ *   · EN RECOLECCIÓN — el motivo lo puso UNA PERSONA que fue al pasillo y
+ *     decidió. Ese renglón fue atendido: se queda, y su dato viaja hoy.
+ *
+ *   · DESPUÉS DE CERRAR — los motivos los puso la AUTO-CLASIFICACIÓN del Llano
+ *     (ver `cambiarEstado`), que no sabe si la persona fue al pasillo o si se
+ *     quedó sin turno. Cuando fue lo segundo, "Inventario Fantasma" es una
+ *     conclusión falsa (ver el encabezado de sql/032: es el error que la segunda
+ *     parte vino a evitar). Ahí el único criterio honesto es más simple: lo que
+ *     NO VIAJÓ se puede volver a mandar, haya tenido motivo automático o no.
+ *
+ * Generar la parte 2 después del cierre RETRACTA esos motivos automáticos: la
+ * mudanza limpia `motivo` y `agotado` para que la parte 2 nazca en blanco. Eso
+ * borra novedades que Compras e Inventarios ya pudieron ver por
+ * `/api/integraciones`, y cambia hacia atrás la analítica de confiabilidad de
+ * inventario de ese traslado. Es el precio de poder corregir una clasificación
+ * equivocada, y lo decide el admin apretando el botón — no pasa solo.
+ *
  * ESTE PREDICADO SE ESCRIBE DOS VECES Y LAS DOS TIENEN QUE DECIR LO MISMO:
  *   1. acá, en JS, para CONTAR (el `movibles` del resumen del monitor y la cerca
  *      de `dividirEnPartes`);
@@ -662,15 +682,24 @@ export async function abandonarRecoleccion(id, despachadorId) {
  * preguntas distintas, las dos son correctas, y por eso conviven.
  *
  * @param {object} item - con `motivo`, `agotado` y `cantidad_despachador`
+ * @param {string} [estado] - estado del despacho; "En_recoleccion" aplica la
+ *   regla estricta (respeta los motivos puestos a mano). Cualquier otro aplica
+ *   la de "no viajó".
  * @returns {boolean}
  */
-export function esMovibleAParte2(item) {
-  return (
-    !item.motivo &&
-    !item.agotado &&
-    (item.cantidad_despachador == null || Number(item.cantidad_despachador) === 0)
-  );
+export function esMovibleAParte2(item, estado = "En_recoleccion") {
+  // Lo que no viajó: no hay nada físico que esté en el camión ni en SIESA (la
+  // requisición solo lleva `cantidad_despachador > 0`), así que mandarlo de nuevo
+  // no contradice ningún documento ya emitido.
+  const noViajo =
+    item.cantidad_despachador == null || Number(item.cantidad_despachador) === 0;
+  if (!noViajo) return false;
+  if (estado === "En_recoleccion") return !item.motivo && !item.agotado;
+  return true;
 }
+
+/** Estados en los que NO se puede partir: todavía no salió nada que dejar atrás. */
+const NO_PARTIBLES = ["Borrador", "Creado"];
 
 /**
  * DIVIDIR EN PARTES — manda lo que ya está listo y pasa el resto a un traslado
@@ -733,12 +762,19 @@ export async function dividirEnPartes(id) {
     e.expose = true;
     throw e;
   }
-  // Solo mientras se está recolectando. Después de "Pendiente_carga" el conteo ya
-  // se cerró y la auto-clasificación del llano YA corrió: dividir ahí dejaría la
-  // parte 2 llena de renglones con motivos automáticos que no le corresponden.
-  if (cab.estado !== "En_recoleccion") {
+  // Se puede partir EN CUALQUIER MOMENTO desde que empezó la recolección, incluso
+  // con el traslado ya cerrado o recibido. Antes solo se podía en "En_recoleccion"
+  // porque después los motivos automáticos ensuciaban la parte 2; ahora la mudanza
+  // los limpia (ver `esMovibleAParte2`), así que el caso real —el despachador se
+  // quedó sin turno, cerró, y lo que no alcanzó quedó marcado Fantasma— tiene
+  // arreglo en vez de obligar a armar un listado nuevo a mano.
+  //
+  // Borrador y Creado quedan afuera: ahí todavía no salió NADA, así que no hay una
+  // "primera parte" que dejar atrás. Lo que se quiere ahí es editar la lista o
+  // descartarla, y para eso están `editarItems` y `descartarListado`.
+  if (NO_PARTIBLES.includes(cab.estado)) {
     const e = new Error(
-      `Solo se puede enviar una primera parte mientras se está recolectando. Este traslado está en ${cab.estado}.`,
+      `Este traslado está en ${cab.estado}: todavía no salió nada. Editá la lista en vez de partirla.`,
     );
     e.statusCode = 409;
     e.expose = true;
@@ -752,12 +788,12 @@ export async function dividirEnPartes(id) {
   if (errItems) throw new Error(`Error al leer los ítems: ${errItems.message}`);
 
   // Mismo predicado que el `movibles` del monitor — ver `esMovibleAParte2`.
-  const sinTocar = (items || []).filter(esMovibleAParte2);
+  const sinTocar = (items || []).filter((it) => esMovibleAParte2(it, cab.estado));
   const atendidos = (items || []).length - sinTocar.length;
 
   if (sinTocar.length === 0) {
     const e = new Error(
-      "No hay productos pendientes: ya registraste todos. Cerrá la recolección normalmente.",
+      "No hay productos pendientes: todos los renglones de este traslado salieron.",
     );
     e.statusCode = 409;
     e.expose = true;
@@ -765,7 +801,8 @@ export async function dividirEnPartes(id) {
   }
   if (atendidos === 0) {
     const e = new Error(
-      "Todavía no registraste ningún producto. Una primera parte vacía dejaría el traslado igual pero partido en dos.",
+      "No salió ningún producto en este traslado, así que no hay una primera parte que dejar atrás: " +
+        "se partiría en dos dejando uno vacío. Si no se recolectó nada, lo que corresponde es reasignarlo.",
     );
     e.statusCode = 409;
     e.expose = true;
@@ -774,16 +811,17 @@ export async function dividirEnPartes(id) {
 
   const ahora = new Date().toISOString();
 
-  // Cerca: el despacho tiene que SEGUIR en recolección al momento de partirlo. La
-  // lectura de arriba puede tener segundos; si en el medio otro celular cerró la
-  // recolección, partir ahora dejaría un traslado cerrado sin la mitad de sus
-  // renglones. Se ata a un UPDATE condicional para que la verificación y el
-  // "sigo adelante" sean la misma operación.
+  // Cerca: el despacho tiene que seguir EN EL MISMO ESTADO con el que se calculó
+  // qué se mueve. La lectura de arriba puede tener segundos, y el criterio cambia
+  // con el estado (ver `esMovibleAParte2`): si en el medio alguien cerró la
+  // recolección, los renglones que acá contamos como "sin tocar" ya recibieron sus
+  // motivos automáticos y la lista a mudar sería otra. Se ata a un UPDATE
+  // condicional para que verificar y seguir sean la misma operación.
   const { data: sigue, error: errCerca } = await supabase
     .from(TABLE)
     .update({ updated_at: ahora })
     .eq("id", id)
-    .eq("estado", "En_recoleccion")
+    .eq("estado", cab.estado)
     .eq("inactivo", false)
     .select("id")
     .maybeSingle();
@@ -824,7 +862,19 @@ export async function dividirEnPartes(id) {
   // condición es la misma de `sinTocar`, re-evaluada por la base al escribir.
   // Tampoco se pasa la lista de ids: además de estar vieja, con cientos de
   // renglones rompía el largo máximo de la URL.
-  const { data: movidos, error: errMover } = await supabase
+  //
+  // `motivo` y `agotado` se limpian SIEMPRE. En recolección es un no-op (el
+  // predicado ya excluye los que tienen motivo), pero después del cierre es el
+  // punto: esos renglones llegan marcados Agotado o Inventario Fantasma por la
+  // auto-clasificación, y la parte 2 tiene que nacer en blanco — si no, el que la
+  // tome mañana abre 187 renglones que ya dicen "no estaba" sin que nadie los
+  // haya caminado.
+  //
+  // EL FILTRO DE ABAJO ES EL MISMO PREDICADO QUE `esMovibleAParte2`, escrito en
+  // PostgREST porque lo evalúa la base. Si se cambia uno hay que cambiar el otro;
+  // `test/despacho.envio-por-partes.test.js` los ata y falla si se separan.
+  const enRecoleccion = cab.estado === "En_recoleccion";
+  let mudanza = supabase
     .from("traslados_items")
     // `cantidad_suelta` acompaña al total (037): un renglón sin tocar no tiene
     // nada suelto, y nada en contenedores (un contenedor nunca guarda un 0).
@@ -833,10 +883,19 @@ export async function dividirEnPartes(id) {
       recolectado_por: null,
       cantidad_despachador: null,
       cantidad_suelta: null,
+      motivo: null,
+      agotado: false,
     })
-    .eq("despacho_id", id)
-    .is("motivo", null)
-    .not("agotado", "is", true)
+    .eq("despacho_id", id);
+
+  // En recolección, un motivo puesto a mano es una decisión: ese renglón se queda.
+  // Cerrado, los motivos son automáticos y no distinguen "fui y no estaba" de "no
+  // me dio el tiempo", así que el único criterio es si viajó o no.
+  if (enRecoleccion) {
+    mudanza = mudanza.is("motivo", null).not("agotado", "is", true);
+  }
+
+  const { data: movidos, error: errMover } = await mudanza
     .or("cantidad_despachador.is.null,cantidad_despachador.eq.0")
     .select("id");
 
@@ -1303,6 +1362,12 @@ export async function findAllWithResumen(filters = {}) {
   }
 
   // 3. Armar resumen por despacho
+  //
+  // El estado hace falta para `movibles`: el criterio de qué se mudaría a una
+  // parte 2 cambia según si el traslado sigue en recolección o ya se cerró (ver
+  // `esMovibleAParte2`). Se arma el mapa antes del bucle para no buscarlo por cada
+  // renglón — un monitor con 40 traslados son miles de iteraciones.
+  const estadoPorDespacho = new Map(despachos.map((d) => [d.id, d.estado]));
   const agg = {};
   for (const item of items || []) {
     if (!agg[item.despacho_id]) {
@@ -1320,7 +1385,9 @@ export async function findAllWithResumen(filters = {}) {
     // describe el avance de la recolección, `movibles` describe el efecto de una
     // acción. No son el mismo número y no se pueden derivar uno del otro
     // (ver `esMovibleAParte2`).
-    if (esMovibleAParte2(item)) agg[item.despacho_id].movibles++;
+    if (esMovibleAParte2(item, estadoPorDespacho.get(item.despacho_id))) {
+      agg[item.despacho_id].movibles++;
+    }
     if (item.motivo) {
       const m = agg[item.despacho_id].motivos;
       m[item.motivo] = (m[item.motivo] || 0) + 1;
