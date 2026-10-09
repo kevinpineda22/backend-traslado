@@ -848,12 +848,39 @@ export async function fichaDeItem(codigo) {
   const crudo = String(codigo ?? "").trim();
   if (!crudo) return { codigo_item: "", descripcion: null, unidad_medida: null };
 
-  let codigoItem = crudo;
+  // PASO 0 — ¿YA ES UN CÓDIGO SIESA? Entonces NO se vuelve a resolver.
+  //
+  // Los dos que llaman a esta función casi siempre mandan un f120_id ya resuelto
+  // (el controller de /codigos-barras y el auditor al agregar fuera de lista).
+  // Pasarlo otra vez por `resolverCodigoBarras` lo trataba como código de barras,
+  // y hay códigos de barras cortos que son el NÚMERO de otro ítem: el EAN del
+  // JABON JOHNSONS BABY ORIGINAL resuelve a 17899, y "17899" es el barras del
+  // EXPRIMIDOR NARANJA (175559). Bodega veía un exprimidor al escanear un jabón,
+  // y el auditor GUARDABA el renglón con el código del exprimidor.
+  let codigoItem = null;
   try {
-    const resuelto = await resolverCodigoBarras(crudo);
-    if (resuelto?.f120_id) codigoItem = String(resuelto.f120_id).trim();
+    const idNumerico = Number(crudo);
+    if (Number.isInteger(idNumerico)) {
+      const { data: existente } = await supabase
+        .from("items_siesa")
+        .select("f120_id")
+        .eq("f120_id", idNumerico)
+        .limit(1)
+        .maybeSingle();
+      if (existente) codigoItem = crudo;
+    }
   } catch {
-    // Se sigue con el código crudo: el paso 2 igual puede reconocerlo.
+    // Si el maestro no responde, se resuelve como antes.
+  }
+
+  if (!codigoItem) {
+    codigoItem = crudo;
+    try {
+      const resuelto = await resolverCodigoBarras(crudo);
+      if (resuelto?.f120_id) codigoItem = String(resuelto.f120_id).trim();
+    } catch {
+      // Se sigue con el código crudo: el paso 2 igual puede reconocerlo.
+    }
   }
 
   let descripcion = null;
