@@ -349,3 +349,27 @@ test("se puede partir incluso con el traslado ya recibido", async () => {
   assert.equal(movidos, 1);
   assert.equal(parte2.estado, "Creado", "la parte 2 siempre nace en el pool");
 });
+
+test("cerrado con MUCHOS renglones: se mudan todos, en tandas", async () => {
+  // 120 movibles > TANDA (50): obliga a tres pasadas. El bug que esto atrapa es
+  // el clásico del troceado — que la última tanda quede afuera.
+  bd.tablas.traslados_despachos.push(despacho({ estado: CERRADO }));
+  bd.tablas.traslados_items.push(item(1, { cantidad_despachador: 10 })); // viajó
+  for (let n = 2; n <= 121; n++) {
+    bd.tablas.traslados_items.push(item(n, { cantidad_despachador: 0, motivo: "inventario_inflado" }));
+  }
+
+  const [cab] = await DespachoModel.findAllWithResumen({});
+  assert.equal(cab.resumen.movibles, 120);
+
+  const { parte2, movidos } = await DespachoModel.dividirEnPartes(D);
+  assert.equal(movidos, 120, "no se puede perder ninguna tanda");
+  assert.equal(itemsDe(parte2.id).length, 120);
+  assert.deepEqual(
+    itemsDe(D).map((it) => it.id),
+    [itemId(1)],
+    "en la parte 1 queda solo el que viajó",
+  );
+  // Y todos llegan limpios, no solo los de la primera tanda.
+  assert.ok(itemsDe(parte2.id).every((it) => it.motivo === null && it.agotado === false));
+});

@@ -659,16 +659,20 @@ export async function abandonarRecoleccion(id, despachadorId) {
  * inventario de ese traslado. Es el precio de poder corregir una clasificación
  * equivocada, y lo decide el admin apretando el botón — no pasa solo.
  *
- * ESTE PREDICADO SE ESCRIBE DOS VECES Y LAS DOS TIENEN QUE DECIR LO MISMO:
+ * EN RECOLECCIÓN EL PREDICADO SE ESCRIBE DOS VECES Y LAS DOS TIENEN QUE DECIR
+ * LO MISMO:
  *   1. acá, en JS, para CONTAR (el `movibles` del resumen del monitor y la cerca
  *      de `dividirEnPartes`);
- *   2. en el filtro PostgREST del UPDATE que hace la mudanza, dentro de
- *      `dividirEnPartes`: `.is("motivo", null).not("agotado", "is", true)
+ *   2. en el filtro PostgREST del UPDATE que hace la mudanza:
+ *      `.is("motivo", null).not("agotado", "is", true)
  *      .or("cantidad_despachador.is.null,cantidad_despachador.eq.0")`.
  *
  * La segunda no se puede reusar desde acá: es un filtro que evalúa la base, no
  * una función. Si se cambia una, HAY QUE CAMBIAR LAS DOS —
  * `test/despacho.envio-por-partes.test.js` las ata y falla si se separan.
+ *
+ * YA CERRADO la mudanza va por ids (ver `dividirEnPartes`), así que esta función
+ * es la ÚNICA definición del criterio y no hay nada que mantener en paralelo.
  *
  * POR QUÉ IMPORTA QUE COINCIDAN
  * Desde que partir es una acción del ADMIN y no del despachador, la decisión se
@@ -873,31 +877,69 @@ export async function dividirEnPartes(id) {
   // EL FILTRO DE ABAJO ES EL MISMO PREDICADO QUE `esMovibleAParte2`, escrito en
   // PostgREST porque lo evalúa la base. Si se cambia uno hay que cambiar el otro;
   // `test/despacho.envio-por-partes.test.js` los ata y falla si se separan.
-  const enRecoleccion = cab.estado === "En_recoleccion";
-  let mudanza = supabase
-    .from("traslados_items")
-    // `cantidad_suelta` acompaña al total (037): un renglón sin tocar no tiene
-    // nada suelto, y nada en contenedores (un contenedor nunca guarda un 0).
-    .update({
-      despacho_id: parte2.id,
-      recolectado_por: null,
-      cantidad_despachador: null,
-      cantidad_suelta: null,
-      motivo: null,
-      agotado: false,
-    })
-    .eq("despacho_id", id);
+  // `cantidad_suelta` acompaña al total (037): un renglón sin tocar no tiene nada
+  // suelto, y nada en contenedores (un contenedor nunca guarda un 0).
+  const CAMBIOS = {
+    despacho_id: parte2.id,
+    recolectado_por: null,
+    cantidad_despachador: null,
+    cantidad_suelta: null,
+    motivo: null,
+    agotado: false,
+  };
 
-  // En recolección, un motivo puesto a mano es una decisión: ese renglón se queda.
-  // Cerrado, los motivos son automáticos y no distinguen "fui y no estaba" de "no
-  // me dio el tiempo", así que el único criterio es si viajó o no.
-  if (enRecoleccion) {
-    mudanza = mudanza.is("motivo", null).not("agotado", "is", true);
+  let movidos = null;
+  let errMover = null;
+
+  if (cab.estado === "En_recoleccion") {
+    // EN RECOLECCIÓN: una sola escritura condicional, con el predicado evaluado
+    // por la base AL MOMENTO DE ESCRIBIR. Acá la carrera es real —alguien está
+    // contando mientras se parte— y mudar "los ids que se leyeron" se llevaría a
+    // la parte 2 renglones recién contados, con su cantidad adentro.
+    ({ data: movidos, error: errMover } = await supabase
+      .from("traslados_items")
+      .update(CAMBIOS)
+      .eq("despacho_id", id)
+      .is("motivo", null)
+      .not("agotado", "is", true)
+      .or("cantidad_despachador.is.null,cantidad_despachador.eq.0")
+      .select("id"));
+  } else {
+    // YA CERRADO: se mudan los ids que se leyeron arriba, de a tandas.
+    //
+    // POR QUÉ ACÁ SÍ Y EN RECOLECCIÓN NO
+    // La carrera que obliga al filtro condicional es "alguien está contando en
+    // este momento". En un traslado cerrado eso no puede pasar: nadie recolecta
+    // más. El `.eq("despacho_id", id)` se conserva igual, así que si otra pestaña
+    // ya partió este traslado, la segunda pasada no mueve nada (y el guard de
+    // abajo lo convierte en 409 en vez de en una parte 2 vacía).
+    //
+    // Y POR QUÉ NO SE REUSÓ EL FILTRO CONDICIONAL
+    // Sin los `.is("motivo", null)` y `.not("agotado", "is", true)` que lo
+    // acompañaban, PostgREST rechaza el `.or()` con "column
+    // traslados_items.cantidad_despachador does not exist" (visto en producción,
+    // 09/10/2026, traslado 47895efd). Ese filtro no se puede usar solo; por ids
+    // no hace falta y además se lee mejor.
+    //
+    // De a TANDAS porque los ids viajan en la URL: con cientos de renglones, una
+    // sola pasada rompe el largo máximo.
+    const TANDA = 50;
+    const ids = sinTocar.map((it) => it.id);
+    movidos = [];
+    for (let i = 0; i < ids.length; i += TANDA) {
+      const { data, error } = await supabase
+        .from("traslados_items")
+        .update(CAMBIOS)
+        .eq("despacho_id", id)
+        .in("id", ids.slice(i, i + TANDA))
+        .select("id");
+      if (error) {
+        errMover = error;
+        break;
+      }
+      movidos.push(...(data || []));
+    }
   }
-
-  const { data: movidos, error: errMover } = await mudanza
-    .or("cantidad_despachador.is.null,cantidad_despachador.eq.0")
-    .select("id");
 
   // Si esto falla o no movió nada, la parte 2 quedó vacía: se borra para no dejar
   // un traslado fantasma de 0 renglones en el pool de mañana.
