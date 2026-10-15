@@ -16,4 +16,14 @@ router.get("/comparar", SriCapacidadController.comparar);
 // escribe, y exige `esperados` en el body para que solo se aplique lo revisado.
 router.post("/aplicar", SriCapacidadController.aplicar);
 
+// POR QUÉ GET
+// Igual que `/comparar`, no muta nada: lista los ítems que SRI mide y no tienen
+// ninguna fila en nuestra tabla. Es seguro reintentarlo.
+router.get("/faltantes", SriCapacidadController.faltantes);
+
+// POR QUÉ POST
+// `/crear` inserta filas base nuevas en `traslados_capacidad`, así que no puede ser
+// un GET. Exige `esperados` en el body para que solo se cree lo revisado.
+router.post("/crear", SriCapacidadController.crear);
+
 export default router;

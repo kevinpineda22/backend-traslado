@@ -19,12 +19,23 @@ let compararCapacidad;
 let compararConSri;
 let aplicarConSri;
 let obtenerItemsSri;
+let calcularFaltantes;
+let faltantesConSri;
+let crearFaltantesConSri;
 let bd;
 
 before(async () => {
   bd = crearBD({ traslados_capacidad: [] });
   mock.module("../src/config/supabase.js", { exports: { supabase: bd.supabase } });
-  ({ compararCapacidad, compararConSri, aplicarConSri, obtenerItemsSri } = await import(
+  ({
+    compararCapacidad,
+    compararConSri,
+    aplicarConSri,
+    obtenerItemsSri,
+    calcularFaltantes,
+    faltantesConSri,
+    crearFaltantesConSri,
+  } = await import(
     "../src/services/sriCapacidad.service.js"
   ));
 });
@@ -599,7 +610,7 @@ test("aplicar vía controlador: 400 sin esperados y 500 con el detalle si una ta
    /comparar sigue siendo de solo lectura
    --------------------------------------------------------------------------- */
 
-test("GET /comparar no escribe y /aplicar es la única ruta que muta", async () => {
+test("GET /comparar no escribe; /aplicar y /crear son las únicas rutas que mutan", async () => {
   const { comparar } = await import("../src/controllers/sriCapacidad.controller.js");
   const { default: router } = await import("../src/routes/sriCapacidad.routes.js");
 
@@ -620,5 +631,328 @@ test("GET /comparar no escribe y /aplicar es la única ruta que muta", async () 
     .filter((l) => l.route)
     .flatMap((l) => Object.keys(l.route.methods).map((m) => `${m.toUpperCase()} ${l.route.path}`))
     .sort();
-  assert.deepEqual(rutas, ["GET /comparar", "POST /aplicar"]);
+  assert.deepEqual(rutas, ["GET /comparar", "GET /faltantes", "POST /aplicar", "POST /crear"]);
+});
+
+/* ---------------------------------------------------------------------------
+   Faltantes: ítems de SRI sin NINGUNA fila nuestra (función pura)
+   --------------------------------------------------------------------------- */
+
+test("faltantes: ítem sin filas y con total válido se crea como fila base con el total", () => {
+  const r = calcularFaltantes({
+    itemsSri: [itemSri("500", [entrada("UND", 40, 1)], "ITEM NUEVO")],
+    filasNuestras: [],
+    tienda: "GIRARDOTA LLANO",
+  });
+  assert.deepEqual(r.crear, [{ codigo_item: "500", descripcion: "ITEM NUEVO", unidad: "", capacidad: 40 }]);
+  assert.deepEqual(r.omitidos, []);
+  assert.deepEqual(r.resumen, {
+    items_sri: 1,
+    items_nuestros: 0,
+    crearian: 1,
+    sin_capacidad_sri: 0,
+    ya_existen: 0,
+  });
+  assert.equal(r.tienda, "GIRARDOTA LLANO");
+});
+
+test("faltantes: un ítem con fila base NO se crea y cuenta en ya_existen", () => {
+  const r = calcularFaltantes({
+    itemsSri: [itemSri("19", [entrada("UND", 300, 1)])],
+    filasNuestras: [filaNuestra("19", "", 100, null)],
+  });
+  assert.deepEqual(r.crear, []);
+  assert.equal(r.resumen.ya_existen, 1);
+  assert.equal(r.resumen.crearian, 0);
+});
+
+test("faltantes: un ítem con SOLO una fila con UM (sin base) NO se crea: es del flujo comparar", () => {
+  const r = calcularFaltantes({
+    itemsSri: [itemSri("25588", [entrada("P15", 900, 15)])],
+    filasNuestras: [filaNuestra("25588", "P15", 40, 15)],
+  });
+  assert.deepEqual(r.crear, []);
+  assert.deepEqual(r.omitidos, []);
+  assert.equal(r.resumen.ya_existen, 1);
+});
+
+test("faltantes: total 0, negativo, ausente o ilegible se omite con sin_capacidad_sri", () => {
+  const sin = (item, total) => ({ item, descripcion: `D${item}`, capacidad_total_tienda: total, capacidades_por_unidad_medida: [] });
+  const r = calcularFaltantes({
+    itemsSri: [sin("1", 0), sin("2", -5), sin("3", undefined), sin("4", "abc"), sin("5", null), sin("6", NaN)],
+    filasNuestras: [],
+  });
+  assert.deepEqual(r.crear, []);
+  assert.equal(r.omitidos.length, 6);
+  assert.ok(r.omitidos.every((o) => o.motivo === "sin_capacidad_sri"));
+  assert.equal(r.resumen.sin_capacidad_sri, 6);
+  assert.equal(r.resumen.crearian, 0);
+});
+
+test("faltantes: un ítem medido en varias UM genera UNA sola fila base con el TOTAL", () => {
+  const r = calcularFaltantes({
+    itemsSri: [itemSri("901", [entrada("P3", 54, 3), entrada("UND", 36, 1)])],
+    filasNuestras: [],
+  });
+  assert.equal(r.crear.length, 1);
+  assert.deepEqual(r.crear[0], { codigo_item: "901", descripcion: "ITEM 901", unidad: "", capacidad: 90 });
+  assert.ok(r.crear.every((c) => c.unidad === ""), "nunca una fila con UM");
+});
+
+test("faltantes: sin `capacidad_total_tienda` legible, suma las rebanadas como la comparación", () => {
+  // SRI particiona por ubicación, así que la suma de las rebanadas ES el total. Si
+  // acá se omitiera el ítem, quedaría afuera de este flujo y adentro del de
+  // comparar, que sí hace este respaldo.
+  const sinTotal = (item, entradas, total) => ({
+    item,
+    descripcion: `D${item}`,
+    capacidad_total_tienda: total,
+    capacidades_por_unidad_medida: entradas,
+  });
+  const r = calcularFaltantes({
+    itemsSri: [
+      sinTotal("50", [entrada("P3", 54, 3), entrada("UND", 36, 1)], undefined),
+      sinTotal("51", [entrada("UND", 12, 1)], ""),
+      sinTotal("52", [entrada("UND", 7, 1)], "abc"),
+    ],
+    filasNuestras: [],
+  });
+  assert.deepEqual(
+    r.crear.map((c) => [c.codigo_item, c.capacidad]),
+    [["50", 90], ["51", 12], ["52", 7]],
+  );
+  assert.equal(r.resumen.sin_capacidad_sri, 0);
+  assert.ok(r.crear.every((c) => c.unidad === ""), "sigue siendo solo fila base");
+});
+
+test("el total de SRI se lee IGUAL en los dos flujos: una unidad repetida no cuenta doble", () => {
+  // Sin total declarado, el total sale de sumar las rebanadas. Si SRI repitiera la
+  // misma unidad dentro del ítem, sumar el arreglo crudo daría 120 en lugar de 60 e
+  // inflaría la capacidad. `totalTiendaSri` deduplica por unidad, y los DOS flujos
+  // tienen que llegar al mismo número: comparar lo usa para la fila base y faltantes
+  // para la fila que crea.
+  const item = {
+    item: "70",
+    descripcion: "UNIDAD REPETIDA",
+    capacidades_por_unidad_medida: [entrada("P6", 60, 6), entrada("P6", 60, 6)],
+  };
+
+  const f = calcularFaltantes({ itemsSri: [item], filasNuestras: [] });
+  assert.equal(f.crear.length, 1);
+  assert.equal(f.crear[0].capacidad, 60, "faltantes: la unidad repetida cuenta una vez");
+
+  const c = compararCapacidad([item], [filaNuestra("70", "", 60, null)]);
+  assert.equal(c.resumen.cambiarian, 0, "comparar llega al mismo 60 y no propone cambio");
+  assert.equal(c.resumen.iguales, 1);
+});
+
+test("faltantes: ítem repetido cuyo primer total es ilegible toma el total válido del segundo", () => {
+  // La rama más sutil del cálculo: el primer registro no sirve, el repetido sí.
+  const r = calcularFaltantes({
+    itemsSri: [
+      { item: "80", descripcion: "PRIMERO ILEGIBLE", capacidad_total_tienda: "abc", capacidades_por_unidad_medida: [] },
+      { item: "0080", descripcion: "SEGUNDO VALIDO", capacidad_total_tienda: 18, capacidades_por_unidad_medida: [] },
+    ],
+    filasNuestras: [],
+  });
+  assert.equal(r.crear.length, 1);
+  assert.equal(r.crear[0].capacidad, 18);
+  assert.equal(r.resumen.sin_capacidad_sri, 0, "no queda omitido por el primer registro");
+  assert.equal(r.resumen.items_sri, 1, "sigue siendo un solo ítem");
+});
+
+test("faltantes: sin total declarado Y sin rebanadas, se omite (no se inventa un 0)", () => {
+  const r = calcularFaltantes({
+    itemsSri: [{ item: "60", descripcion: "D60", capacidades_por_unidad_medida: [] }],
+    filasNuestras: [],
+  });
+  assert.deepEqual(r.crear, []);
+  assert.equal(r.omitidos.length, 1);
+  assert.equal(r.omitidos[0].motivo, "sin_capacidad_sri");
+});
+
+test("faltantes: códigos que difieren solo por ceros matchean y no duplican inserts", () => {
+  const r = calcularFaltantes({
+    itemsSri: [itemSri("19", [entrada("UND", 300, 1)]), itemSri("0000020", [entrada("UND", 10, 1)])],
+    filasNuestras: [filaNuestra("0000019", "", 100, null)],
+  });
+  assert.deepEqual(r.crear.map((c) => c.codigo_item), ["20"]);
+  assert.equal(r.resumen.ya_existen, 1);
+  assert.equal(r.resumen.items_nuestros, 1);
+});
+
+test("faltantes: SRI repetido (incluso con ceros) produce un solo insert", () => {
+  const r = calcularFaltantes({
+    itemsSri: [itemSri("77", [entrada("UND", 10, 1)]), itemSri("0077", [entrada("UND", 99, 1)])],
+    filasNuestras: [],
+  });
+  assert.equal(r.crear.length, 1);
+  assert.equal(r.crear[0].capacidad, 10);
+  assert.equal(r.resumen.items_sri, 1);
+});
+
+test("faltantes: redondea igual que la comparación", () => {
+  const r = calcularFaltantes({
+    itemsSri: [{ item: "8", descripcion: "X", capacidad_total_tienda: 10.123456789, capacidades_por_unidad_medida: [] }],
+    filasNuestras: [],
+  });
+  assert.equal(r.crear[0].capacidad, 10.1235);
+});
+
+/* ---------------------------------------------------------------------------
+   POST /crear: inserta, nunca pisa
+   --------------------------------------------------------------------------- */
+
+function escenarioCrear() {
+  bd.tablas.traslados_capacidad = [
+    { codigo_item: "0000019", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "EXISTE", updated_at: "viejo" },
+    { codigo_item: "25588", unidad: "P15", capacidad: 40, factor: 15, fijo: false, descripcion: "SOLO UM", updated_at: "viejo" },
+  ];
+  bd.log.length = 0;
+  bd.hooks.antesDe = null;
+  process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
+  const items = [
+    itemSri("19", [entrada("UND", 300, 1)]),
+    itemSri("25588", [entrada("P15", 900, 15)]),
+    itemSri("600", [entrada("UND", 12, 1)], "NUEVO A"),
+    itemSri("601", [entrada("P3", 54, 3), entrada("UND", 36, 1)], "NUEVO B"),
+    itemSri("602", [entrada("UND", 0, 1)], "SIN CAPACIDAD"),
+  ];
+  return { fetchImpl: async () => pagina(items, 1) };
+}
+
+test("faltantesConSri solo lee y arma el reporte", async () => {
+  const { fetchImpl } = escenarioCrear();
+  const r = await faltantesConSri({ fetchImpl });
+  assert.deepEqual(r.crear.map((c) => [c.codigo_item, c.capacidad]), [["600", 12], ["601", 90]]);
+  assert.deepEqual(r.omitidos.map((o) => o.codigo_item), ["602"]);
+  assert.equal(r.resumen.ya_existen, 2);
+  assert.ok(bd.log.length > 0 && bd.log.every((op) => op.op === "select"));
+});
+
+test("crear con `esperados` que no coincide responde 409 nombrando ambos números y no escribe", async () => {
+  const { fetchImpl } = escenarioCrear();
+  await assert.rejects(crearFaltantesConSri({ esperados: 5, fetchImpl }), (err) => {
+    assert.equal(err.statusCode, 409);
+    // Que los dígitos aparezcan no alcanza: tienen que estar en el orden correcto,
+    // o el mensaje podría decir al revés cuál se esperaba y cuál hay.
+    assert.match(err.message, /esperabas 5 filas a crear y ahora hay 2/);
+    return true;
+  });
+  assert.equal(escrituras().length, 0);
+  assert.equal(bd.tablas.traslados_capacidad.length, 2);
+});
+
+test("crear con `esperados` inválido responde 400 y no escribe", async () => {
+  const { fetchImpl } = escenarioCrear();
+  for (const esperados of [null, "2", 2.5, -1]) {
+    await assert.rejects(crearFaltantesConSri({ esperados, fetchImpl }), (err) => err.statusCode === 400);
+  }
+  assert.equal(escrituras().length, 0);
+});
+
+test("crear con `esperados` correcto inserta solo filas base nuevas y no toca las existentes", async () => {
+  const { fetchImpl } = escenarioCrear();
+  const antes = structuredClone(bd.tablas.traslados_capacidad);
+  const r = await crearFaltantesConSri({ esperados: 2, fetchImpl });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.creados, 2);
+  assert.deepEqual(r.fallidos, []);
+  assert.deepEqual(r.escritos.map((e) => [e.codigo_item, e.unidad, e.capacidad]), [["600", "", 12], ["601", "", 90]]);
+
+  // Solo inserts: nunca update ni upsert.
+  assert.deepEqual([...new Set(escrituras().map((op) => op.op))], ["insert"]);
+
+  const nuevas = bd.tablas.traslados_capacidad.slice(2);
+  assert.equal(nuevas.length, 2);
+  for (const f of nuevas) {
+    assert.equal(f.unidad, "");
+    assert.equal(f.factor, null);
+    assert.ok(!("multi_um" in f) && !("fijo" in f), "multi_um y fijo quedan al default de la columna");
+    assert.ok(!Number.isNaN(Date.parse(f.updated_at)));
+  }
+  assert.equal(nuevas[1].descripcion, "NUEVO B");
+  assert.deepEqual(bd.tablas.traslados_capacidad.slice(0, 2), antes);
+});
+
+test("crear SIN `esperados` responde 400 y no escribe: la confirmación es obligatoria", async () => {
+  const { fetchImpl } = escenarioCrear();
+  await assert.rejects(crearFaltantesConSri({ fetchImpl }), (err) => {
+    assert.equal(err.statusCode, 400);
+    assert.match(err.message, /esperados/);
+    return true;
+  });
+  // Un POST con el body vacío no puede alcanzar para cargar filas que nadie miró.
+  // Ni una operación: la validación corta antes de leer SRI y antes de la tabla.
+  assert.deepEqual(bd.log, [], "no tocó la base");
+});
+
+test("crear aborta sin escribir NADA si un código a insertar ya tiene fila (guarda)", async () => {
+  const { fetchImpl } = escenarioCrear();
+  // La comparación real nunca produce esto; se fuerza un cálculo roto que incluye
+  // el ítem 19 (ya existe como "0000019") junto a uno legítimo.
+  const faltantes = async (args) => {
+    const real = await faltantesConSri({ ...args, fetchImpl });
+    return { ...real, crear: [...real.crear, { codigo_item: "19", descripcion: "X", unidad: "", capacidad: 300 }] };
+  };
+  await assert.rejects(crearFaltantesConSri({ esperados: 3, faltantes }), (err) => {
+    // 409 y no 500: tras releer no se distingue un cálculo roto de alguien que
+    // cargó el ítem en el medio, y mandar al operario a buscar un bug es peor.
+    assert.equal(err.statusCode, 409);
+    assert.match(err.message, /19/);
+    return true;
+  });
+  assert.equal(escrituras().length, 0);
+  assert.equal(bd.tablas.traslados_capacidad.length, 2);
+});
+
+test("crear: un conflicto de la base se reporta en fallidos, no se oculta", async () => {
+  const { fetchImpl } = escenarioCrear();
+  bd.hooks.antesDe = async (_t, op) =>
+    op === "insert" ? { error: { message: "duplicate key value violates unique constraint" } } : null;
+  const r = await crearFaltantesConSri({ esperados: 2, fetchImpl });
+  bd.hooks.antesDe = null;
+  assert.equal(r.ok, false);
+  assert.equal(r.creados, 0);
+  assert.equal(r.fallidos.length, 2);
+  assert.match(r.fallidos[0].motivo, /duplicate key/);
+  assert.equal(r.no_intentados, 0);
+});
+
+test("crear vía controlador: 200 al crear y 500 con el detalle si el insert falla", async () => {
+  const { crear, faltantes } = await import("../src/controllers/sriCapacidad.controller.js");
+  const respuestaFalsa = () => {
+    const res = { codigo: 200 };
+    res.status = (c) => ((res.codigo = c), res);
+    res.json = (b) => ((res.cuerpo = b), res);
+    return res;
+  };
+  const { fetchImpl } = escenarioCrear();
+  const original = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    const rep = respuestaFalsa();
+    await faltantes({ query: {} }, rep, (e) => assert.fail(e.message));
+    assert.equal(rep.cuerpo.crear.length, 2);
+    assert.equal(escrituras().length, 0);
+
+    bd.hooks.antesDe = async (_t, op) => (op === "insert" ? { error: { message: "falla" } } : null);
+    const fallo = respuestaFalsa();
+    await crear({ body: { esperados: 2 } }, fallo, (e) => assert.fail(e.message));
+    bd.hooks.antesDe = null;
+    assert.equal(fallo.codigo, 500);
+    assert.equal(fallo.cuerpo.fallidos.length, 2);
+
+    const bueno = respuestaFalsa();
+    await crear({ body: { esperados: 2 } }, bueno, (e) => assert.fail(e.message));
+    assert.equal(bueno.codigo, 200);
+    assert.equal(bueno.cuerpo.creados, 2);
+
+    let error;
+    await crear({ body: { esperados: 99 } }, respuestaFalsa(), (e) => (error = e));
+    assert.equal(error.statusCode, 409);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

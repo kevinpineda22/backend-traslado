@@ -1,4 +1,4 @@
-import { listar, normCodigo, actualizarCapacidadLote } from "../models/Capacidad.model.js";
+import { listar, normCodigo, actualizarCapacidadLote, crearCapacidadLote } from "../models/Capacidad.model.js";
 import { createError } from "../middleware/errorHandler.js";
 
 /* =============================================
@@ -235,6 +235,28 @@ const claveCodigoNumerica = (c) => {
   return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
 };
 
+// POR QUÉ UN SOLO LECTOR DEL TOTAL PARA LOS DOS FLUJOS
+// `compararCapacidad` y `calcularFaltantes` necesitan el MISMO número: cuánto cabe
+// del ítem en toda la tienda. SRI particiona la capacidad por ubicación, así que si
+// no trae `capacidad_total_tienda` legible, la suma de las rebanadas es equivalente.
+//
+// Las rebanadas se deduplican por unidad ANTES de sumar. Si SRI repitiera la misma
+// unidad dentro de un ítem, sumar el arreglo crudo la contaría dos veces e inflaría
+// la capacidad; un total inflado es peor que uno ausente, porque se escribe sin que
+// nada avise. Tener este cálculo en dos lugares ya hizo que los flujos divergieran
+// una vez: por eso vive acá y no dentro de cada uno.
+function totalTiendaSri(item) {
+  const declarado = item?.capacidad_total_tienda;
+  const n = declarado === null || declarado === undefined || declarado === "" ? NaN : num(declarado);
+  if (Number.isFinite(n)) return n;
+
+  const porUnidad = new Map();
+  for (const entrada of item?.capacidades_por_unidad_medida || []) {
+    porUnidad.set(claveUnidadSri(entrada.unidad_medida), entrada);
+  }
+  return [...porUnidad.values()].reduce((acc, e) => acc + (num(e.capacidad_total) || 0), 0);
+}
+
 /**
  * Cruza lo que mide SRI con lo que tenemos y arma el reporte. No escribe nada.
  *
@@ -308,13 +330,9 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
       destino.porUnidad.set(claveUnidadSri(entrada.unidad_medida), entrada);
     }
     // Total consolidado del ítem: es lo que se compara contra nuestra fila base.
-    // Si SRI no lo trajera, la suma de las rebanadas es equivalente (SRI particiona).
+    // Lo resuelve `totalTiendaSri`, el mismo lector que usa el flujo de faltantes.
     if (destino.totalTienda === null) {
-      const declarado = item.capacidad_total_tienda;
-      const total = declarado === null || declarado === undefined || declarado === "" ? NaN : num(declarado);
-      destino.totalTienda = Number.isFinite(total)
-        ? total
-        : [...destino.porUnidad.values()].reduce((acc, e) => acc + (num(e.capacidad_total) || 0), 0);
+      destino.totalTienda = totalTiendaSri(item);
     }
   }
 
@@ -622,6 +640,192 @@ export async function aplicarConSri({ tienda, esperados, fetchImpl, comparar = c
     aplicado_en: ahora.toISOString(),
     esperados,
     aplicados: escritos.length,
+    resumen: reporte.resumen,
+    escritos,
+    fallidos,
+    ...(fallidos.length > 0 && { no_intentados: noIntentados }),
+  };
+}
+
+/* =============================================
+   FALTANTES: ítems que SRI mide y NO tienen ninguna fila nuestra.
+
+   Segundo flujo de dos pasos, paralelo a comparar/aplicar:
+     - `faltantesConSri` (solo lee) arma el reporte de lo que se crearía;
+     - `crearFaltantesConSri` (escribe) inserta exactamente ese reporte.
+   ============================================= */
+
+// POR QUÉ SOLO SE CREA LA FILA BASE (unidad "") Y NUNCA UNA FILA CON UM
+// En siesa.service.js (alrededor de las líneas 441-447), un ítem que tiene
+// CUALQUIER fila con UM se emite como una línea de sugerido POR CADA UM y su fila
+// base se ignora. Si aquí se inventaran filas con UM a partir de cómo SRI reparte
+// la góndola por ubicaciones, la pantalla de sugeridos de muchos ítems cambiaría
+// sin aviso. Asignar una UM es una decisión humana (ver
+// sql/026_capacidad_multi_um_permitido.sql). Por eso cada ítem candidato recibe
+// UNA sola fila base con el total de SRI.
+//
+// POR QUÉ SE OMITE UN TOTAL 0 O ILEGIBLE
+// Una capacidad 0 no saca al ítem del sugerido: lo deja en el piso de solo consumo
+// (`calcularSugeridoABC` en sugerido.service.js con `capacidad: 0` da
+// consumo × cadencia). Escribir un 0 dejaría la góndola subabastecida en silencio
+// y además parecería un valor puesto a propósito. Es preferible no crear la fila y
+// dejar el ítem listado en `omitidos`.
+
+/**
+ * Calcula qué filas base habría que crear. Pura: sin red y sin base.
+ *
+ * Un ítem es candidato SOLO si no tiene NINGUNA fila nuestra (base o con UM) tras
+ * normalizar el código. Los ítems con filas son trabajo del flujo comparar/aplicar.
+ *
+ * `items_sri` e `items_nuestros` cuentan ÍTEMS distintos por código normalizado.
+ *
+ * @param {{itemsSri: Array<object>, filasNuestras: Array<object>, tienda?: string}} datos
+ */
+export function calcularFaltantes({ itemsSri, filasNuestras, tienda } = {}) {
+  const codigosNuestros = new Set();
+  for (const fila of filasNuestras || []) {
+    const codigo = normCodigo(fila.codigo_item);
+    if (codigo) codigosNuestros.add(codigo);
+  }
+
+  // Índice de SRI por código normalizado. Si SRI repite un ítem no se generan dos
+  // inserts: se conserva el primero, salvo que su total sea ilegible y el repetido
+  // sí traiga uno válido.
+  // Solo sirve un total legible y mayor que 0; el resto se omite (ver el bloque de
+  // arriba). El total lo lee `totalTiendaSri`, compartido con `compararCapacidad`.
+  const totalValido = (item) => {
+    const total = totalTiendaSri(item);
+    return Number.isFinite(total) && total > 0 ? total : null;
+  };
+  const sriPorCodigo = new Map();
+  for (const item of itemsSri || []) {
+    const codigo = normCodigo(item.item);
+    if (!codigo) continue;
+    const total = totalValido(item);
+    const previo = sriPorCodigo.get(codigo);
+    if (!previo) {
+      sriPorCodigo.set(codigo, { descripcion: item.descripcion ?? "", total });
+    } else if (previo.total === null && total !== null) {
+      sriPorCodigo.set(codigo, { descripcion: item.descripcion ?? previo.descripcion, total });
+    }
+  }
+
+  const crear = [];
+  const omitidos = [];
+  let yaExisten = 0;
+
+  for (const [codigo, sri] of sriPorCodigo) {
+    if (codigosNuestros.has(codigo)) {
+      yaExisten += 1;
+      continue;
+    }
+    if (sri.total === null) {
+      omitidos.push({ codigo_item: codigo, descripcion: sri.descripcion, motivo: "sin_capacidad_sri" });
+      continue;
+    }
+    crear.push({ codigo_item: codigo, descripcion: sri.descripcion, unidad: "", capacidad: redondear(sri.total) });
+  }
+
+  const porCodigo = (a, b) =>
+    claveCodigoNumerica(a.codigo_item) - claveCodigoNumerica(b.codigo_item) ||
+    String(a.codigo_item).localeCompare(String(b.codigo_item));
+  crear.sort(porCodigo);
+  omitidos.sort(porCodigo);
+
+  return {
+    tienda: tienda ?? tiendaPorDefecto(),
+    resumen: {
+      items_sri: sriPorCodigo.size,
+      items_nuestros: codigosNuestros.size,
+      crearian: crear.length,
+      sin_capacidad_sri: omitidos.length,
+      ya_existen: yaExisten,
+    },
+    crear,
+    omitidos,
+  };
+}
+
+/**
+ * Reporte de faltantes. Solo lee: SRI y `traslados_capacidad`.
+ */
+export async function faltantesConSri({ tienda, fetchImpl, filas: filasLeidas } = {}) {
+  const tiendaFinal = String(tienda || "").trim() || tiendaPorDefecto();
+  const itemsSri = await obtenerItemsSri({ tienda: tiendaFinal, fetchImpl });
+  const filasNuestras = filasLeidas ?? (await listar());
+  return calcularFaltantes({ itemsSri, filasNuestras, tienda: tiendaFinal });
+}
+
+/**
+ * Crea en `traslados_capacidad` EXACTAMENTE las filas de `crear` del reporte de
+ * faltantes. El reporte se recalcula aquí: nunca se confía en una lista del cliente.
+ *
+ * @param {{tienda?: string, esperados?: unknown, fetchImpl?: Function, faltantes?: Function, leerFilas?: Function, ahora?: Date}} opciones
+ *   `faltantes` y `leerFilas` son inyectables solo para forzar casos en tests.
+ */
+export async function crearFaltantesConSri({
+  tienda,
+  esperados,
+  fetchImpl,
+  faltantes = faltantesConSri,
+  leerFilas = listar,
+  ahora = new Date(),
+} = {}) {
+  // POR QUÉ `esperados` ES OBLIGATORIO
+  // Mismo criterio que `aplicarConSri`: esta ruta escribe. Sin el número que la
+  // persona revisó no hay forma de distinguir "creá las filas que vi" de "creá lo
+  // que haya ahora", y un POST con el body vacío alcanzaría para cargar cientos de
+  // filas sin que nadie las haya mirado.
+  if (typeof esperados !== "number" || !Number.isInteger(esperados) || esperados < 0) {
+    throw createError(
+      400,
+      "Falta `esperados` en el body: debe ser un entero con la cantidad de filas del reporte que revisaste.",
+    );
+  }
+
+  const reporte = await faltantes({ tienda, fetchImpl });
+  const crear = reporte.crear;
+
+  // Mismo contrato que `aplicarConSri`: si lo de hoy no es lo que se revisó, no se
+  // escribe nada y se vuelve a consultar.
+  if (crear.length !== esperados) {
+    throw createError(
+      409,
+      `El reporte cambió desde que lo revisaste: esperabas ${esperados} filas a crear y ahora hay ${crear.length}. No se escribió nada; vuelve a consultar /faltantes.`,
+    );
+  }
+
+  // POR QUÉ UNA GUARDA ADEMÁS DE `.insert()`
+  // El insert ya rechaza una clave repetida, pero solo cubre la clave exacta
+  // (código sin normalizar y unidad ""). Esta guarda relee la tabla y exige que
+  // NINGÚN código a insertar tenga fila alguna, con el mismo criterio de
+  // normalización que el reporte. Se relee en lugar de reutilizar la lectura del
+  // reporte para cubrir a quien cargó el ítem entre la revisión y la escritura. Si
+  // falla, no se escribe ni una fila.
+  //
+  // RESPONDE 409 Y NO 500
+  // Tras releer no hay forma de distinguir un cálculo mal hecho de esa carrera, y la
+  // carrera es la causa esperable. Decirle "el software está roto" a quien solo tiene
+  // que volver a consultar el reporte es mandarlo a buscar un problema que no existe.
+  const existentes = new Set((await leerFilas()).map((f) => normCodigo(f.codigo_item)));
+  const infractores = [...new Set(crear.map((c) => normCodigo(c.codigo_item)).filter((c) => existentes.has(c)))];
+  if (infractores.length > 0) {
+    throw createError(
+      409,
+      `No se escribió nada: ${infractores.length} ítem(s) del reporte ya tienen capacidad cargada (${infractores.join(", ")}). Es probable que alguien los haya cargado desde que revisaste; vuelve a consultar el reporte de faltantes.`,
+    );
+  }
+
+  const { escritos, fallidos, no_intentados: noIntentados } = await crearCapacidadLote(
+    crear.map((c) => ({ codigo_item: c.codigo_item, capacidad: c.capacidad, descripcion: c.descripcion })),
+  );
+
+  return {
+    ok: fallidos.length === 0,
+    tienda: reporte.tienda,
+    creado_en: ahora.toISOString(),
+    esperados,
+    creados: escritos.length,
     resumen: reporte.resumen,
     escritos,
     fallidos,

@@ -221,6 +221,70 @@ export async function actualizarCapacidadLote(filas) {
 }
 
 /**
+ * Crea filas BASE nuevas (unidad "") en `traslados_capacidad`. Nunca modifica una
+ * fila existente.
+ *
+ * POR QUÉ `.insert()` Y NO `.upsert()`
+ * Esta función es estructuralmente incapaz de sobrescribir una capacidad: si la
+ * clave primaria (codigo_item, unidad) ya existe, la base responde con un error de
+ * conflicto y la tanda completa se rechaza. `upsertBulk` ya cubre el caso de
+ * sobrescribir; este camino debe fallar de forma visible antes que reemplazar en
+ * silencio un valor que alguien cargó a mano.
+ *
+ * Solo se envían `codigo_item`, `unidad`, `capacidad`, `descripcion`, `factor` y
+ * `updated_at`. `multi_um` y `fijo` quedan en el valor por defecto de la columna.
+ *
+ * Una tanda es una sola sentencia INSERT y es atómica: si falla, ninguna de sus
+ * filas queda escrita. Tras una tanda fallida se frena y las siguientes no se
+ * intentan, para no dejar la tabla a medias sin que nadie lo sepa.
+ *
+ * Nunca lanza por un fallo de la base: devuelve qué se escribió y qué falló.
+ *
+ * @param {Array<{codigo_item:string, capacidad:number, descripcion?:string}>} filas
+ * @returns {Promise<{escritos: Array<object>, fallidos: Array<{codigo_item:string, unidad:string, capacidad:number, motivo:string}>, no_intentados: number}>}
+ */
+export async function crearCapacidadLote(filas) {
+  const ts = new Date().toISOString();
+  const aInsertar = (filas || []).map((f) => ({
+    codigo_item: normCodigo(f.codigo_item),
+    unidad: "",
+    capacidad: num(f.capacidad),
+    descripcion: f.descripcion != null ? String(f.descripcion).trim() : null,
+    factor: null,
+    updated_at: ts,
+  }));
+
+  const CHUNK = 500;
+  const escritos = [];
+  const fallidos = [];
+  let noIntentados = 0;
+
+  for (let i = 0; i < aInsertar.length; i += CHUNK) {
+    const chunk = aInsertar.slice(i, i + CHUNK);
+    let motivo = null;
+    try {
+      const { error } = await supabase.from(TABLE).insert(chunk);
+      if (error) motivo = error.message || "error desconocido";
+    } catch (err) {
+      motivo = err?.message || "error desconocido";
+    }
+
+    if (motivo) {
+      for (const fila of chunk) {
+        fallidos.push({ codigo_item: fila.codigo_item, unidad: fila.unidad, capacidad: fila.capacidad, motivo });
+      }
+      noIntentados = aInsertar.length - i - chunk.length;
+      break;
+    }
+    for (const fila of chunk) {
+      escritos.push({ codigo_item: fila.codigo_item, unidad: fila.unidad, capacidad: fila.capacidad });
+    }
+  }
+
+  return { escritos, fallidos, no_intentados: noIntentados };
+}
+
+/**
  * Marca (o desmarca) que un ítem se puede pedir en VARIAS UM a la vez.
  *
  * Escribe en TODAS las filas del ítem, no en una: el dato es del producto y la
