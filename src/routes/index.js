@@ -7,6 +7,7 @@ import configRoutes from "./config.routes.js";
 import alertasRoutes from "./alertas.routes.js";
 import flotaRoutes from "./flota.routes.js";
 import integracionesRoutes from "./integraciones.routes.js";
+import sriCapacidadRoutes from "./sriCapacidad.routes.js";
 import { verificarEmail } from "../services/email.service.js";
 import { sandboxOn } from "../config/sandbox.js";
 
@@ -19,6 +20,10 @@ router.use("/capacidad", capacidadRoutes);
 router.use("/config", configRoutes);
 router.use("/alertas", alertasRoutes);
 router.use("/flota", flotaRoutes);
+
+// Capacidad de góndola medida por SRI. Hoy solo expone el dry-run (lectura y
+// reporte); no hay ruta que escriba en `traslados_capacidad`.
+router.use("/sri/capacidad", sriCapacidadRoutes);
 
 // Consumo por OTRAS ÁREAS (Inventarios, Compras). Exige API key y es solo lectura.
 // Va separado del resto porque su contrato es público y estable: los endpoints de

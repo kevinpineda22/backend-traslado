@@ -13,7 +13,9 @@ const num = (v) => Number(v) || 0;
 // El Excel suele traer el código con ceros a la izquierda ("0000019"), pero el
 // codigo_item del snapshot es numérico sin ceros ("19"). Normalizamos sacando
 // los ceros de adelante para que la capacidad matchee con el sugerido.
-const normCodigo = (c) => {
+// Se exporta para que la comparación con SRI use EXACTAMENTE la misma regla y no
+// una copia que pueda divergir.
+export const normCodigo = (c) => {
   const s = String(c ?? "").trim();
   return s.replace(/^0+/, "") || s;
 };
@@ -165,6 +167,57 @@ export async function actualizar(codigoItem, capacidad, descripcion, unidad, fac
     .single();
   if (error) throw new Error(`Error al actualizar capacidad: ${error.message}`);
   return data;
+}
+
+/**
+ * Escribe UNA tanda de capacidades, fila por fila y por CLAVE PRIMARIA.
+ *
+ * POR QUÉ UPDATE POR CLAVE Y NO UPSERT
+ * Un upsert crearía en silencio una fila que desapareció entre la lectura y la
+ * escritura (y con columnas incompletas), cuando lo correcto es avisar que ya no
+ * existe. El update solo toca una fila que existe; si afecta 0 filas, es un fallo
+ * explícito. Y solo se pisan `capacidad` y `updated_at`: ni `fijo`, ni `factor`,
+ * ni la descripción.
+ *
+ * POR QUÉ SOLO `.eq()` SOBRE LA CLAVE
+ * Nada de `.or()` ni `.in()` sobre columnas compuestas: PostgREST no parsea
+ * algunos de esos filtros (ya hubo un 500 en producción por eso) y el Supabase en
+ * memoria de los tests no reproduce ese parser, así que un test verde no lo
+ * probaría. Dos `.eq()` por fila es aburrido y funciona.
+ *
+ * Nunca lanza por una fila: devuelve qué se escribió y qué falló, para que quien
+ * orquesta pueda frenar y reportar con exactitud.
+ *
+ * @param {Array<{codigo_item:string, unidad:string, capacidad:number}>} filas
+ * @returns {Promise<{escritas: Array<object>, fallidas: Array<object>}>}
+ */
+export async function actualizarCapacidadLote(filas) {
+  const ts = new Date().toISOString();
+  const resultados = await Promise.all(
+    filas.map(async (f) => {
+      try {
+        const { data, error } = await supabase
+          .from(TABLE)
+          .update({ capacidad: f.capacidad, updated_at: ts })
+          .eq("codigo_item", f.codigo_item)
+          .eq("unidad", f.unidad)
+          .select("codigo_item");
+        if (error) return { f, motivo: error.message };
+        if (!data || data.length !== 1) {
+          return { f, motivo: `se esperaba actualizar 1 fila y se actualizaron ${data?.length || 0}` };
+        }
+        return { f };
+      } catch (err) {
+        return { f, motivo: err?.message || "error desconocido" };
+      }
+    }),
+  );
+  return {
+    escritas: resultados.filter((r) => !r.motivo).map((r) => r.f),
+    fallidas: resultados
+      .filter((r) => r.motivo)
+      .map((r) => ({ codigo_item: r.f.codigo_item, unidad: r.f.unidad, motivo: r.motivo })),
+  };
 }
 
 /**
