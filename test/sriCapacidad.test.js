@@ -146,6 +146,30 @@ test("ítem con varias rebanadas genera el aviso de total consolidado", () => {
   // número contra las góndolas, así que la palabra importa.
   assert.match(aviso.aviso, /2 unidades de medida distintas/);
   assert.match(aviso.aviso, /P3, UND/);
+  // Ese aviso sobrevive al recorte porque esta fila SÍ cambia (36 -> 90).
+  assert.equal(r.cambios.length, 1);
+});
+
+test("el aviso de total consolidado NO sale si esa fila no cambia", () => {
+  // Mismo ítem, pero ya con la capacidad correcta: no hay nada propuesto, así que
+  // un aviso que habla de "la capacidad propuesta" estaría describiendo algo que no
+  // está pasando. Es lo que llenaba la pantalla de 36 avisos sobre 2 cambios.
+  const r = compararCapacidad([item901()], [filaNuestra("901", "", 90, null)]);
+  assert.equal(r.cambios.length, 0);
+  assert.equal(r.resumen.iguales, 1);
+  assert.deepEqual(r.avisos, []);
+});
+
+test("un factor discrepante SÍ sale aunque la fila no cambie: habla del dato, no de la propuesta", () => {
+  // Guarda de regresión del recorte de avisos. El factor nuestro (15) y el de SRI
+  // (12) no coinciden, y eso hay que saberlo aunque la capacidad ya esté bien.
+  const r = compararCapacidad(
+    [itemSri("25588", [entrada("P15", 900, 12)])],
+    [filaNuestra("25588", "P15", 60, 15)],
+  );
+  assert.equal(r.cambios.length, 0, "900/15 = 60, que es lo que ya tenemos");
+  assert.equal(r.avisos.length, 1);
+  assert.equal(r.avisos[0].tipo, "factor_discrepante");
 });
 
 test("SRI solo con rebanadas con UM (sin UND) y nosotros solo con fila base: compara contra el total", () => {

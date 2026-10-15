@@ -412,6 +412,8 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
         avisos.push({
           codigo_item: codigo,
           unidad,
+          // Problema de datos, no explicación de un cambio: se muestra siempre.
+          tipo: "filas_duplicadas",
           aviso: `Hay ${filasDelPar.length} filas que normalizan al mismo ítem y unidad; se reporta cada una.`,
         });
       }
@@ -435,6 +437,7 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
           avisos.push({
             codigo_item: fila.codigo_item,
             unidad: unidadFila,
+            tipo: "factor_discrepante",
             aviso: `Factor discrepante: el nuestro es ${factor} y el de SRI es ${factorSri}. Se usó el nuestro para dividir.`,
           });
         }
@@ -442,6 +445,7 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
           avisos.push({
             codigo_item: fila.codigo_item,
             unidad: unidadFila,
+            tipo: "factor_variable",
             aviso: `SRI marca el factor como variable (entre ${entrada.factor_min} y ${entrada.factor_max}); la conversión es aproximada.`,
           });
         }
@@ -452,6 +456,7 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
           avisos.push({
             codigo_item: fila.codigo_item,
             unidad: unidadFila,
+            tipo: "sin_capacidad_sri",
             aviso:
               Number.isFinite(totalSri) && totalSri === 0
                 ? "SRI informa capacidad_total 0; no se propone pisar la capacidad actual con 0."
@@ -472,6 +477,7 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
             // `cantidad_ubicaciones`). Llamarlas "ubicaciones" haría que quien
             // revisa el reporte compare este número contra el de góndolas y
             // concluya que algo no cuadra.
+            tipo: "suma_um",
             aviso: `SRI mide este ítem en ${sri.porUnidad.size} unidades de medida distintas (${[...sri.porUnidad.keys()].join(", ")}); la capacidad propuesta es la SUMA de todas.`,
           });
         }
@@ -483,6 +489,7 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
           avisos.push({
             codigo_item: fila.codigo_item,
             unidad: unidadFila,
+            tipo: "propuesta_no_entera",
             aviso: `La capacidad propuesta (${propuesta}) no es entera: ${totalSri} no es múltiplo del factor ${factor}.`,
           });
         }
@@ -516,6 +523,30 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
 
   resumen.cambiarian = cambios.length;
 
+  // POR QUÉ ALGUNOS AVISOS SE RECORTAN A LAS FILAS QUE CAMBIAN
+  // Estos dos describen cómo se calculó una capacidad PROPUESTA. Se emiten mientras
+  // se recorre la fila, antes de saber si al final habrá cambio, así que cuando no
+  // lo hay describen algo que no está pasando. Con 524 cambios casi todos caían
+  // sobre un cambio y el ruido no se notaba; con 2 cambios los 36 avisos hablaban de
+  // otras filas, y la pantalla los anunciaba como "avisos sobre los cambios
+  // propuestos" sin que ninguno lo fuera. Se recortan acá, donde ya se conoce el
+  // resultado de cada fila.
+  //
+  // LOS DEMÁS NO SE RECORTAN, A PROPÓSITO
+  // `factor_discrepante` y `factor_variable` hablan del DATO, no de la propuesta, y
+  // ya estaban colocados antes del cálculo justamente para que aparezcan aunque la
+  // fila termine sin cambio. `sin_capacidad_sri` explica por qué NO hubo propuesta,
+  // que es información que se perdería. `filas_duplicadas` es un problema de datos.
+  const SOLO_SI_CAMBIA = new Set(["suma_um", "propuesta_no_entera"]);
+  const clavesConCambio = new Set(
+    cambios.map((c) => `${normCodigo(c.codigo_item)}|${claveUnidadNuestra(c.unidad)}`),
+  );
+  const avisosVisibles = avisos.filter(
+    (a) =>
+      !SOLO_SI_CAMBIA.has(a.tipo) ||
+      clavesConCambio.has(`${normCodigo(a.codigo_item)}|${claveUnidadNuestra(a.unidad)}`),
+  );
+
   return {
     ok: true,
     tienda: tienda ?? tiendaPorDefecto(),
@@ -523,7 +554,7 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
     resumen,
     cambios,
     saltados,
-    avisos,
+    avisos: avisosVisibles,
   };
 }
 
