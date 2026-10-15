@@ -19,8 +19,18 @@ export async function listar(_req, res, next) {
  */
 export async function subir(req, res, next) {
   try {
-    const total = await CapacidadModel.upsertBulk(req.body.items);
-    res.json({ ok: true, total });
+    const { guardadas, saltadas } = await CapacidadModel.upsertBulk(req.body.items);
+    // `saltadas` nunca va vacío al cliente por omisión: si una carga no escribió lo
+    // que el usuario mandó, tiene que verlo. Callarlo fue lo que dejó pasar el
+    // incidente del 2026-10-15 sin que nadie lo notara hasta días después.
+    res.json({
+      ok: true,
+      total: guardadas,
+      saltadas,
+      ...(saltadas.length > 0 && {
+        aviso: `${saltadas.length} ítem(s) no se tocaron porque su capacidad está protegida: ${saltadas.join(", ")}.`,
+      }),
+    });
   } catch (error) {
     next(error);
   }
@@ -78,15 +88,7 @@ export async function eliminarUno(req, res, next) {
   }
 }
 
-/**
- * DELETE /api/capacidad
- * Elimina TODAS las capacidades cargadas.
- */
-export async function eliminarTodos(_req, res, next) {
-  try {
-    const data = await CapacidadModel.eliminarTodos();
-    res.json({ ok: true, data });
-  } catch (error) {
-    next(error);
-  }
-}
+// `eliminarTodos` (DELETE /api/capacidad) se eliminó el 2026-10-15 junto con el
+// modelo que lo respaldaba. Vaciaba la tabla entera sin confirmación y por una ruta
+// sin autenticación propia. Ver el comentario en Capacidad.model.js para el detalle
+// del incidente. Para borrar una fila puntual está DELETE /api/capacidad/:codigo.

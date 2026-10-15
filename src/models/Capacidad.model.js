@@ -102,6 +102,19 @@ export async function factoresDeItem(codigoItem) {
 export async function upsertBulk(items) {
   const ts = new Date().toISOString();
 
+  // POR QUÉ UNA CARGA MASIVA NO PUEDE TOCAR UN ÍTEM PROTEGIDO
+  // `fijo` marca los ítems cuya capacidad NO sale de una fuente automática: alguien
+  // la midió y la cargó a mano. El 2026-10-15 una carga desde Excel pisó esas filas
+  // y hubo que restaurarlas desde un backup. Que la fuente sea un Excel, SRI o un
+  // script no cambia nada: si el dato es de una persona, ninguna carga a granel debe
+  // poder reescribirlo. Se saltan y se devuelven para que el llamador los informe.
+  const { data: protegidas, error: errProt } = await supabase
+    .from(TABLE)
+    .select("codigo_item")
+    .eq("fijo", true);
+  if (errProt) throw new Error(`No se pudo leer qué ítems están protegidos: ${errProt.message}`);
+  const itemsProtegidos = new Set((protegidas || []).map((f) => normCodigo(f.codigo_item)));
+
   // Dedup por (codigo_item, unidad): el Excel puede traer el MISMO ítem con UM
   // DISTINTAS (ej: CAJA y BULTO) → son filas separadas que NO se deben pisar. Un
   // upsert con dos filas de la MISMA clave en el mismo batch rompe con "ON CONFLICT
@@ -109,9 +122,14 @@ export async function upsertBulk(items) {
   // por la clave compuesta (código|unidad), igual que el alta manual.
   // Sin columna UM en el Excel → unidad "" (fila base), como siempre.
   const porClave = new Map();
+  const saltadas = [];
   for (const i of items) {
     const codigo_item = normCodigo(i.codigo_item ?? i.item ?? "");
     if (!codigo_item) continue;
+    if (itemsProtegidos.has(codigo_item)) {
+      saltadas.push(codigo_item);
+      continue;
+    }
     const unidad = String(i.unidad ?? i.um ?? "").trim(); // "" = fila base
     const factor = unidad ? (Number(i.factor) > 0 ? Number(i.factor) : 1) : null;
     const fila = { codigo_item, unidad, capacidad: num(i.capacidad), factor, updated_at: ts };
@@ -141,7 +159,7 @@ export async function upsertBulk(items) {
   await upsertLote(conDesc);
   await upsertLote(sinDesc);
 
-  return filas.length;
+  return { guardadas: filas.length, saltadas: [...new Set(saltadas)] };
 }
 
 /**
@@ -319,13 +337,14 @@ export async function eliminar(codigoItem, unidad = "") {
   return { ok: true };
 }
 
-/** Elimina TODAS las capacidades cargadas. */
-export async function eliminarTodos() {
-  // Supabase exige un filtro en delete; este matchea todas las filas.
-  const { error } = await supabase
-    .from(TABLE)
-    .delete()
-    .not("codigo_item", "is", null);
-  if (error) throw new Error(`Error al eliminar capacidades: ${error.message}`);
-  return { ok: true };
-}
+// `eliminarTodos` se eliminó el 2026-10-15. Borraba la tabla entera de un saque y
+// fue la mitad destructiva del incidente de ese día: un "eliminar todo" seguido de
+// una carga de Excel se llevó 157 filas protegidas (huevos, café en tiras, frijol a
+// granel) y las 63 filas por unidad de medida. Solo se recuperaron porque había un
+// backup del día.
+//
+// No se reemplazó por una versión con confirmación: después de sacar la carga
+// masiva, vaciar la tabla no tiene ningún uso legítimo. Las capacidades protegidas
+// no vuelven de SRI —son justamente las que SRI no debe definir— así que un vaciado
+// las deja irrecuperables desde la aplicación. Para borrar una fila puntual está
+// `eliminar(codigoItem, unidad)`.
