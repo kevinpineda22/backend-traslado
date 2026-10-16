@@ -17,13 +17,19 @@ import assert from "node:assert/strict";
 
 let calcularEtapas;
 let contarSiesa;
+let tiemposPorPersona;
+let inicioDelDia;
+let finDelDia;
+let mapaNombres;
 
 before(async () => {
   mock.module("../src/config/supabase.js", { exports: { supabase: {} } });
   mock.module("../src/models/Item.model.js", {
     exports: { despachadoEnUnd: () => 0, MOTIVOS_FALTANTE: [] },
   });
-  ({ calcularEtapas, contarSiesa } = await import("../src/services/analitica.service.js"));
+  ({ calcularEtapas, contarSiesa, tiemposPorPersona, inicioDelDia, finDelDia, mapaNombres } = await import(
+    "../src/services/analitica.service.js"
+  ));
 });
 
 const H = 36e5;
@@ -102,4 +108,102 @@ test("SIESA: los 'incierto' se cuentan (antes se descartaban en silencio)", () =
     { siesa_estado: null }, // nunca se intentó subir: no es ninguno de los cuatro
   ]);
   assert.deepEqual(siesa, { pendiente: 0, enviado: 1, fallido: 1, incierto: 2 });
+});
+
+/* ── Filtro de fechas en hora de Colombia ───────────────────────────────────── */
+
+test("el rango de fechas se lee en hora de Colombia, no en UTC", () => {
+  // Bug real: "del 12 al 12" iba del 11 a las 7 p.m. al 12 a las 6:59 p.m.
+  const desde = Date.parse(inicioDelDia("2026-10-12"));
+  const hasta = Date.parse(finDelDia("2026-10-12"));
+  // Un traslado creado el 12 a las 8 p.m. hora Colombia = 13 a la 01:00 UTC.
+  const nocheDel12 = Date.parse("2026-10-13T01:00:00Z");
+  // Y uno del 11 a las 8 p.m. hora Colombia = 12 a la 01:00 UTC.
+  const nocheDel11 = Date.parse("2026-10-12T01:00:00Z");
+  assert.ok(nocheDel12 >= desde && nocheDel12 <= hasta, "lo del 12 a la noche ES del 12");
+  assert.ok(nocheDel11 < desde, "lo del 11 a la noche NO se cuela en el 12");
+});
+
+test("sin fecha no hay borde, y un valor que no es fecha pasa tal cual", () => {
+  assert.equal(inicioDelDia(""), null);
+  assert.equal(finDelDia(undefined), null);
+  assert.equal(finDelDia("2026-10-12T10:00:00Z"), "2026-10-12T10:00:00Z");
+});
+
+/* ── Desglose por persona ───────────────────────────────────────────────────── */
+
+const conGente = (over) => ({ ...trasladoReal(), despachador_id: "ana@x.com", auditor_id: "beto@x.com", ...over });
+
+test("por persona: recolectar se le anota al despachador y recibir al que firmó", () => {
+  const pp = tiemposPorPersona([conGente()]);
+  assert.equal(pp.recoleccion.personas[0].usuario, "ana@x.com");
+  assert.equal(pp.recoleccion.personas[0].mediana, 2); // 1 h → 3 h
+  assert.equal(pp.recibo.personas[0].usuario, "beto@x.com");
+  assert.equal(pp.recibo.personas[0].mediana, 2); // 6 h → 8 h
+});
+
+test("por persona mide lo MISMO que la barra de la etapa", () => {
+  const ds = [conGente(), conGente({ despachador_id: "otra@x.com" })];
+  const pp = tiemposPorPersona(ds);
+  const etapa = calcularEtapas(ds).find((e) => e.clave === "recoleccion");
+  const n = pp.recoleccion.personas.reduce((s, p) => s + p.n, 0);
+  assert.equal(n, etapa.n, "ningún traslado se pierde ni se cuenta dos veces");
+});
+
+test("el promedio va junto a la mediana y se separa cuando hay un caso olvidado", () => {
+  const largo = conGente({ recoleccion_finalizada_at: en(1 + 50) }); // 50 h
+  const pp = tiemposPorPersona([conGente(), conGente(), largo]);
+  const ana = pp.recoleccion.personas[0];
+  assert.equal(ana.n, 3);
+  assert.equal(ana.mediana, 2);
+  assert.equal(ana.promedio, 18); // (2 + 2 + 50) / 3
+});
+
+test("el mismo correo con distinta mayúscula es UNA persona", () => {
+  const pp = tiemposPorPersona([conGente(), conGente({ despachador_id: "ANA@x.com " })]);
+  assert.equal(pp.recoleccion.personas.length, 1);
+  assert.equal(pp.recoleccion.personas[0].n, 2);
+});
+
+test("sin quién registrado sale aparte (usuario null), no se esconde", () => {
+  const pp = tiemposPorPersona([conGente(), conGente({ despachador_id: null })]);
+  assert.ok(pp.recoleccion.personas.some((p) => p.usuario === null && p.n === 1));
+});
+
+test("usa el nombre del maestro cuando lo hay", () => {
+  const pp = tiemposPorPersona([conGente()], new Map([["ana@x.com", "Ana Pérez"]]));
+  assert.equal(pp.recoleccion.personas[0].nombre, "Ana Pérez");
+  assert.equal(pp.recibo.personas[0].nombre, null);
+});
+
+test("un traslado sin el hito de inicio de recepción no entra al desglose de recibir", () => {
+  const pp = tiemposPorPersona([conGente({ recepcion_iniciada_at: null })]);
+  assert.equal(pp.recibo.personas.length, 0);
+});
+
+/* ── Nombres desde el maestro de despachadores ─────────────────────────────── */
+
+test("mapaNombres: correo con un nombre → ese nombre (sin importar mayúsculas)", () => {
+  const m = mapaNombres([{ correo: " Ana@X.com ", nombre: "Ana Pérez", activo: true }]);
+  assert.equal(m.get("ana@x.com"), "Ana Pérez");
+});
+
+test("mapaNombres: una fila inactiva vieja no vuelve 'compartida' la cuenta", () => {
+  const m = mapaNombres([
+    { correo: "ana@x.com", nombre: "Ana P.", activo: false },
+    { correo: "ana@x.com", nombre: "Ana Pérez", activo: true },
+  ]);
+  assert.equal(m.get("ana@x.com"), "Ana Pérez");
+});
+
+test("mapaNombres: dos personas ACTIVAS con el mismo correo = cuenta compartida → null", () => {
+  const m = mapaNombres([
+    { correo: "despachoplaza@x.com", nombre: "Danilo", activo: true },
+    { correo: "despachoplaza@x.com", nombre: "Luis", activo: true },
+  ]);
+  assert.equal(m.get("despachoplaza@x.com"), null);
+});
+
+test("mapaNombres: filas sin correo se ignoran", () => {
+  assert.equal(mapaNombres([{ correo: "", nombre: "X" }, { nombre: "Y" }]).size, 0);
 });

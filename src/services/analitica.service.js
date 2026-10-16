@@ -72,19 +72,24 @@ async function leerTodo(tabla, columnas, filtro = (q) => q) {
 const pedidoEnUnd = (it) => num(it.cantidad_admin) * (num(it.factor) || 1);
 
 /**
- * Mediana y p90. Se usa mediana y NO promedio a propósito: con muestras chicas y
- * sesgadas —un despacho que quedó abierto el fin de semana— el promedio se va al
- * techo y describe un caso que no es el típico. La mediana aguanta el outlier y el
- * p90 lo muestra aparte, que es donde vive el problema real.
+ * Mediana, promedio y p90. La MEDIANA es la que manda en las barras: con muestras
+ * chicas y sesgadas —un despacho que quedó abierto el fin de semana— el promedio
+ * se va al techo y describe un caso que no es el típico. La mediana aguanta el
+ * outlier y el p90 lo muestra aparte. El promedio viaja igual porque es el número
+ * que la gente pide; se muestra al lado, nunca en lugar de la mediana.
  */
 function resumenNumerico(valores) {
   const v = valores.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
-  if (!v.length) return { n: 0, mediana: null, p90: null, min: null, max: null };
+  if (!v.length) return { n: 0, mediana: null, promedio: null, p90: null, min: null, max: null };
   const en = (p) => v[Math.min(v.length - 1, Math.floor(p * v.length))];
   const mid = Math.floor(v.length / 2);
   return {
     n: v.length,
     mediana: v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2,
+    // El promedio va junto a la mediana, no en su lugar: es el número que la
+    // gente pide ("¿cuánto se demora en promedio?"), pero un traslado olvidado un
+    // fin de semana lo arrastra. Mostrar los dos deja ver cuándo eso pasa.
+    promedio: v.reduce((s, x) => s + x, 0) / v.length,
     p90: en(0.9),
     min: v[0],
     max: v[v.length - 1],
@@ -101,15 +106,31 @@ function horas(desde, hasta) {
 }
 
 /**
- * Fin del día de una fecha `YYYY-MM-DD`.
+ * Bordes del día `YYYY-MM-DD` EN HORA DE COLOMBIA.
  *
- * Un `hasta` crudo se interpreta como medianoche, así que filtrar "hasta el 12"
- * dejaba afuera TODO lo del día 12 — el usuario elige un rango y el último día no
- * aparece, que es el bug clásico de los filtros de fecha.
+ * El filtro de fechas compara contra `created_at` (timestamptz). Antes se mandaba
+ * `desde` crudo y `hasta` con sufijo `Z`, y la base los leía en UTC: "del 12 al
+ * 12" era en realidad del 11 a las 7 p.m. al 12 a las 6:59 p.m. hora Colombia. Un
+ * traslado creado a las 8 p.m. aparecía en el día siguiente, y lo de la noche
+ * anterior se colaba en el rango.
+ *
+ * El offset va fijo porque Colombia no tiene horario de verano (ver ZONA en
+ * config/tiempo.js). Si algún día el negocio opera en otra zona, esto se cae.
+ *
+ * Un `hasta` sin hora además tiene que cubrir el día ENTERO: crudo se leería como
+ * medianoche y dejaría afuera todo lo del último día.
  */
-function finDelDia(fecha) {
+const OFFSET_COLOMBIA = "-05:00";
+const ES_FECHA = /^\d{4}-\d{2}-\d{2}$/;
+
+export function inicioDelDia(fecha) {
   if (!fecha) return null;
-  return /^\d{4}-\d{2}-\d{2}$/.test(fecha) ? `${fecha}T23:59:59.999Z` : fecha;
+  return ES_FECHA.test(fecha) ? `${fecha}T00:00:00.000${OFFSET_COLOMBIA}` : fecha;
+}
+
+export function finDelDia(fecha) {
+  if (!fecha) return null;
+  return ES_FECHA.test(fecha) ? `${fecha}T23:59:59.999${OFFSET_COLOMBIA}` : fecha;
 }
 
 /**
@@ -166,6 +187,95 @@ export function calcularEtapas(despachos) {
 }
 
 /**
+ * Desglose por persona de las etapas donde trabaja alguien: recolectar y recibir.
+ *
+ * Reusa los extremos de ETAPAS (no los repite): el desglose y la barra de la
+ * tarjeta tienen que medir exactamente lo mismo, o el promedio de una persona
+ * contradice al de su etapa.
+ *
+ * QUIÉN ES "LA PERSONA" — y por qué hay que leerlo con cuidado:
+ *   · Recolectar → `despachador_id`: quien ARRANCÓ la recolección. Si se sumaron
+ *     compañeros (recolección multiusuario, 023), el tiempo entero se le anota a él.
+ *   · Recibir → `auditor_id`: quien FIRMÓ. Si contaron varios, idem.
+ *   · Los dos son el correo de la sesión, y hay cuentas compartidas por sede: ahí
+ *     el desglose es por CUENTA, no por persona.
+ *
+ * El correo se agrupa en minúscula: el login puede llegar con mayúsculas y
+ * partiría a una misma persona en dos filas.
+ *
+ * @param {object[]} despachos
+ * @param {Map<string,string|null>} [nombres] - correo (minúscula) → nombre
+ */
+const ETAPAS_POR_PERSONA = [
+  { clave: "recoleccion", quien: "despachador_id" },
+  { clave: "recibo", quien: "auditor_id" },
+];
+
+export function tiemposPorPersona(despachos, nombres = new Map()) {
+  return Object.fromEntries(
+    ETAPAS_POR_PERSONA.map(({ clave, quien }) => {
+      const etapa = ETAPAS.find((e) => e.clave === clave);
+      const porQuien = new Map();
+      for (const d of despachos) {
+        const h = horas(d[etapa.de], d[etapa.a]);
+        if (h == null) continue;
+        const correo = String(d[quien] || "").trim().toLowerCase();
+        if (!porQuien.has(correo)) porQuien.set(correo, []);
+        porQuien.get(correo).push(h);
+      }
+      const personas = [...porQuien.entries()]
+        .map(([correo, valores]) => ({
+          // null = el traslado no tiene registrado quién: se muestra aparte en vez
+          // de esconderlo, porque también es tiempo que pasó.
+          usuario: correo || null,
+          nombre: (correo && nombres.get(correo)) || null,
+          ...resumenNumerico(valores),
+        }))
+        .sort((a, b) => b.n - a.n || (a.mediana ?? 0) - (b.mediana ?? 0));
+      return [clave, { label: etapa.label, personas }];
+    }),
+  );
+}
+
+/**
+ * Correo → nombre, a partir de las filas del maestro de despachadores.
+ *
+ * Si el correo tiene filas ACTIVAS, solo cuentan esas: un conductor que se fue y
+ * volvió con el mismo correo deja una fila inactiva vieja, y no por eso es una
+ * cuenta compartida. Si aun así quedan nombres distintos, SÍ es una cuenta
+ * compartida y queda en null, para no anotarle a una persona el tiempo de otra.
+ *
+ * @param {Array<{correo?:string, nombre?:string, activo?:boolean}>} filas
+ * @returns {Map<string, string|null>}
+ */
+export function mapaNombres(filas = []) {
+  const porCorreo = new Map();
+  for (const f of filas) {
+    const correo = String(f.correo || "").trim().toLowerCase();
+    if (!correo) continue;
+    if (!porCorreo.has(correo)) porCorreo.set(correo, []);
+    porCorreo.get(correo).push({ nombre: String(f.nombre || "").trim() || null, activo: f.activo !== false });
+  }
+  const nombres = new Map();
+  for (const [correo, todas] of porCorreo) {
+    const activas = todas.filter((x) => x.activo);
+    const candidatas = new Set((activas.length ? activas : todas).map((x) => x.nombre));
+    nombres.set(correo, candidatas.size === 1 ? [...candidatas][0] : null);
+  }
+  return nombres;
+}
+
+/** Lee el maestro (migración 020). Best-effort: sin maestro, sale el correo. */
+async function nombresPorCorreo() {
+  try {
+    return mapaNombres(await leerTodo("traslados_despachadores", "correo, nombre, activo"));
+  } catch (err) {
+    console.warn("[analitica] sin nombres de despachadores:", err.message);
+    return new Map();
+  }
+}
+
+/**
  * Traslados por estado de la subida a SIESA.
  *
  * `incierto` (sql/033) va explícito: SIESA no respondió y no se sabe si el
@@ -197,7 +307,7 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
   // que quiere ver, y aplicar las dos cosas daría una ventana que no pidió nadie.
   const usaRango = Boolean(desde || hasta);
   const desdeISO = usaRango
-    ? desde || null
+    ? inicioDelDia(desde)
     : dias
       ? new Date(Date.now() - dias * 864e5).toISOString()
       : null;
@@ -207,7 +317,8 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
     "traslados_despachos",
     "id, origen, destino, flujo, estado, inactivo, created_at, disponible_at, " +
       "recoleccion_iniciada_at, recoleccion_finalizada_at, auditoria_iniciada_at, " +
-      "auditoria_finalizada_at, publicado_at, recepcion_iniciada_at, siesa_estado",
+      "auditoria_finalizada_at, publicado_at, recepcion_iniciada_at, siesa_estado, " +
+      "despachador_id, auditor_id",
     (q) => {
       let out = q;
       if (desdeISO) out = out.gte("created_at", desdeISO);
@@ -559,7 +670,11 @@ export async function analitica({ dias, desde, hasta, sede } = {}) {
         .sort((x, y) => y.ocurrencias - x.ocurrencias),
     },
 
-    tiempos: { etapas },
+    tiempos: {
+      etapas,
+      // Por persona: cuánto tarda cada cuenta en recolectar y en recibir.
+      por_persona: tiemposPorPersona(despachos, await nombresPorCorreo()),
+    },
 
     recibo: {
       lineas: auditados.length,
