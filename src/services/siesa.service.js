@@ -407,6 +407,31 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     }
 
     const codigos = new Set(dMap.keys());
+
+    // Y ADEMÁS los ítems con capacidad cargada que el destino todavía no registra.
+    //
+    // SIESA devuelve una fila por (ítem, bodega) solo cuando el ítem se movió
+    // alguna vez en esa bodega (docs/CONSULTA_SNAPSHOT_CONNEKTA.md, punto 1). Un
+    // producto nuevo queda encerrado en un círculo: Llano no lo tiene, entonces no
+    // sale en el panel, entonces nadie se lo despacha, entonces nunca se mueve,
+    // entonces Llano nunca lo tiene. Verificado el 20/10/2026 con el 189409 (ARROZ
+    // FEDERAL ARTESANO): estaba en las otras seis bodegas y en ninguna de Llano.
+    //
+    // Cargarle la capacidad en el módulo Capacidad es la decisión humana que rompe
+    // el círculo, y es la ÚNICA puerta de entrada por acá: nada entra por tener
+    // stock en el origen, que fue justo el agujero que cerró el filtro de arriba.
+    // Se piden además dos cosas:
+    //   - capacidad > 0, porque con capacidad 0 el sugerido da 0 y la fila no
+    //     serviría para nada (y hay filas en 0 a propósito: ver sriCapacidad);
+    //   - existencia en el ORIGEN, de donde salen la descripción, el CAT, la UM y
+    //     el volumen —el destino no tiene fila de la que leerlos— y de donde sale
+    //     lo que realmente se puede mandar.
+    for (const [codigo, capRows] of capacidades) {
+      if (dMap.has(codigo) || !oMap.has(codigo)) continue;
+      if (!capRows.some((r) => num(r.capacidad) > 0)) continue;
+      codigos.add(codigo);
+    }
+
     for (const codigo of codigos) {
       const o = oMap.get(codigo);
       const d = dMap.get(codigo);
@@ -414,7 +439,9 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
 
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
-      const clase = claseDeCategoria(d?.criterios?.CAT);
+      // Sin fila en el destino se lee la del origen, que es la misma: el CAT es
+      // del maestro del ítem, no de la bodega (ver el punto 2 de la misma doc).
+      const clase = claseDeCategoria(d ? d.criterios?.CAT : o?.criterios?.CAT);
       // Solo Llano: mostramos únicamente ítems clasificados en el CAT (A/B/C o
       // "SIN CLASIFICACION" = Ninguno). Los que no tienen NINGUNA clasificación
       // (CAT vacío) no son de Llano → quedan fuera. El CAT es a nivel de ítem,
@@ -495,6 +522,11 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           inventario_origen: inventarioOrigen,
           disponible_origen: disponibleOrigen,
           inventario_destino: inventarioDestino,
+          // El destino no tiene fila en SIESA: el ítem entró por su capacidad
+          // cargada. El 0 de arriba no es un inventario medido, es que Llano
+          // todavía no maneja el ítem. Se marca para que nadie lea ese 0 como un
+          // agotado y para poder explicar por qué apareció.
+          sin_registro_destino: !d,
           consumo_destino: consumoDestino,
           dias_inventario: diasInventario,
           necesidad,

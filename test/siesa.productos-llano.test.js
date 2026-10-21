@@ -1,4 +1,4 @@
-import { test, mock, before } from "node:test";
+import { test, mock, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 /* =============================================================================
@@ -24,6 +24,8 @@ const DESTINO = "00401";
 let getProductosLlano;
 let clasesLlanoDeItems;
 let filas = [];
+/** codigo → filas de traslados_capacidad, en el formato de `mapaCapacidades`. */
+let capacidades = new Map();
 
 /** Fila del snapshot con lo mínimo que lee getProductosLlano. */
 const fila = (bodega, codigo, { disponible = 10, consumo = 0, cat = "CATEGORIA TIPO A" } = {}) => ({
@@ -51,7 +53,7 @@ before(async () => {
     },
   });
   mock.module("../src/models/Capacidad.model.js", {
-    exports: { mapaCapacidades: async () => new Map(), factoresDeItem: async () => new Map() },
+    exports: { mapaCapacidades: async () => capacidades, factoresDeItem: async () => new Map() },
   });
   mock.module("../src/models/Config.model.js", {
     exports: {
@@ -69,11 +71,23 @@ before(async () => {
   ({ getProductosLlano, clasesLlanoDeItems } = await import("../src/services/siesa.service.js"));
 });
 
-const codigosDe = async () => {
+beforeEach(() => {
+  capacidades = new Map();
+});
+
+const productosDe = async () => {
   const { data, error } = await getProductosLlano({ origen: ORIGEN, destino: DESTINO });
   assert.equal(error, undefined);
-  return data.map((p) => p.codigo_item).sort();
+  return data;
 };
+
+const codigosDe = async () => (await productosDe()).map((p) => p.codigo_item).sort();
+
+/** Fila de capacidad como la devuelve `mapaCapacidades` (clave ya normalizada). */
+const conCapacidad = (codigo, capacidad, extra = {}) =>
+  capacidades.set(codigo, [
+    { capacidad, unidad: "", factor: null, multi_um: false, ...extra },
+  ]);
 
 test("un ítem que SOLO tiene el origen no aparece en el panel de Llano", async () => {
   filas = [
@@ -111,6 +125,76 @@ test("los filtros de CAT de Llano se mantienen: vacío y descodificados fuera", 
     fila(ORIGEN, "7", { cat: "Descodificados" }), fila(DESTINO, "7", { cat: "Descodificados" }),
   ];
   assert.deepEqual(await codigosDe(), []);
+});
+
+/* ─── Productos que Llano todavía no registra ─────────────────────────────────
+   SIESA solo devuelve una fila por (ítem, bodega) cuando el ítem se movió alguna
+   vez en esa bodega. Un producto nuevo queda encerrado: Llano no lo tiene → no
+   sale en el panel → nadie se lo despacha → nunca se mueve → Llano no lo tiene.
+   La capacidad cargada a mano es la única puerta que rompe ese círculo.
+   ────────────────────────────────────────────────────────────────────────────── */
+
+test("un ítem que Llano todavía no registra entra si tiene capacidad cargada", async () => {
+  // El caso del 189409 (ARROZ FEDERAL, 20/10/2026): SIESA lo tenía en Parque y en
+  // otras cinco bodegas, en Llano en ninguna. Sin esto no hay primer despacho.
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1"), fila(ORIGEN, "189409", { disponible: 48 })];
+  conCapacidad("189409", 4);
+  assert.deepEqual(await codigosDe(), ["1", "189409"]);
+});
+
+test("el que entra por capacidad queda marcado, con inventario de destino en 0", async () => {
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1"), fila(ORIGEN, "189409", { disponible: 48 })];
+  conCapacidad("189409", 4);
+
+  const productos = await productosDe();
+  const nuevo = productos.find((p) => p.codigo_item === "189409");
+  assert.equal(nuevo.sin_registro_destino, true, "el 0 de abajo no es un agotado medido");
+  assert.equal(nuevo.inventario_destino, 0);
+  assert.equal(nuevo.capacidad, 4);
+  assert.equal(nuevo.disponible_origen, 48);
+
+  const conocido = productos.find((p) => p.codigo_item === "1");
+  assert.equal(conocido.sin_registro_destino, false, "el que SÍ tiene fila en Llano no se marca");
+});
+
+test("capacidad en 0 no alcanza para entrar", async () => {
+  // El sugerido daría 0 y la fila no serviría para nada. Hay filas en 0 a propósito.
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1"), fila(ORIGEN, "2")];
+  conCapacidad("2", 0);
+  assert.deepEqual(await codigosDe(), ["1"]);
+});
+
+test("sin existencia en el origen no entra, aunque tenga capacidad cargada", async () => {
+  // No hay de dónde leer descripción, CAT ni UM, y no hay nada que mandar.
+  // Hoy el filtro de CAT lo atajaría igual (sin fila en ninguna bodega, el CAT
+  // sale vacío), así que esto fija la intención: la guarda de origen es explícita
+  // para no depender de ese rebote y para que `fuente` nunca llegue indefinida.
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1")];
+  conCapacidad("77", 10);
+  assert.deepEqual(await codigosDe(), ["1"]);
+});
+
+test("la capacidad no saltea los filtros de CAT: vacío y descodificados siguen fuera", async () => {
+  filas = [
+    fila(ORIGEN, "1"), fila(DESTINO, "1"),
+    fila(ORIGEN, "8", { cat: "" }),
+    fila(ORIGEN, "9", { cat: "Descodificados" }),
+  ];
+  conCapacidad("8", 10);
+  conCapacidad("9", 10);
+  assert.deepEqual(await codigosDe(), ["1"]);
+});
+
+test("sin fila en el destino, la clase A/B/C sale del CAT del origen", async () => {
+  // El CAT es del maestro del ítem: es el mismo en toda bodega. Leyéndolo solo del
+  // destino, estos ítems entrarían siempre como "ninguno" y con la cadencia de C.
+  filas = [
+    fila(ORIGEN, "1"), fila(DESTINO, "1"),
+    fila(ORIGEN, "2", { cat: "CATEGORIA TIPO B" }),
+  ];
+  conCapacidad("2", 10);
+  const nuevo = (await productosDe()).find((p) => p.codigo_item === "2");
+  assert.equal(nuevo.clase, "B");
 });
 
 /* ─── Clase A/B/C para el monitor ─────────────────────────────────────────── */
