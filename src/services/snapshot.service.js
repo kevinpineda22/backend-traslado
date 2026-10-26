@@ -402,25 +402,86 @@ export async function ultimaActualizacion() {
  * Devuelve TODAS las filas snapshot de las bodegas indicadas.
  * Supabase corta los SELECT en 1000 filas por defecto; como una bodega puede
  * tener miles de ítems, paginamos por rangos hasta traerlas todas.
+ *
+ * TRES COSAS QUE NO SON OPCIONALES ACÁ (y el porqué de cada una)
+ *
+ * 1. ORDEN EXPLÍCITO. Un SELECT sin ORDER BY no garantiza orden en PostgreSQL,
+ *    y paginar por `range` sobre un orden que puede cambiar entre páginas repite
+ *    unas filas y saltea otras. Es exactamente lo que ya pasó del lado de la
+ *    ESCRITURA con Connekta (ver la "Red de seguridad del snapshot" arriba y el
+ *    punto 6 de docs/CONSULTA_SNAPSHOT_CONNEKTA.md): se arregló allá con un
+ *    ORDER BY estable y faltaba acá. Ordenamos por la llave del upsert, que
+ *    tiene índice único.
+ *
+ * 2. VERIFICAR LA COMPLETITUD. Este no es un listado cualquiera: una fila que
+ *    falte NO se nota. El ítem desaparece del panel, o —si tiene capacidad
+ *    cargada— aparece con inventario y consumo en 0, que se lee como "agotado y
+ *    sin rotación" en vez de como "me faltó el dato". Reportado el 26/10/2026 con
+ *    el café, el azúcar y el frutiño. Preferimos fallar fuerte: un error en
+ *    pantalla se entiende, un cero mentiroso se cree.
+ *
+ * 3. REINTENTAR LO TRANSITORIO. Supabase está detrás de Cloudflare y devuelve
+ *    502/503/504 cada tanto (reproducido el 26/10/2026: 1 de 16 lecturas). Sin
+ *    reintento, un 502 en la página 15 de 23 tumba el panel entero.
  */
+const LECTURA_REINTENTOS = 3;
+const LECTURA_ESPERA_MS = 400;
+
+/** ¿El error vale un reintento? Red, timeout o 5xx/429 del gateway. */
+function esTransitorio(mensaje) {
+  return /\b(429|50[0-9])\b|bad gateway|service unavailable|gateway time|timeout|fetch failed|socket|econnreset|network/i.test(
+    String(mensaje ?? ""),
+  );
+}
+
 export async function leerBodegas(bodegas) {
   const PAGE = 1000;
   const todas = [];
   let desde = 0;
 
-  for (;;) {
-    const { data, error } = await supabase
-      .from(TABLE)
-      .select("*")
-      .in("bodega", bodegas)
-      .range(desde, desde + PAGE - 1);
+  // Cuántas filas DEBERÍAN venir. Se pide una sola vez, antes de paginar.
+  const { count: esperadas, error: errCount } = await supabase
+    .from(TABLE)
+    .select("*", { count: "exact", head: true })
+    .in("bodega", bodegas);
+  if (errCount) throw new Error(`Error al leer snapshot: ${errCount.message}`);
 
-    if (error) throw new Error(`Error al leer snapshot: ${error.message}`);
+  for (;;) {
+    let data;
+    let ultimoError;
+    for (let intento = 1; intento <= LECTURA_REINTENTOS; intento++) {
+      const r = await supabase
+        .from(TABLE)
+        .select("*")
+        .in("bodega", bodegas)
+        .order("bodega")
+        .order("codigo_item")
+        .range(desde, desde + PAGE - 1);
+      if (!r.error) {
+        data = r.data;
+        ultimoError = null;
+        break;
+      }
+      ultimoError = r.error.message;
+      if (!esTransitorio(ultimoError) || intento === LECTURA_REINTENTOS) break;
+      await new Promise((ok) => setTimeout(ok, LECTURA_ESPERA_MS * intento));
+    }
+    if (ultimoError) throw new Error(`Error al leer snapshot: ${ultimoError}`);
     if (!data || data.length === 0) break;
 
     todas.push(...data);
     if (data.length < PAGE) break;
     desde += PAGE;
+  }
+
+  // Guarda de completitud. Entre el count y la última página pueden entrar filas
+  // nuevas (el cron escribe cada 15 min), así que de más no es un problema: lo
+  // que no se puede devolver en silencio es de MENOS.
+  if (typeof esperadas === "number" && todas.length < esperadas) {
+    throw new Error(
+      `Lectura incompleta del snapshot: ${todas.length} de ${esperadas} filas. ` +
+        `Se corta acá para no mostrar ítems en cero que sí tienen inventario.`,
+    );
   }
 
   return todas;
