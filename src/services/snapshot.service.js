@@ -15,6 +15,9 @@ import { tomarLock, liberarLock, lockTomado } from "./lock.service.js";
    ============================================= */
 
 const TABLE = "traslados_snapshot";
+// Bitácora de refrescos (migración 041). Nadie del flujo la lee: está para
+// poder contestar "qué pasó a tal hora" cuando alguien reporta datos raros.
+const TABLE_LOG = "traslados_snapshot_log";
 const QUERY_TRASLADOS =
   process.env.CONNEKTA_QUERY_TRASLADOS || "merkahorro_traslados_dev";
 // Connekta LIMITA tamPag a 1000 (devuelve 400 si te pasás) → son ~77 páginas.
@@ -253,59 +256,102 @@ async function contarSnapshot(bodegas) {
  */
 export async function refrescarSnapshot() {
   const inicio = new Date().toISOString();
-
-  const { filas: rows, crudas, unicas, totalDeclarado } = await traerDeConnekta();
+  const t0 = Date.now();
   const bodegas = bodegasInvolucradas();
+  // Lo que se sepa hasta donde llegue. Si algo falla a mitad de camino, la
+  // bitácora igual guarda lo que ya se había averiguado.
+  const bitacora = { filas_crudas: null, filas_declaradas: null, items: null, por_bodega: null, borradas: null };
 
-  // Guarda 1 — completitud (páginas faltantes / respuestas cortas).
-  if (totalDeclarado > 0 && crudas < totalDeclarado * UMBRAL_COMPLETITUD) {
-    const pct = ((crudas / totalDeclarado) * 100).toFixed(1);
-    throw new PullIncompletoError(
-      `Pull incompleto: ${crudas}/${totalDeclarado} filas (${pct}%). Snapshot anterior intacto.`,
-    );
-  }
+  try {
+    const { filas: rows, crudas, unicas, totalDeclarado } = await traerDeConnekta();
+    bitacora.filas_crudas = crudas;
+    bitacora.filas_declaradas = totalDeclarado;
 
-  const agg = agregarPorBodegaItem(rows);
-  const registros = Array.from(agg.values()).map((o) => aRegistro(o, inicio));
+    // Guarda 1 — completitud (páginas faltantes / respuestas cortas).
+    if (totalDeclarado > 0 && crudas < totalDeclarado * UMBRAL_COMPLETITUD) {
+      const pct = ((crudas / totalDeclarado) * 100).toFixed(1);
+      throw new PullIncompletoError(
+        `Pull incompleto: ${crudas}/${totalDeclarado} filas (${pct}%). Snapshot anterior intacto.`,
+      );
+    }
 
-  // Guarda 2 — regresión brusca vs el snapshot vigente.
-  const prevCount = await contarSnapshot(bodegas);
-  if (prevCount > 0 && registros.length < prevCount * UMBRAL_REGRESION) {
-    const pct = ((registros.length / prevCount) * 100).toFixed(1);
-    throw new PullIncompletoError(
-      `Regresión sospechosa: ${registros.length} ítems vs ${prevCount} previos (${pct}%). Snapshot anterior intacto.`,
-    );
-  }
+    const agg = agregarPorBodegaItem(rows);
+    const registros = Array.from(agg.values()).map((o) => aRegistro(o, inicio));
+    bitacora.items = registros.length;
+    // El total general puede verse sano mientras UNA sede se vacía. El conteo
+    // por bodega es lo que permite verlo después.
+    bitacora.por_bodega = registros.reduce((acc, r) => {
+      acc[r.bodega] = (acc[r.bodega] || 0) + 1;
+      return acc;
+    }, {});
 
-  // 1. Upsert en chunks
-  for (let i = 0; i < registros.length; i += CHUNK) {
-    const chunk = registros.slice(i, i + CHUNK);
-    const { error } = await supabase
+    // Guarda 2 — regresión brusca vs el snapshot vigente.
+    const prevCount = await contarSnapshot(bodegas);
+    if (prevCount > 0 && registros.length < prevCount * UMBRAL_REGRESION) {
+      const pct = ((registros.length / prevCount) * 100).toFixed(1);
+      throw new PullIncompletoError(
+        `Regresión sospechosa: ${registros.length} ítems vs ${prevCount} previos (${pct}%). Snapshot anterior intacto.`,
+      );
+    }
+
+    // 1. Upsert en chunks
+    for (let i = 0; i < registros.length; i += CHUNK) {
+      const chunk = registros.slice(i, i + CHUNK);
+      const { error } = await supabase
+        .from(TABLE)
+        .upsert(chunk, { onConflict: "bodega,codigo_item" });
+      if (error) throw new Error(`Error al guardar snapshot: ${error.message}`);
+    }
+
+    // 2. Prune CON GRACIA: solo lo que lleva mucho sin aparecer (desaparecido de
+    //    SIESA de verdad), no lo que faltó en este pull. Lo omitido por paginación
+    //    reaparece antes del corte y conserva su actualizado_at reciente.
+    const corte = new Date(Date.now() - GRACIA_PRUNE_MS).toISOString();
+    const { error: errPrune, count: borradas } = await supabase
       .from(TABLE)
-      .upsert(chunk, { onConflict: "bodega,codigo_item" });
-    if (error) throw new Error(`Error al guardar snapshot: ${error.message}`);
+      .delete({ count: "exact" })
+      .in("bodega", bodegas)
+      .lt("actualizado_at", corte);
+    if (errPrune) throw new Error(`Error al limpiar snapshot: ${errPrune.message}`);
+    bitacora.borradas = borradas ?? null;
+
+    await registrarRefresh({ ...bitacora, resultado: "ok", duracion_ms: Date.now() - t0 });
+
+    return {
+      total: registros.length,
+      bodegas,
+      origenFilas: rows.length,
+      crudas,
+      unicas,
+      totalDeclarado,
+      actualizado_at: inicio,
+    };
+  } catch (error) {
+    await registrarRefresh({
+      ...bitacora,
+      resultado: error instanceof PullIncompletoError ? "abortado" : "error",
+      duracion_ms: Date.now() - t0,
+      detalle: error.message,
+    });
+    throw error;
   }
+}
 
-  // 2. Prune CON GRACIA: solo lo que lleva mucho sin aparecer (desaparecido de
-  //    SIESA de verdad), no lo que faltó en este pull. Lo omitido por paginación
-  //    reaparece antes del corte y conserva su actualizado_at reciente.
-  const corte = new Date(Date.now() - GRACIA_PRUNE_MS).toISOString();
-  const { error: errPrune } = await supabase
-    .from(TABLE)
-    .delete()
-    .in("bodega", bodegas)
-    .lt("actualizado_at", corte);
-  if (errPrune) throw new Error(`Error al limpiar snapshot: ${errPrune.message}`);
-
-  return {
-    total: registros.length,
-    bodegas,
-    origenFilas: rows.length,
-    crudas,
-    unicas,
-    totalDeclarado,
-    actualizado_at: inicio,
-  };
+/**
+ * Deja una línea en `traslados_snapshot_log` (migración 041).
+ *
+ * NUNCA rompe el refresh. La bitácora existe para investigar reportes de datos
+ * incompletos; si la migración no se corrió o la escritura falla, perder el
+ * registro es molesto, perder el refresco es un panel sin datos. Avisa por
+ * consola y sigue.
+ */
+async function registrarRefresh(fila) {
+  try {
+    const { error } = await supabase.from(TABLE_LOG).insert(fila);
+    if (error) console.warn(`No se pudo registrar el refresh: ${error.message}`);
+  } catch (e) {
+    console.warn(`No se pudo registrar el refresh: ${e.message}`);
+  }
 }
 
 /* ─── Lock: evita dos refresh en paralelo (cron + botón manual) ──────
