@@ -24,11 +24,21 @@ let bd;
 
 /** Doble de Supabase que registra las consultas y puede inyectar fallos. */
 function crearBD({ filas = [], alConsultar = null } = {}) {
-  const estado = { filas, llamadas: [], alConsultar };
+  const estado = { filas, llamadas: [], alConsultar, enVuelo: 0, maxEnVuelo: 0 };
 
   const ejecutar = async (q) => {
     const propias = estado.filas.filter((f) => !q.bodegas || q.bodegas.includes(f.bodega));
     estado.llamadas.push({ orden: [...q.orden], rango: q.rango, head: q.head });
+
+    // Cuántas páginas hay pedidas a la vez: así los tests pueden afirmar que se
+    // piden en paralelo y no una detrás de la otra.
+    if (!q.head) {
+      estado.enVuelo += 1;
+      estado.maxEnVuelo = Math.max(estado.maxEnVuelo, estado.enVuelo);
+      const demora = estado.demoraDe?.(q.rango?.[0]) ?? 0;
+      if (demora) await new Promise((ok) => setTimeout(ok, demora));
+      estado.enVuelo -= 1;
+    }
 
     const inyectado = estado.alConsultar?.({ ...q, nro: estado.llamadas.length });
     if (inyectado) return { data: null, count: null, error: { message: inyectado } };
@@ -108,6 +118,9 @@ beforeEach(() => {
   bd.llamadas = [];
   bd.alConsultar = null;
   bd.recortarPagina = null;
+  bd.demoraDe = null;
+  bd.enVuelo = 0;
+  bd.maxEnVuelo = 0;
 });
 
 test("trae TODAS las filas aunque haya que pedir varias páginas", async () => {
@@ -163,9 +176,44 @@ test("si faltan filas contra el total real, LANZA en vez de devolver una lista c
   bd.filas = generar(1300, 1000);
   bd.recortarPagina = (pagina, desde) => (desde === 1000 ? pagina.slice(0, 400) : pagina);
 
+  // Las tres páginas se piden igual (el conteo dice de antemano cuántas son), así
+  // que llegan 1000 + 400 + 300: faltan 600 de las 2300 y el mensaje lo dice.
   await assert.rejects(
     () => leerBodegas(["00301", "00401"]),
-    /Lectura incompleta del snapshot: 1400 de 2300 filas/,
+    /Lectura incompleta del snapshot: 1700 de 2300 filas/,
+  );
+});
+
+test("las páginas se piden EN PARALELO, no una esperando a la anterior", async () => {
+  // Son 23 páginas en producción. De a una tardaba 10,9 s; de a 6, 2,0 s. El
+  // conteo de arriba es lo que lo habilita: dice cuántas son de antemano, así
+  // que no hay que esperar a que una página avise si hay otra atrás.
+  bd.filas = generar(5000, 5000); // 10 páginas
+  bd.demoraDe = () => 20;
+
+  const filas = await leerBodegas(["00301", "00401"]);
+
+  assert.equal(filas.length, 10000);
+  assert.ok(bd.maxEnVuelo > 1, `se pidieron de a una (máximo en vuelo: ${bd.maxEnVuelo})`);
+  assert.ok(bd.maxEnVuelo <= 6, `demasiadas a la vez: ${bd.maxEnVuelo}`);
+});
+
+test("el resultado respeta el orden de las páginas aunque lleguen desordenadas", async () => {
+  // Cada página se guarda EN SU POSICIÓN, no en orden de llegada. Si se
+  // acumularan según van volviendo, el listado saldría barajado y la tabla
+  // ordenaría sobre un orden que no es el que se pidió.
+  bd.filas = generar(1300, 1000);
+  bd.demoraDe = (desde) => (desde === 0 ? 60 : 5); // la primera, la más lenta
+
+  const filas = await leerBodegas(["00301", "00401"]);
+
+  const esperado = [...bd.filas].sort(
+    (a, b) =>
+      a.bodega.localeCompare(b.bodega) || String(a.codigo_item).localeCompare(String(b.codigo_item)),
+  );
+  assert.deepEqual(
+    filas.map((f) => `${f.bodega}|${f.codigo_item}`),
+    esperado.map((f) => `${f.bodega}|${f.codigo_item}`),
   );
 });
 

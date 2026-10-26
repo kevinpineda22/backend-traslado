@@ -480,49 +480,79 @@ function esTransitorio(mensaje) {
   );
 }
 
-export async function leerBodegas(bodegas) {
-  const PAGE = 1000;
-  const todas = [];
-  let desde = 0;
+const PAGE = 1000;
+// Páginas en vuelo a la vez. Son lecturas por índice, cortas; no tiene nada que
+// ver con la concurrencia de Connekta (que es 3 porque el SQL Server detrás se
+// deadlockeaba). Medido el 26/10/2026 sobre las 23 páginas del par Parque+Llano:
+// de a una 10.9 s, de a 3 → 3.4 s, de a 6 → 2.0 s, de a 10 → 1.4 s. Se eligió 6:
+// 5,5x más rápido sin abrir diez conexiones por cada persona mirando el panel.
+const LECTURA_CONCURRENCIA = Number(process.env.SNAPSHOT_LECTURA_CONCURRENCIA) || 6;
 
-  // Cuántas filas DEBERÍAN venir. Se pide una sola vez, antes de paginar.
+/** Una página, con reintento de lo transitorio. Devuelve las filas o lanza. */
+async function pedirPagina(bodegas, desde) {
+  let ultimoError;
+  for (let intento = 1; intento <= LECTURA_REINTENTOS; intento++) {
+    const r = await supabase
+      .from(TABLE)
+      .select("*")
+      .in("bodega", bodegas)
+      .order("bodega")
+      .order("codigo_item")
+      .range(desde, desde + PAGE - 1);
+    if (!r.error) return r.data ?? [];
+    ultimoError = r.error.message;
+    if (!esTransitorio(ultimoError) || intento === LECTURA_REINTENTOS) break;
+    await new Promise((ok) => setTimeout(ok, LECTURA_ESPERA_MS * intento));
+  }
+  throw new Error(`Error al leer snapshot: ${ultimoError}`);
+}
+
+export async function leerBodegas(bodegas) {
+  // Cuántas filas DEBERÍAN venir. Además de verificar el resultado, este número
+  // dice de antemano cuántas páginas son, que es lo que permite pedirlas todas
+  // juntas en vez de esperar a que cada una avise si hay otra atrás.
   const { count: esperadas, error: errCount } = await supabase
     .from(TABLE)
     .select("*", { count: "exact", head: true })
     .in("bodega", bodegas);
   if (errCount) throw new Error(`Error al leer snapshot: ${errCount.message}`);
+  if (!esperadas) return [];
 
-  for (;;) {
-    let data;
-    let ultimoError;
-    for (let intento = 1; intento <= LECTURA_REINTENTOS; intento++) {
-      const r = await supabase
-        .from(TABLE)
-        .select("*")
-        .in("bodega", bodegas)
-        .order("bodega")
-        .order("codigo_item")
-        .range(desde, desde + PAGE - 1);
-      if (!r.error) {
-        data = r.data;
-        ultimoError = null;
-        break;
-      }
-      ultimoError = r.error.message;
-      if (!esTransitorio(ultimoError) || intento === LECTURA_REINTENTOS) break;
-      await new Promise((ok) => setTimeout(ok, LECTURA_ESPERA_MS * intento));
+  const inicios = [];
+  for (let d = 0; d < esperadas; d += PAGE) inicios.push(d);
+
+  // Pool de workers: cada uno toma el siguiente índice libre. Las páginas se
+  // guardan EN SU POSICIÓN, no en orden de llegada, así el resultado es el mismo
+  // venga como venga.
+  const paginas = new Array(inicios.length);
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= inicios.length) return;
+      paginas[i] = await pedirPagina(bodegas, inicios[i]);
     }
-    if (ultimoError) throw new Error(`Error al leer snapshot: ${ultimoError}`);
-    if (!data || data.length === 0) break;
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(LECTURA_CONCURRENCIA, inicios.length) }, worker),
+  );
 
-    todas.push(...data);
-    if (data.length < PAGE) break;
-    desde += PAGE;
+  const todas = paginas.flat();
+
+  // Cola: el cron escribe cada 15 min, así que entre el conteo y la lectura
+  // pueden haber entrado filas. Solo se sigue buscando si la última página vino
+  // LLENA, que es la única señal de que puede haber más atrás.
+  if (todas.length > 0 && (paginas.at(-1)?.length ?? 0) === PAGE) {
+    for (let desde = inicios.length * PAGE; ; desde += PAGE) {
+      const extra = await pedirPagina(bodegas, desde);
+      if (extra.length === 0) break;
+      todas.push(...extra);
+      if (extra.length < PAGE) break;
+    }
   }
 
-  // Guarda de completitud. Entre el count y la última página pueden entrar filas
-  // nuevas (el cron escribe cada 15 min), así que de más no es un problema: lo
-  // que no se puede devolver en silencio es de MENOS.
+  // Guarda de completitud. De más no es problema (ver la cola de arriba); lo que
+  // no se puede devolver en silencio es de MENOS.
   if (typeof esperadas === "number" && todas.length < esperadas) {
     throw new Error(
       `Lectura incompleta del snapshot: ${todas.length} de ${esperadas} filas. ` +
