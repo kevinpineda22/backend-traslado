@@ -4,13 +4,34 @@ import * as ContenedorModel from "./Contenedor.model.js";
 
 const TABLE = "traslados_items";
 
-/** Motivos válidos de faltante (espejo del CHECK de las migraciones 004 + 031). */
+/** Motivos válidos de faltante (espejo del CHECK de las migraciones 004 + 031 + 040). */
 export const MOTIVOS_FALTANTE = [
   "sin_stock",
   "surtido_parcial",
   "inventario_inflado",
   "corta_fecha_vencido",
+  "en_custodia",
 ];
+
+/**
+ * Motivos que exigen una nota escrita por quien los marca (`motivo_nota`).
+ * Espejo del CHECK `chk_items_motivo_nota` (040) y del front.
+ */
+export const MOTIVOS_CON_NOTA = ["en_custodia"];
+
+/**
+ * Motivos que solo existen para ciertas bodegas de ORIGEN. Un motivo que no está
+ * acá vale para todas. "En custodia" es solo de Principal Copacabana / Plaza.
+ */
+export const MOTIVOS_SOLO_ORIGEN = {
+  en_custodia: ["PV001"],
+};
+
+/** ¿Se puede usar este motivo en un despacho que sale de `origen`? */
+export function motivoPermitidoEnOrigen(motivo, origen) {
+  const sedes = MOTIVOS_SOLO_ORIGEN[motivo];
+  return !sedes || sedes.includes(String(origen || "").trim());
+}
 
 /**
  * Canonicalización a UND de lo que despachó el despachador.
@@ -157,11 +178,12 @@ export async function estadisticasMotivos() {
  * @param {string|null} [recolectadoPor] - correo de quien cuenta; null = el sistema
  * @param {string|null} [despachoId] - despacho al que TIENE que pertenecer el renglón
  * @param {number|null} [cantidadSuelta] - parte sin contenedor (UM del renglón)
+ * @param {string|null} [motivoNota] - nota del motivo; solo se guarda para MOTIVOS_CON_NOTA
  * @throws 409 RENGLON_TOMADO si el renglón ya lo está contando otra persona
  * @throws 409 RENGLON_FUERA_DEL_DESPACHO si el renglón no es (o dejó de ser) del despacho
  */
-export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null, cantidadSuelta = null) {
-  const pedidoEscritura = { itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta };
+export async function updateCantidadDespachador(itemId, cantidad, agotado = false, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null, cantidadSuelta = null, motivoNota = null) {
+  const pedidoEscritura = { itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta, motivoNota };
 
   // Dos vueltas alcanzan: la segunda relee el renglón y, si lo que cambió fue el
   // dueño o el despacho, lanza el error que corresponde. Si vuelve a perder la
@@ -196,7 +218,7 @@ function renglonFueraDelDespacho(itemId, despachoId) {
  * Un intento de escritura. Devuelve la fila escrita, o `null` si el renglón cambió
  * entre la lectura y la escritura (el llamador reintenta y la relectura decide).
  */
-async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta }) {
+async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta, motivoNota }) {
   // Traer cantidad_admin para validar el tope superior contra el valor real en BD.
   let lectura = supabase
     .from(TABLE)
@@ -276,11 +298,20 @@ async function intentarEscrituraDespachador({ itemId, cantidad, agotado, motivo,
 
   const motivoLimpio = motivo && MOTIVOS_FALTANTE.includes(motivo) ? motivo : null;
 
+  // La nota viaja atada a su motivo: si el motivo cambió a uno que no la pide, se
+  // borra. Si no, quedaría una nota de "en custodia" colgando de un "Agotado".
+  const notaLimpia = String(motivoNota ?? "").trim();
+  const llevaNota = MOTIVOS_CON_NOTA.includes(motivoLimpio);
+  if (llevaNota && !notaLimpia) {
+    throw createError(422, "Este motivo necesita una nota de quien lo marca.");
+  }
+
   const updatePayload = {
     cantidad_despachador: cant,
     cantidad_suelta: suelta,
     agotado: !!agotado,
     motivo: motivoLimpio,
+    motivo_nota: llevaNota ? notaLimpia : null,
   };
 
   // Se sella al dueño solo cuando cuenta una PERSONA. El sistema no reclama nada
@@ -333,6 +364,7 @@ export async function resetRecoleccionByDespacho(despachoId) {
       cantidad_suelta: null,
       agotado: false,
       motivo: null,
+      motivo_nota: null,
       recolectado_por: null,
     })
     .eq("despacho_id", despachoId);

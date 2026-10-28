@@ -35,6 +35,7 @@ const TIPO_PUBLICO = {
   surtido_parcial: { tipo: "SURTIDO_PARCIAL", etiqueta: "Surtido parcial en PV" },
   inventario_inflado: { tipo: "INVENTARIO_FANTASMA", etiqueta: "Inventario Fantasma" },
   corta_fecha_vencido: { tipo: "CORTA_FECHA_VENCIDO", etiqueta: "Corta fecha/Vencido" },
+  en_custodia: { tipo: "EN_CUSTODIA", etiqueta: "En custodia" },
 };
 
 /** Tipo público → motivo en BD. Se deriva para que no puedan desincronizarse. */

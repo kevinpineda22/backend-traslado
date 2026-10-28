@@ -421,7 +421,9 @@ export async function marcarAuditoriaAbierta(id) {
 export async function assertPuedeRecolectar(id, despachadorId) {
   const { data: d, error } = await supabase
     .from(TABLE)
-    .select("estado, despachador_id, inactivo")
+    // `origen` lo usa el lote de recolección: hay motivos que solo valen para
+    // ciertas bodegas (ItemModel.MOTIVOS_SOLO_ORIGEN).
+    .select("estado, despachador_id, inactivo, origen")
     .eq("id", id)
     .single();
 

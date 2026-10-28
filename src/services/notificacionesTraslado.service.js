@@ -36,6 +36,13 @@ const MOTIVO_LABEL = {
   surtido_parcial: "Surtido parcial en PV",
   inventario_inflado: "Inventario Fantasma",
   corta_fecha_vencido: "Corta fecha/Vencido",
+  en_custodia: "En custodia",
+};
+
+/** Motivo legible + la nota de quien lo marcó, si la hay ("En custodia: <nota>"). */
+const motivoConNota = (it) => {
+  const label = MOTIVO_LABEL[it.motivo] || it.motivo;
+  return it.motivo_nota ? `${label}: ${it.motivo_nota}` : label;
 };
 
 const MOTIVO_INFLADO = "inventario_inflado";
@@ -65,7 +72,7 @@ function filasTabla(items) {
         <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(it.descripcion || "—")}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${num(it.cantidad_admin)}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${num(it.cantidad_despachador)}</td>
-        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(MOTIVO_LABEL[it.motivo] || it.motivo)}</td>
+        <td style="padding:6px 10px;border:1px solid #e2e8f0;">${esc(motivoConNota(it))}</td>
       </tr>`,
     )
     .join("");
@@ -139,7 +146,7 @@ function filasCierre(items) {
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${pedido}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;">${recogido}</td>
         <td style="padding:6px 10px;border:1px solid #e2e8f0;color:${completo ? "#16a34a" : "#dc2626"};">
-          ${completo ? "Completo" : esc(MOTIVO_LABEL[it.motivo] || "Incompleto")}
+          ${completo ? "Completo" : esc(it.motivo ? motivoConNota(it) : "Incompleto")}
         </td>
       </tr>`;
     })

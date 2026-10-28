@@ -684,8 +684,8 @@ export async function obtenerManifiesto(despachoId) {
  * `motivo` (opcional): motivo del faltante — ver ItemModel.MOTIVOS_FALTANTE.
  * `despachoId`: el renglón TIENE que ser de ese despacho (ver el modelo).
  */
-export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null, cantidadSuelta = null) {
-  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta);
+export async function registrarRecoleccion(itemId, cantidad, agotado, motivo = null, nueva_um = null, nueva_cant_admin = null, nuevo_factor = null, recolectadoPor = null, despachoId = null, cantidadSuelta = null, motivoNota = null) {
+  return ItemModel.updateCantidadDespachador(itemId, cantidad, agotado, motivo, nueva_um, nueva_cant_admin, nuevo_factor, recolectadoPor, despachoId, cantidadSuelta, motivoNota);
 }
 
 /** Renglones por tanda en `registrarLoteRecoleccion`. */
@@ -724,9 +724,24 @@ export const TANDA_RECOLECCION = 8;
  * @returns {Promise<{resultados: object[], conflictos: object[], fuera_de_despacho: object[]}>}
  */
 export async function registrarLoteRecoleccion(despachoId, items, despachadorId = null) {
-  await DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
+  const despacho = await DespachoModel.assertPuedeRecolectar(despachoId, despachadorId);
 
   const unicos = [...new Map((items || []).map((it) => [it.id, it])).values()];
+
+  // Motivos atados a una sede ("En custodia" es solo de Plaza). Se rechaza el lote
+  // ENTERO antes de escribir nada: un rechazo a mitad de camino dejaría la mitad
+  // de los renglones escritos.
+  const motivoAjeno = unicos.find(
+    (it) => it.motivo && !ItemModel.motivoPermitidoEnOrigen(it.motivo, despacho?.origen),
+  );
+  if (motivoAjeno) {
+    const e = new Error(
+      `El motivo "${motivoAjeno.motivo}" no está disponible para traslados que salen de ${despacho?.origen}.`,
+    );
+    e.statusCode = 422;
+    e.expose = true;
+    throw e;
+  }
 
   const resultados = [];
   const conflictos = [];
@@ -749,6 +764,7 @@ export async function registrarLoteRecoleccion(despachoId, items, despachadorId 
           despachadorId,
           despachoId,
           item.cantidad_suelta ?? null,
+          item.motivo_nota ?? null,
         ),
       ),
     );

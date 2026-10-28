@@ -165,9 +165,12 @@ const recolectarSchema = z.object({
         cantidad: z.number().min(0, "cantidad no puede ser negativa"),
         agotado: z.boolean().optional(),
         motivo: z
-          .enum(["sin_stock", "surtido_parcial", "inventario_inflado", "corta_fecha_vencido"])
+          .enum(["sin_stock", "surtido_parcial", "inventario_inflado", "corta_fecha_vencido", "en_custodia"])
           .nullable()
           .optional(),
+        // Nota de quien marca el motivo (040). Obligatoria con "en_custodia" (ver
+        // el refine de abajo). DEBE estar declarada: Zod descarta lo que no nombra.
+        motivo_nota: z.string().trim().max(500, "La nota no puede pasar de 500 caracteres").nullable().optional(),
         nueva_unidad_medida: z.string().optional(),
         nueva_cantidad_admin: z.number().optional(),
         nuevo_factor: z.number().optional(),
@@ -176,6 +179,9 @@ const recolectarSchema = z.object({
         // que no nombra, y sin ella el backend volvería a deducir lo suelto desde
         // un total armado en el celular — justo lo que pisa a un compañero.
         cantidad_suelta: z.number().min(0, "cantidad_suelta no puede ser negativa").optional(),
+      }).refine((it) => it.motivo !== "en_custodia" || Boolean(it.motivo_nota), {
+        message: "El motivo En custodia necesita una nota",
+        path: ["motivo_nota"],
       }),
     )
     .min(1),
