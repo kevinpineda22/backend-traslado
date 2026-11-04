@@ -76,6 +76,9 @@ export async function mapaCapacidades(destino) {
     if (!mapa.has(k)) mapa.set(k, []);
     mapa.get(k).push({
       capacidad: num(r.capacidad),
+      // Descripción cargada con la capacidad: sirve de respaldo cuando el ítem no tiene
+      // ninguna fila en el snapshot de la que leerla.
+      descripcion: r.descripcion ? String(r.descripcion).trim() : "",
       unidad: r.unidad ? String(r.unidad).trim() : "",
       factor: r.factor != null ? num(r.factor) || null : null,
       // Propiedad del ÍTEM guardada en cada fila (migración 026): el ítem lo

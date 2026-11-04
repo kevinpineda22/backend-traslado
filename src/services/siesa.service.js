@@ -339,6 +339,75 @@ function reglasDe(destino) {
 }
 
 /**
+ * Ítems del portafolio que NO se muestran solo porque no existen en el origen.
+ *
+ * Machado oculta lo que no tiene fila en PV001 (no se puede despachar desde ahí), pero
+ * ocultarlo EN SILENCIO hace que el usuario cuente 371 productos donde espera 375. Esto
+ * devuelve esos ítems —los que cumplen TODAS las demás reglas del portafolio— con las
+ * sedes donde SÍ hay existencia, para avisarlos en pantalla sin ofrecerlos como despachables.
+ *
+ * Solo hace una lectura extra del snapshot cuando hay candidatos.
+ *
+ * @returns {Promise<Array<{codigo_item, descripcion, capacidad, unidad, sedes: Array<{codigo, nombre, disponible}>}>>}
+ */
+async function ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidades }) {
+  const reglasSinOrigen = { ...flujo, portafolio: { ...flujo.portafolio, requiereOrigen: false } };
+  const plan = flujo.portafolio.plan;
+
+  // Candidatos baratos: capacidad > 0, sin fila en el origen y, si el destino tiene fila,
+  // con el portafolio activo según ella. Sin fila del destino se decide con las demás.
+  const candidatos = [];
+  for (const [codigo, capRows] of capacidades) {
+    if (oMap.has(codigo)) continue;
+    if (!capRows.some((r) => num(r.capacidad) > 0)) continue;
+    const d = dMap.get(codigo);
+    if (d && !pasaPortafolio(reglasSinOrigen, d, undefined, capRows)) continue;
+    candidatos.push(codigo);
+  }
+  if (candidatos.length === 0) return [];
+
+  const filas = await leerBodegasItems(Object.keys(SEDES), candidatos);
+  const porItem = new Map();
+  for (const r of filas) {
+    const k = String(r.codigo_item).trim();
+    if (!porItem.has(k)) porItem.set(k, []);
+    porItem.get(k).push(r);
+  }
+
+  const ocultos = [];
+  for (const codigo of candidatos) {
+    const filasItem = porItem.get(codigo) || [];
+    if (filasItem.length === 0) continue; // sin ninguna fila no hay forma de verificar el CAM
+    const capRows = capacidades.get(codigo);
+    // El criterio es del ítem: da igual de qué bodega salga, pero se prefiere una fila que lo traiga.
+    const conCriterio = filasItem.find((r) => trim(r.criterios?.[plan])) || filasItem[0];
+    if (!pasaPortafolio(reglasSinOrigen, conCriterio, undefined, capRows)) continue;
+
+    const cap = capRows.find((r) => num(r.capacidad) > 0);
+    const sedes = filasItem
+      .filter((r) => r.bodega !== destino && r.bodega !== origen)
+      .map((r) => ({
+        codigo: trim(r.bodega),
+        nombre: nombreSede(trim(r.bodega)),
+        disponible: Math.max(0, Math.floor(num(r.disponible))),
+      }))
+      .filter((s) => s.disponible > 0)
+      .sort((a, b) => b.disponible - a.disponible);
+    ocultos.push({
+      codigo_item: codigo,
+      descripcion:
+        trim(filasItem.find((r) => trim(r.descripcion))?.descripcion) ||
+        capRows.find((r) => r.descripcion)?.descripcion ||
+        "",
+      capacidad: cap.capacidad,
+      unidad: cap.unidad || "",
+      sedes,
+    });
+  }
+  return ocultos.sort((a, b) => a.codigo_item.localeCompare(b.codigo_item, "es", { numeric: true }));
+}
+
+/**
  * Criterios que se devuelven con cada producto. En un flujo que NO clasifica (Machado) se
  * quita el CAT: es la clasificación de Llano, y dejarlo a la vista invita a que algún
  * consumidor lea la clase de Llano para Machado. Llano y General reciben el objeto tal cual.
@@ -648,6 +717,14 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           sugerido,
         });
       }
+    }
+
+    // Los que se esconden solo por no existir en el origen se informan aparte (no son
+    // despachables, pero el usuario tiene que saber que existen). Solo en flujos que
+    // exigen origen; Llano y General no reciben el campo.
+    if (flujo.portafolio?.requiereOrigen) {
+      const ocultos = await ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidades });
+      return { data: productos, ocultos_sin_origen: ocultos };
     }
 
     return { data: productos };

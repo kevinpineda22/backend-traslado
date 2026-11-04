@@ -264,10 +264,19 @@ export async function listarProductos(req, res, next) {
         ? SiesaService.getProductosLlano
         : SiesaService.getProductosTraslado;
 
-    const { data, error } = await obtener({ origen, destino });
+    const { data, error, ocultos_sin_origen } = await obtener({ origen, destino });
     if (error) return res.status(502).json({ ok: false, error });
 
-    res.json({ ok: true, data, flujo: flujo.id, origen, destino });
+    // `ocultos_sin_origen` solo existe en flujos que exigen origen (Machado): ítems del
+    // portafolio con capacidad que no aparecen en `data` porque el origen no los tiene.
+    res.json({
+      ok: true,
+      data,
+      ...(ocultos_sin_origen && { ocultos_sin_origen }),
+      flujo: flujo.id,
+      origen,
+      destino,
+    });
   } catch (error) {
     next(error);
   }

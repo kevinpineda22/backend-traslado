@@ -63,6 +63,13 @@ before(async () => {
         lecturasItems += 1;
         return filas.filter((f) => bodegas.includes(f.bodega) && codigos.includes(f.codigo_item));
       },
+      // Lo que importa el controlador de SIESA (la ruta se prueba en este archivo).
+      refrescarSnapshotUnico: async () => ({}),
+      refreshEnProgreso: () => false,
+      ultimaActualizacion: async () => null,
+      dispararRefreshRemoto: async () => ({}),
+      RefreshEnCursoError: class RefreshEnCursoError extends Error {},
+      PullIncompletoError: class PullIncompletoError extends Error {},
     },
   });
   mock.module("../src/models/Capacidad.model.js", {
@@ -303,4 +310,98 @@ test("los criterios de un producto de Machado no incluyen el CAT; los de Llano s
   assert.equal("CAT" in machado.criterios, false);
   assert.equal(machado.criterios.CAM, ACTIVO);
   assert.equal(llano.criterios.CAT, "CATEGORIA TIPO B");
+});
+
+/* ─── Ítems del portafolio ocultos solo por no existir en el origen ─── */
+
+const VILLAHERMOSA = "00201";
+
+test("los ítems con CAM y capacidad que no existen en PV001 se informan aparte, con dónde hay stock", async () => {
+  filas = [
+    fila(ORIGEN, "1"), fila(DESTINO, "1"), // visible
+    fila(DESTINO, "188291", { descripcion: "BORNEO UNO" }),
+    fila(VILLAHERMOSA, "188291", { disponible: 19, descripcion: "BORNEO UNO" }),
+    fila("00601", "188291", { disponible: 4, descripcion: "BORNEO UNO" }),
+    fila("00701", "188291", { disponible: 0 }), // sin stock: no se lista
+  ];
+  conCapacidad("1", 10);
+  conCapacidad("188291", 30);
+
+  const r = await getProductosLlano({ origen: ORIGEN, destino: DESTINO });
+
+  assert.deepEqual(r.data.map((p) => p.codigo_item), ["1"], "sigue sin ser despachable");
+  assert.deepEqual(r.ocultos_sin_origen, [
+    {
+      codigo_item: "188291",
+      descripcion: "BORNEO UNO",
+      capacidad: 30,
+      unidad: "",
+      sedes: [
+        { codigo: VILLAHERMOSA, nombre: "Villahermosa", disponible: 19 },
+        { codigo: "00601", nombre: "Vegas", disponible: 4 },
+      ],
+    },
+  ]);
+});
+
+test("un ítem sin fila en 01201 pero con CAM activo en otra bodega también se informa", async () => {
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1"), fila(VILLAHERMOSA, "188293", { disponible: 7 })];
+  conCapacidad("1", 10);
+  conCapacidad("188293", 12);
+
+  const r = await getProductosLlano({ origen: ORIGEN, destino: DESTINO });
+
+  assert.deepEqual(r.ocultos_sin_origen.map((o) => o.codigo_item), ["188293"]);
+});
+
+test("no se informan los que fallan OTRA regla: sin CAM activo o sin capacidad", async () => {
+  filas = [
+    fila(ORIGEN, "1"), fila(DESTINO, "1"),
+    fila(DESTINO, "2", { cam: "" }), fila(VILLAHERMOSA, "2", { cam: "" }), // sin CAM
+    fila(DESTINO, "3"), fila(VILLAHERMOSA, "3"), // CAM activo pero capacidad 0
+    fila(DESTINO, "4"), // CAM activo y sin capacidad cargada
+  ];
+  conCapacidad("1", 10);
+  conCapacidad("2", 10);
+  conCapacidad("3", 0);
+
+  const r = await getProductosLlano({ origen: ORIGEN, destino: DESTINO });
+
+  assert.deepEqual(r.ocultos_sin_origen, []);
+});
+
+test("la descripción cae a la de la capacidad cuando ninguna fila del snapshot la trae", async () => {
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1"), fila(VILLAHERMOSA, "9", { descripcion: "" })];
+  conCapacidad("1", 10);
+  capacidades.set("9", [{ capacidad: 5, unidad: "", factor: null, multi_um: false, descripcion: "DESDE EXCEL" }]);
+
+  const r = await getProductosLlano({ origen: ORIGEN, destino: DESTINO });
+
+  assert.equal(r.ocultos_sin_origen[0].descripcion, "DESDE EXCEL");
+});
+
+test("Llano no recibe el campo ocultos_sin_origen", async () => {
+  filas = [fila("00301", "1", { cat: "CATEGORIA TIPO A" }), fila("00401", "1", { cat: "CATEGORIA TIPO A" })];
+
+  const r = await getProductosLlano({ origen: "00301", destino: "00401" });
+
+  assert.equal("ocultos_sin_origen" in r, false);
+});
+
+test("la ruta incluye ocultos_sin_origen solo cuando el servicio lo manda", async () => {
+  const { listarProductos } = await import("../src/controllers/siesa.controller.js");
+  filas = [fila(ORIGEN, "1"), fila(DESTINO, "1"), fila(VILLAHERMOSA, "9")];
+  conCapacidad("1", 10);
+  conCapacidad("9", 5);
+  const responder = async (destino) => {
+    let cuerpo;
+    await listarProductos({ query: { destino } }, { json: (b) => (cuerpo = b), status: () => ({ json: (b) => (cuerpo = b) }) }, (e) => assert.fail(e.message));
+    return cuerpo;
+  };
+
+  const machado = await responder(DESTINO);
+
+  assert.equal(machado.ok, true);
+  assert.equal(machado.ocultos_sin_origen.length, 1);
+  assert.equal(machado.data.length, 1);
 });
