@@ -137,6 +137,19 @@ SELECT * FROM (
          ELSE '✅ nada pendiente' END,
     'ítems con categoria (subgrupo) en NULL',
     9
+
+  UNION ALL
+  -- 042 — capacidad por destino. Sin ella, la capacidad de Machado pisaría la de
+  -- Llano (la clave primaria no distingue sede) y el backend nuevo falla al guardar
+  -- capacidades (ON CONFLICT sobre una clave que no existe).
+  SELECT
+    '042_capacidad_por_destino',
+    CASE WHEN NOT EXISTS (
+      SELECT 1 FROM col WHERE table_name='traslados_capacidad' AND column_name='destino'
+    ) THEN '❌ FALTA — LA CAPACIDAD DE MACHADO PISARÍA LA DE LLANO' ELSE '✅ ok' END,
+    'traslados_capacidad.destino debe existir (clave primaria destino+item+unidad)',
+    10
+
 ) t
 ORDER BY orden;
 

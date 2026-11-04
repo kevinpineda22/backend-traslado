@@ -348,9 +348,11 @@ function esDescodificado(cat) {
 }
 
 /**
- * Productos del flujo Llano — facetado (los ítems que maneja el DESTINO, igual
- * que General) con sugerido A/B/C. La clase sale del criterio CAT del DESTINO
- * (Girardota Llano, 00401) y la capacidad de la tabla `traslados_capacidad`.
+ * Productos de un flujo A/B/C (Llano, Machado) — facetado (los ítems que maneja el
+ * DESTINO, igual que General) con sugerido A/B/C. La clase sale del criterio CAT del
+ * DESTINO (ej. Girardota Llano, 00401) y la capacidad de la tabla
+ * `traslados_capacidad` filtrada por ese destino. El nombre conserva "Llano" por
+ * historia: el comportamiento es el de cualquier flujo con lógica "abc".
  * Ítems sin capacidad cargada → capacidad 0 → sugerido 0.
  *
  * Las cadencias A/B/C salen de la config editable (tabla traslados_config);
@@ -365,10 +367,15 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
   try {
     const [rows, capacidades, config] = await Promise.all([
       leerBodegas([origen, destino]),
-      mapaCapacidades(),
+      // Capacidad DEL DESTINO: Llano y Machado tienen filas separadas (migración 042).
+      mapaCapacidades(destino),
       obtenerConfig(),
     ]);
-    const cadenciasEfectivas = cadencias || config.llano;
+    // Cadencias del flujo que se está calculando (config.llano, config.machado…),
+    // no las de Llano a ciegas: cada flujo A/B/C las edita por separado. El respaldo
+    // a Llano cubre un flujo A/B/C nuevo al que todavía no se le sumó clave en la config.
+    const flujoId = getFlujoPorDestino(destino)?.id;
+    const cadenciasEfectivas = cadencias || config[flujoId] || config.llano;
 
     const oMap = new Map();
     const dMap = new Map();
@@ -560,7 +567,7 @@ export async function getDisponibilidadItem({ codigo, destino }) {
     const bodegas = Object.keys(SEDES);
     const [rows, capacidades, config] = await Promise.all([
       leerBodegasItems(bodegas, [codigo]),
-      mapaCapacidades(),
+      mapaCapacidades(destino),
       obtenerConfig(),
     ]);
 
@@ -585,7 +592,7 @@ export async function getDisponibilidadItem({ codigo, destino }) {
         capacidad,
         consumoDiario: consumoDestino,
         inventario: inventarioDestino,
-        cadencias: config.llano,
+        cadencias: config[flujo.id] || config.llano,
       });
     } else {
       const periodo =
@@ -772,10 +779,12 @@ export async function getSedes() {
  *   3. `null` ⇒ factor desconocido. Se devuelve igual, en null, para que el
  *      front oculte esa UM en vez de inventar una conversión.
  */
-async function conFactores(f120_id, umsCrudas) {
+async function conFactores(f120_id, umsCrudas, destino) {
   let porCapacidad = new Map();
   try {
-    porCapacidad = await factoresDeItem(f120_id);
+    // Los factores de UM viven en la capacidad POR DESTINO (migración 042): el P15 de
+    // Machado puede no ser el de Llano. Sin destino se lee el por defecto (Llano).
+    porCapacidad = await factoresDeItem(f120_id, destino);
   } catch (err) {
     // Sin capacidad configurada seguimos con FACTOR_UNIDAD: mejor una UM con
     // factor canónico que ninguna.
@@ -802,8 +811,10 @@ async function conFactores(f120_id, umsCrudas) {
  * ([{unidad,factor}], el dato nuevo). Ver `conFactores` para el porqué de los
  * dos campos.
  * @param {string} codigo - Código escaneado.
+ * @param {string} [destino] - bodega destino A/B/C cuyos factores de UM se leen
+ *   (ausente = Llano, el comportamiento anterior a Machado).
  */
-export async function resolverCodigoBarras(codigo) {
+export async function resolverCodigoBarras(codigo, destino) {
   const limpio = String(codigo).trim();
   try {
     // 1. Buscar si es un código de barras específico (EAN/UPC)
@@ -818,7 +829,7 @@ export async function resolverCodigoBarras(codigo) {
       return {
         isBase: false,
         f120_id: eanMatch.f120_id,
-        ...(await conFactores(eanMatch.f120_id, [eanMatch.unidad_medida].filter(Boolean))),
+        ...(await conFactores(eanMatch.f120_id, [eanMatch.unidad_medida].filter(Boolean), destino)),
       };
     }
 
@@ -837,7 +848,7 @@ export async function resolverCodigoBarras(codigo) {
       isBase: true,
       f120_id: limpio,
       // Fallback a UND si no hay ninguna configurada
-      ...(await conFactores(limpio, unidades.length > 0 ? unidades : ["UND"])),
+      ...(await conFactores(limpio, unidades.length > 0 ? unidades : ["UND"], destino)),
     };
   } catch (error) {
     // Fallback absoluto ante cualquier falla

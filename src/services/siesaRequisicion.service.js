@@ -151,6 +151,10 @@ export function resolverCO(sede) {
  *   - 50 si la mercancía sale del Parque (00301) al Llano (00401).
  *   - 02 en todos los demás casos.
  * La entrada siempre lleva 01 (ver MOTIVO_ENTRADA).
+ *
+ * Machado (PV001 → 01201) cae en "02" aunque su flujo sea A/B/C como el de Llano:
+ * el negocio confirmó que el motivo 50 es solo del par Parque → Llano. Por eso la
+ * regla compara bodegas y NO la lógica del flujo.
  */
 function motivoSalida(despacho) {
   const origen = trim(despacho?.origen);

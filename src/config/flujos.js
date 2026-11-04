@@ -19,6 +19,7 @@ export const SEDES = {
   "00801": "San Juan",
   "00601": "Vegas",
   "00401": "Girardota Llano",
+  "01201": "Machado",
 };
 
 /**
@@ -37,7 +38,7 @@ export const SEDES = {
  * equivocado.
  *
  * CONFIRMADOS por el usuario contra los C.O. de SIESA (001=plaza, 002=villa,
- * 003=girardota, 004=llano, 006=vegas, 007=barbosa, 008=sanJuan).
+ * 003=girardota, 004=llano, 006=vegas, 007=barbosa, 008=sanJuan, 012=machado).
  * Override por entorno: SIESA_IMPORTAR_CO_POR_SEDE.
  */
 export const CENTROS_OPERACION = {
@@ -48,6 +49,7 @@ export const CENTROS_OPERACION = {
   "00601": "006", // vegas — Vegas
   "00701": "007", // barbosa — Barbosa
   "00801": "008", // sanJuan — San Juan
+  "01201": "012", // machado — Machado (Copacabana)
 };
 
 /** Centro de operación de una sede (o "" si no está mapeada). */
@@ -70,6 +72,17 @@ export const FLUJOS = {
     destinos: ["00401"],
     logica: "abc", // clasificación A/B/C con capacidad desde Excel
   },
+  // Machado se comporta EXACTAMENTE como Llano (misma lógica A/B/C, misma
+  // auto-clasificación, mismo "enviar por partes"); solo cambian origen y destino.
+  // Su capacidad vive en `traslados_capacidad` bajo destino "01201" (migración 042)
+  // y sus cadencias A/B/C en la clave `machado` de la config de reposición.
+  machado: {
+    id: "machado",
+    nombre: "Traslado Machado",
+    origen: "PV001",
+    destinos: ["01201"],
+    logica: "abc", // clasificación A/B/C con capacidad desde Excel
+  },
 };
 
 /** Todas las bodegas involucradas (origen + destinos) — sirve para filtrar SIESA. */
@@ -87,6 +100,29 @@ export function getFlujoPorDestino(destino) {
   return (
     Object.values(FLUJOS).find((f) => f.destinos.includes(destino)) || null
   );
+}
+
+/**
+ * ¿El flujo usa la lógica A/B/C (capacidad por Excel, auto-clasificación, envío por
+ * partes)? Se pregunta por la LÓGICA y no por el nombre "llano" a propósito: Machado
+ * se comporta igual y el próximo flujo A/B/C también. Comparar contra un id fijo
+ * obligaba a tocar cada servicio por cada sede nueva, y el que se olvidara quedaba
+ * con el comportamiento de General sin ningún error que avisara.
+ */
+export function esFlujoAbc(flujoId) {
+  return FLUJOS[flujoId]?.logica === "abc";
+}
+
+/** ¿La bodega destino pertenece a un flujo A/B/C? */
+export function esDestinoAbc(destino) {
+  return getFlujoPorDestino(String(destino ?? "").trim())?.logica === "abc";
+}
+
+/** Bodegas destino de todos los flujos A/B/C (las que tienen capacidad propia). */
+export function destinosAbc() {
+  return Object.values(FLUJOS)
+    .filter((f) => f.logica === "abc")
+    .flatMap((f) => f.destinos);
 }
 
 /** Nombre legible de una sede por su código. */

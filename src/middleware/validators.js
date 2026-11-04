@@ -216,21 +216,41 @@ const descripcionOpcional = z.preprocess(
   z.string().optional(),
 );
 
-// Capacidad Llano — carga masiva desde Excel (item + capacidad + descripción opcional)
+// Destino (bodega) dueño de la capacidad. Opcional: ausente → el controlador asume
+// Llano (00401). Debe declararse en el esquema porque `validate` reemplaza el body
+// por los datos parseados y descartaría un campo no declarado.
+const destinoOpcional = z.preprocess(
+  (v) => (v == null || String(v).trim() === "" ? undefined : String(v).trim()),
+  z.string().optional(),
+);
+
+// Capacidad por destino — carga masiva desde Excel (item + capacidad + descripción opcional)
 const capacidadBulkSchema = z.object({
+  destino: destinoOpcional,
   items: z
     .array(
       z.object({
         item: z.preprocess((v) => String(v ?? "").trim(), z.string().min(1)),
         capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
         descripcion: descripcionOpcional,
+        // UM y factor opcionales (mismas columnas que exporta la pantalla): sin UM la
+        // fila es la base. Se declaran porque `validate` descarta lo no declarado.
+        um: z.preprocess(
+          (v) => (v == null || String(v).trim() === "" ? undefined : String(v).trim()),
+          z.string().optional(),
+        ),
+        factor: z.preprocess(
+          (v) => (v === undefined || v === null || v === "" ? undefined : Number(v)),
+          z.number().positive().optional(),
+        ),
       }),
     )
     .min(1, "El Excel no tiene ítems válidos"),
 });
 
-// Capacidad Llano — edición o alta manual de un ítem
+// Capacidad por destino — edición o alta manual de un ítem
 const capacidadUnoSchema = z.object({
+  destino: destinoOpcional,
   capacidad: z.preprocess((v) => Number(v) || 0, z.number().nonnegative()),
   descripcion: descripcionOpcional,
   // UM opcional del ítem: "" limpia, valor asigna. undefined → no se toca.
@@ -244,14 +264,17 @@ const capacidadUnoSchema = z.object({
   ),
 });
 
-// Config de reposición — días editables (cadencias Llano + cubrimiento General)
+// Config de reposición — días editables (cadencias Llano y Machado + cubrimiento General)
 const diaPos = z.preprocess((v) => Number(v), z.number().positive("debe ser mayor a 0"));
+const cadenciasSchema = z.object({
+  A: diaPos,
+  B: diaPos,
+  C: diaPos,
+});
 const configSchema = z.object({
-  llano: z.object({
-    A: diaPos,
-    B: diaPos,
-    C: diaPos,
-  }),
+  llano: cadenciasSchema,
+  // Opcional: un front anterior a Machado no la manda y el modelo completa el default.
+  machado: cadenciasSchema.optional(),
   general: z.object({
     // null / "" → usar el PeriodoCubrimiento de SIESA por ítem
     periodoCubrimiento: z.preprocess(

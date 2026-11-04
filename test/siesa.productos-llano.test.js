@@ -26,6 +26,9 @@ let clasesLlanoDeItems;
 let filas = [];
 /** codigo → filas de traslados_capacidad, en el formato de `mapaCapacidades`. */
 let capacidades = new Map();
+/** Último destino con el que se pidió la capacidad, y últimas cadencias usadas. */
+let destinoCapacidadLeido;
+let ultimasCadencias;
 
 /** Fila del snapshot con lo mínimo que lee getProductosLlano. */
 const fila = (bodega, codigo, { disponible = 10, consumo = 0, cat = "CATEGORIA TIPO A" } = {}) => ({
@@ -53,17 +56,30 @@ before(async () => {
     },
   });
   mock.module("../src/models/Capacidad.model.js", {
-    exports: { mapaCapacidades: async () => capacidades, factoresDeItem: async () => new Map() },
+    exports: {
+      mapaCapacidades: async (d) => {
+        destinoCapacidadLeido = d;
+        return capacidades;
+      },
+      factoresDeItem: async () => new Map(),
+    },
   });
   mock.module("../src/models/Config.model.js", {
     exports: {
-      obtener: async () => ({ llano: { A: 1, B: 3, C: 5 }, general: { periodoCubrimiento: null } }),
+      obtener: async () => ({
+        llano: { A: 1, B: 3, C: 5 },
+        machado: { A: 2, B: 4, C: 6 },
+        general: { periodoCubrimiento: null },
+      }),
     },
   });
   mock.module("../src/config/supabase.js", { exports: { supabase: {} } });
   mock.module("../src/services/sugerido.service.js", {
     exports: {
-      calcularSugeridoABC: ({ consumoDiario }) => consumoDiario,
+      calcularSugeridoABC: ({ consumoDiario, cadencias }) => {
+        ultimasCadencias = cadencias;
+        return consumoDiario;
+      },
       calcularSugeridoGeneral: () => ({ stockSeguridad: 0, necesidad: 0 }),
     },
   });
@@ -73,6 +89,8 @@ before(async () => {
 
 beforeEach(() => {
   capacidades = new Map();
+  destinoCapacidadLeido = undefined;
+  ultimasCadencias = undefined;
 });
 
 const productosDe = async () => {
@@ -218,4 +236,37 @@ test("un ítem que no está en el snapshot queda FUERA del mapa (no 'ninguno')",
   const clases = await clasesLlanoDeItems(DESTINO, ["10", "99"]);
   assert.equal(clases.get("10"), "A");
   assert.equal(clases.has("99"), false);
+});
+
+/* ─── Machado (PV001 → 01201): mismo comportamiento A/B/C, datos propios ─── */
+
+test("Machado lee la capacidad de SU destino y usa SUS cadencias, no las de Llano", async () => {
+  filas = [fila("PV001", "7"), fila("01201", "7", { consumo: 4 })];
+  conCapacidad("7", 40);
+
+  const { data, error } = await getProductosLlano({ origen: "PV001", destino: "01201" });
+
+  assert.equal(error, undefined);
+  assert.deepEqual(data.map((p) => p.codigo_item), ["7"]);
+  assert.equal(destinoCapacidadLeido, "01201", "la capacidad se pide filtrada por el destino");
+  assert.deepEqual(ultimasCadencias, { A: 2, B: 4, C: 6 }, "cadencias de config.machado");
+});
+
+test("Llano sigue usando config.llano y la capacidad de 00401", async () => {
+  filas = [fila(ORIGEN, "7"), fila(DESTINO, "7", { consumo: 4 })];
+  conCapacidad("7", 40);
+
+  await productosDe();
+
+  assert.equal(destinoCapacidadLeido, "00401");
+  assert.deepEqual(ultimasCadencias, { A: 1, B: 3, C: 5 });
+});
+
+test("las cadencias explícitas siguen pisando las de la config", async () => {
+  filas = [fila("PV001", "7"), fila("01201", "7", { consumo: 4 })];
+  conCapacidad("7", 40);
+
+  await getProductosLlano({ origen: "PV001", destino: "01201", cadencias: { A: 9, B: 9, C: 9 } });
+
+  assert.deepEqual(ultimasCadencias, { A: 9, B: 9, C: 9 });
 });

@@ -1,4 +1,11 @@
-import { listar, normCodigo, actualizarCapacidadLote, crearCapacidadLote } from "../models/Capacidad.model.js";
+import {
+  listar,
+  normCodigo,
+  normDestino,
+  DESTINO_DEFECTO,
+  actualizarCapacidadLote,
+  crearCapacidadLote,
+} from "../models/Capacidad.model.js";
 import { createError } from "../middleware/errorHandler.js";
 
 /* =============================================
@@ -30,7 +37,27 @@ const URL_BASE_DEFECTO =
 // estuviera en el controlador, en el servicio y en los tests, renombrar la tienda
 // en SRI obligaría a cambiar tres sitios y olvidar uno daría un reporte vacío en
 // lugar de un error.
-const TIENDA_DEFECTO = "GIRARDOTA LLANO";
+//
+// POR QUÉ UN MAPA POR DESTINO
+// Cada tienda con capacidad propia (migración 042) se consulta en SRI bajo su
+// nombre. El destino decide qué tienda se pregunta y qué filas de
+// `traslados_capacidad` se comparan: pedirle a SRI una tienda y comparar contra las
+// filas de otra generaría "cambios" falsos sobre la capacidad equivocada.
+//
+// AGREGAR UN DESTINO AQUÍ HABILITA LA COMPARACIÓN CON SRI PARA ÉL. Machado (01201)
+// NO está a propósito: todavía no consume SRI y no se inventa su nombre. Sin
+// entrada, la comparación responde 400 "no disponible" en vez de consultar SRI con
+// un nombre equivocado (reporte vacío o 422). Cuando SRI mida Machado, se confirma
+// el nombre exacto con SRI y se suma una línea acá.
+const TIENDA_POR_DESTINO = {
+  "00401": "GIRARDOTA LLANO",
+};
+
+/** ¿Este destino puede compararse con SRI? (tiene tienda mapeada) */
+export function sriDisponibleParaDestino(destino) {
+  return Object.hasOwn(TIENDA_POR_DESTINO, normDestino(destino));
+}
+const TIENDA_DEFECTO = TIENDA_POR_DESTINO[DESTINO_DEFECTO];
 
 const TIMEOUT_MS = 20_000;
 const LIMITE_POR_PAGINA = 500; // máximo que acepta SRI
@@ -48,9 +75,36 @@ const EPSILON = 1e-6;
 const num = (v) => Number(v);
 const redondear = (n) => Math.round(n * 1e4) / 1e4;
 
-/** Tienda por defecto, configurable sin tocar código. */
-export function tiendaPorDefecto() {
-  return String(process.env.SRI_CAPACIDAD_TIENDA || "").trim() || TIENDA_DEFECTO;
+/**
+ * Tienda de SRI que corresponde a un destino, configurable sin tocar código.
+ *
+ * `SRI_CAPACIDAD_TIENDA` solo pisa la tienda del destino por defecto (Llano): es una
+ * variable de antes de Machado y aplicarla a todos los destinos haría que consultar
+ * Machado devolviera los datos de Llano. Un destino sin tienda mapeada es un error
+ * explícito, no un silencio.
+ */
+export function tiendaPorDefecto(destino) {
+  const dest = normDestino(destino);
+  asegurarSriDisponible(dest);
+  if (dest === DESTINO_DEFECTO) {
+    return String(process.env.SRI_CAPACIDAD_TIENDA || "").trim() || TIENDA_DEFECTO;
+  }
+  return TIENDA_POR_DESTINO[dest];
+}
+
+/**
+ * Corta con 400 si el destino no tiene tienda de SRI. Se llama ANTES de cualquier
+ * lectura o llamada externa, y vale aunque el cliente mande un `tienda` explícito:
+ * comparar las filas de un destino contra la tienda de otro generaría cambios falsos.
+ */
+export function asegurarSriDisponible(destino) {
+  const dest = normDestino(destino);
+  if (!sriDisponibleParaDestino(dest)) {
+    throw createError(
+      400,
+      `La comparación con SRI no está disponible para el destino ${dest}: no tiene una tienda de SRI configurada.`,
+    );
+  }
 }
 
 /* =============================================
@@ -566,14 +620,15 @@ export function compararCapacidad(itemsSri, filasNuestras, { tienda, ahora = new
  * Genera el reporte dry-run. Solo lee: dos lecturas (SRI y `traslados_capacidad`)
  * y una comparación en memoria.
  */
-export async function compararConSri({ tienda, fetchImpl, filas: filasLeidas } = {}) {
-  const tiendaFinal = String(tienda || "").trim() || tiendaPorDefecto();
+export async function compararConSri({ tienda, destino, fetchImpl, filas: filasLeidas } = {}) {
+  asegurarSriDisponible(destino);
+  const tiendaFinal = String(tienda || "").trim() || tiendaPorDefecto(destino);
   // SRI primero: si el token falta o está vencido, se falla sin haber leído la
   // tabla entera por nada.
   const itemsSri = await obtenerItemsSri({ tienda: tiendaFinal, fetchImpl });
   // `filas` solo lo pasa `aplicarConSri`, para que la comparación y la guarda de
   // `fijo` trabajen sobre la MISMA lectura de la tabla. Sin él, se lee aquí.
-  const filas = filasLeidas ?? (await listar());
+  const filas = filasLeidas ?? (await listar(destino));
   return compararCapacidad(itemsSri, filas, { tienda: tiendaFinal });
 }
 
@@ -594,7 +649,7 @@ const TAMANO_TANDA = 50;
  * @param {{tienda?: string, esperados?: unknown, fetchImpl?: Function, comparar?: Function, ahora?: Date}} opciones
  *   `comparar` es inyectable solo para poder forzar casos en tests.
  */
-export async function aplicarConSri({ tienda, esperados, fetchImpl, comparar = compararConSri, ahora = new Date() } = {}) {
+export async function aplicarConSri({ tienda, destino, esperados, fetchImpl, comparar = compararConSri, ahora = new Date() } = {}) {
   // Se valida ANTES de leer SRI: un body mal formado no debe costar tráfico ni
   // dejar la duda de si algo se escribió.
   if (typeof esperados !== "number" || !Number.isInteger(esperados) || esperados < 0) {
@@ -604,8 +659,10 @@ export async function aplicarConSri({ tienda, esperados, fetchImpl, comparar = c
     );
   }
 
-  const filas = await listar();
-  const reporte = await comparar({ tienda, fetchImpl, filas });
+  const dest = normDestino(destino);
+  asegurarSriDisponible(dest);
+  const filas = await listar(dest);
+  const reporte = await comparar({ tienda, destino: dest, fetchImpl, filas });
   const cambios = reporte.cambios;
 
   // POR QUÉ `esperados` ES OBLIGATORIO
@@ -645,6 +702,7 @@ export async function aplicarConSri({ tienda, esperados, fetchImpl, comparar = c
     const tanda = cambios.slice(i, i + TAMANO_TANDA);
     const { escritas, fallidas } = await actualizarCapacidadLote(
       tanda.map((c) => ({ codigo_item: c.codigo_item, unidad: c.unidad, capacidad: c.capacidad_propuesta })),
+      dest,
     );
     const anteriorPor = new Map(tanda.map((c) => [`${c.codigo_item}|${c.unidad}`, c]));
     for (const e of escritas) {
@@ -780,10 +838,11 @@ export function calcularFaltantes({ itemsSri, filasNuestras, tienda } = {}) {
 /**
  * Reporte de faltantes. Solo lee: SRI y `traslados_capacidad`.
  */
-export async function faltantesConSri({ tienda, fetchImpl, filas: filasLeidas } = {}) {
-  const tiendaFinal = String(tienda || "").trim() || tiendaPorDefecto();
+export async function faltantesConSri({ tienda, destino, fetchImpl, filas: filasLeidas } = {}) {
+  asegurarSriDisponible(destino);
+  const tiendaFinal = String(tienda || "").trim() || tiendaPorDefecto(destino);
   const itemsSri = await obtenerItemsSri({ tienda: tiendaFinal, fetchImpl });
-  const filasNuestras = filasLeidas ?? (await listar());
+  const filasNuestras = filasLeidas ?? (await listar(destino));
   return calcularFaltantes({ itemsSri, filasNuestras, tienda: tiendaFinal });
 }
 
@@ -796,6 +855,7 @@ export async function faltantesConSri({ tienda, fetchImpl, filas: filasLeidas } 
  */
 export async function crearFaltantesConSri({
   tienda,
+  destino,
   esperados,
   fetchImpl,
   faltantes = faltantesConSri,
@@ -814,7 +874,9 @@ export async function crearFaltantesConSri({
     );
   }
 
-  const reporte = await faltantes({ tienda, fetchImpl });
+  const dest = normDestino(destino);
+  asegurarSriDisponible(dest);
+  const reporte = await faltantes({ tienda, destino: dest, fetchImpl });
   const crear = reporte.crear;
 
   // Mismo contrato que `aplicarConSri`: si lo de hoy no es lo que se revisó, no se
@@ -838,7 +900,7 @@ export async function crearFaltantesConSri({
   // Tras releer no hay forma de distinguir un cálculo mal hecho de esa carrera, y la
   // carrera es la causa esperable. Decirle "el software está roto" a quien solo tiene
   // que volver a consultar el reporte es mandarlo a buscar un problema que no existe.
-  const existentes = new Set((await leerFilas()).map((f) => normCodigo(f.codigo_item)));
+  const existentes = new Set((await leerFilas(dest)).map((f) => normCodigo(f.codigo_item)));
   const infractores = [...new Set(crear.map((c) => normCodigo(c.codigo_item)).filter((c) => existentes.has(c)))];
   if (infractores.length > 0) {
     throw createError(
@@ -849,6 +911,7 @@ export async function crearFaltantesConSri({
 
   const { escritos, fallidos, no_intentados: noIntentados } = await crearCapacidadLote(
     crear.map((c) => ({ codigo_item: c.codigo_item, capacidad: c.capacidad, descripcion: c.descripcion })),
+    dest,
   );
 
   return {

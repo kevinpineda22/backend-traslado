@@ -141,3 +141,38 @@ test("los ítems omitidos a mano y los no recolectados no llegan al plano", () =
   const items = armarSalida(conRuido).Movimientos.map((m) => m.ITEM);
   assert.deepEqual(items, ["0010255", "0016262"]);
 });
+
+/* ---------------------------------------------------------------------------
+   Machado (PV001 → 01201): flujo A/B/C como Llano, pero motivo 02 y C.O. propios
+   --------------------------------------------------------------------------- */
+
+const despachoMachado = {
+  ...despacho,
+  origen: "PV001",
+  destino: "01201",
+};
+
+test("Machado (PV001 → 01201): el motivo de salida es 02, NO 50", () => {
+  // El 50 es solo del par Parque → Llano. Que Machado sea un flujo A/B/C como Llano
+  // no cambia el motivo: lo confirmó el negocio.
+  const { Movimientos } = armarSalida(despachoMachado);
+
+  assert.ok(Movimientos.length > 0);
+  assert.ok(Movimientos.every((m) => m.MOTIVO === "02"));
+});
+
+test("Parque → Llano conserva el motivo 50 (la regla de Machado no la altera)", () => {
+  const { Movimientos } = armarSalida(despacho);
+
+  assert.ok(Movimientos.every((m) => m.MOTIVO === "50"));
+});
+
+test("Machado: el C.O. resuelve 001 para el origen (PV001) y 012 para el destino (01201)", () => {
+  const salida = armarSalida(despachoMachado);
+  const entrada = armarEntrada(despachoMachado, "1757");
+
+  assert.equal(salida.Documentos[0]["C.O DOCTO"], "001");
+  assert.equal(entrada.Documentos[0]["C.O DOCTO"], "012");
+  assert.equal(salida.Documentos[0].BODEGA_ENTRADA, "01201");
+  assert.ok(entrada.Movimientos.every((m) => m.MOTIVO === "01" && m["C.O MOVIMIENTO"] === "012"));
+});

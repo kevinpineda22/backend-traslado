@@ -2,7 +2,7 @@ import * as ConfigModel from "../models/Config.model.js";
 
 /**
  * GET /api/config
- * Devuelve la config de reposición (cadencias Llano + cubrimiento General).
+ * Devuelve la config de reposición (cadencias Llano y Machado + cubrimiento General).
  */
 export async function obtener(_req, res, next) {
   try {
@@ -15,7 +15,7 @@ export async function obtener(_req, res, next) {
 
 /**
  * PUT /api/config
- * Guarda la config. Body: { llano: { A, B, C }, general: { periodoCubrimiento } }
+ * Guarda la config. Body: { llano: { A, B, C }, machado?: { A, B, C }, general: { periodoCubrimiento } }
  */
 export async function guardar(req, res, next) {
   try {

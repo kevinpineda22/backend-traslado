@@ -7,6 +7,8 @@ import { supabase } from "../config/supabase.js";
 
    - "reposicion" → los días que usa el cálculo del sugerido:
        · llano:   cadencias A/B/C (días de reposición por clase)
+       · machado: ídem, propias de Machado. La clave es el `id` del flujo A/B/C
+                  (FLUJOS en config/flujos.js): cada flujo A/B/C lee la suya.
        · general: periodoCubrimiento global que PISA el de SIESA (null = usar el
                   de cada ítem que trae SIESA)
 
@@ -18,8 +20,10 @@ const CLAVE = "reposicion";
 const CLAVE_ALERTAS = "alertas";
 
 // Defaults si nunca se guardó nada (coinciden con CADENCIAS_DEFAULT del cálculo).
+const CADENCIAS_DEFAULT = { A: 1, B: 3, C: 5 };
 const DEFAULTS = {
-  llano: { A: 1, B: 3, C: 5 },
+  llano: { ...CADENCIAS_DEFAULT },
+  machado: { ...CADENCIAS_DEFAULT },
   general: { periodoCubrimiento: null },
 };
 
@@ -27,6 +31,13 @@ const numPos = (v, def) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : def;
 };
+
+/** Sanea las cadencias de UN flujo A/B/C contra sus defaults. */
+const sanearCadencias = (v, def) => ({
+  A: numPos(v?.A, def.A),
+  B: numPos(v?.B, def.B),
+  C: numPos(v?.C, def.C),
+});
 
 /** Devuelve la config actual, completando con defaults lo que falte. */
 export async function obtener() {
@@ -39,11 +50,8 @@ export async function obtener() {
 
   const v = data?.valor || {};
   return {
-    llano: {
-      A: numPos(v?.llano?.A, DEFAULTS.llano.A),
-      B: numPos(v?.llano?.B, DEFAULTS.llano.B),
-      C: numPos(v?.llano?.C, DEFAULTS.llano.C),
-    },
+    llano: sanearCadencias(v?.llano, DEFAULTS.llano),
+    machado: sanearCadencias(v?.machado, DEFAULTS.machado),
     general: {
       periodoCubrimiento:
         v?.general?.periodoCubrimiento == null
@@ -53,14 +61,20 @@ export async function obtener() {
   };
 }
 
-/** Upsert de la config (valor completo y saneado). */
+/**
+ * Upsert de la config (valor completo y saneado).
+ *
+ * POR QUÉ SE FUSIONA CON LO GUARDADO
+ * Una clave de flujo AUSENTE en la entrada no significa "volver al default": significa
+ * que quien guarda no la conoce. Un front anterior a Machado hace PUT sin `machado`, y
+ * sanearla contra los defaults reiniciaba en silencio las cadencias que el admin había
+ * editado. Si la clave falta, se conserva lo vigente (`obtener()`); si viene, se sanea.
+ */
 export async function guardar(entrada) {
+  const vigente = await obtener();
   const config = {
-    llano: {
-      A: numPos(entrada?.llano?.A, DEFAULTS.llano.A),
-      B: numPos(entrada?.llano?.B, DEFAULTS.llano.B),
-      C: numPos(entrada?.llano?.C, DEFAULTS.llano.C),
-    },
+    llano: sanearCadencias(entrada?.llano ?? vigente.llano, DEFAULTS.llano),
+    machado: sanearCadencias(entrada?.machado ?? vigente.machado, DEFAULTS.machado),
     general: {
       periodoCubrimiento:
         entrada?.general?.periodoCubrimiento == null ||

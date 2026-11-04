@@ -4,11 +4,14 @@ import * as SriCapacidadService from "../services/sriCapacidad.service.js";
  * GET /api/sri/capacidad/comparar?tienda=GIRARDOTA%20LLANO
  * Compara la capacidad medida por SRI contra `traslados_capacidad` y devuelve el
  * reporte de lo que cambiaría. No modifica nada. `tienda` es opcional.
+ * `destino` (opcional, por defecto Llano 00401) acota las filas comparadas y decide la
+ * tienda de SRI; un destino sin tienda mapeada (Machado) responde 400.
  */
 export async function comparar(req, res, next) {
   try {
     const tienda = typeof req.query.tienda === "string" ? req.query.tienda : undefined;
-    const reporte = await SriCapacidadService.compararConSri({ tienda });
+    const destino = typeof req.query.destino === "string" ? req.query.destino : undefined;
+    const reporte = await SriCapacidadService.compararConSri({ tienda, destino });
     res.json(reporte);
   } catch (error) {
     next(error);
@@ -25,7 +28,8 @@ export async function aplicar(req, res, next) {
   try {
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const tienda = typeof body.tienda === "string" ? body.tienda : undefined;
-    const resultado = await SriCapacidadService.aplicarConSri({ tienda, esperados: body.esperados });
+    const destino = typeof body.destino === "string" ? body.destino : undefined;
+    const resultado = await SriCapacidadService.aplicarConSri({ tienda, destino, esperados: body.esperados });
     res.status(resultado.ok ? 200 : 500).json(resultado);
   } catch (error) {
     next(error);
@@ -40,7 +44,8 @@ export async function aplicar(req, res, next) {
 export async function faltantes(req, res, next) {
   try {
     const tienda = typeof req.query.tienda === "string" ? req.query.tienda : undefined;
-    const reporte = await SriCapacidadService.faltantesConSri({ tienda });
+    const destino = typeof req.query.destino === "string" ? req.query.destino : undefined;
+    const reporte = await SriCapacidadService.faltantesConSri({ tienda, destino });
     res.json({ ok: true, consultado_en: new Date().toISOString(), ...reporte });
   } catch (error) {
     next(error);
@@ -57,7 +62,8 @@ export async function crear(req, res, next) {
   try {
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const tienda = typeof body.tienda === "string" ? body.tienda : undefined;
-    const resultado = await SriCapacidadService.crearFaltantesConSri({ tienda, esperados: body.esperados });
+    const destino = typeof body.destino === "string" ? body.destino : undefined;
+    const resultado = await SriCapacidadService.crearFaltantesConSri({ tienda, destino, esperados: body.esperados });
     res.status(resultado.ok ? 200 : 500).json(resultado);
   } catch (error) {
     next(error);

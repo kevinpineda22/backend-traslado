@@ -25,7 +25,7 @@ import { fichaDeItem } from "./siesa.service.js";
 // `clasesLlanoDeItems` deja la columna A/B/C vacía — lo mismo que pasa si la
 // lectura falla — en vez de romper todo. En producción el módulo real la exporta.
 import * as SiesaService from "./siesa.service.js";
-import { getFlujoPorDestino } from "../config/flujos.js";
+import { getFlujoPorDestino, esFlujoAbc } from "../config/flujos.js";
 import { fechaHoraLegible } from "../config/tiempo.js";
 import { analitica as calcularAnalitica } from "./analitica.service.js";
 import ExcelJS from "exceljs";
@@ -292,7 +292,8 @@ export async function cambiarEstado(id, estado, firmaData, despachadorId = null)
     // avanza.
     try {
       const despacho = await DespachoModel.findById(id);
-      if (despacho.flujo === "llano") {
+      // Por LÓGICA y no por nombre: Machado se comporta igual que Llano.
+      if (esFlujoAbc(despacho.flujo)) {
         // QUÉ CUENTA COMO PENDIENTE — no alcanza con `cantidad_despachador == null`.
         //
         // El front, un paso antes de este cambio de estado, llama a /recolectar con
@@ -518,10 +519,10 @@ export async function assertPuedeRecolectar(despachoId, despachadorId) {
 export async function dividirEnPartes(id) {
   const despacho = await DespachoModel.findById(id);
   if (!despacho) throw createError(404, "Despacho no encontrado");
-  if ((despacho.flujo || "general") !== "llano") {
+  if (!esFlujoAbc(despacho.flujo || "general")) {
     throw createError(
       409,
-      "Enviar por partes es del flujo Llano. En General hay que resolver cada producto antes de cerrar.",
+      "Enviar por partes es de los flujos Llano y Machado (A/B/C). En General hay que resolver cada producto antes de cerrar.",
     );
   }
   // LAS CANASTILLAS ABIERTAS NO BLOQUEAN — y antes sí.

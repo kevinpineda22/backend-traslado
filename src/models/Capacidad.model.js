@@ -1,14 +1,33 @@
 import { supabase } from "../config/supabase.js";
 
 /* =============================================
-   Capacidad de góndola por ítem (flujo Llano).
+   Capacidad de góndola por ítem y por DESTINO (flujos A/B/C: Llano, Machado).
 
    El admin sube/edita un Excel (item, capacidad) desde un módulo aparte. Esta
-   capacidad alimenta el cálculo A/B/C del sugerido en el flujo Llano.
+   capacidad alimenta el cálculo A/B/C del sugerido del flujo de ese destino.
+
+   POR QUÉ LA CAPACIDAD ES POR DESTINO
+   La clave primaria es (destino, codigo_item, unidad) desde la migración 042. Con
+   la clave anterior (sin sede) la capacidad de Machado habría pisado la de Llano
+   para el mismo ítem. TODA lectura y escritura de este modelo acota por `destino`.
    ============================================= */
 
 const TABLE = "traslados_capacidad";
 const num = (v) => Number(v) || 0;
+
+/**
+ * Destino que se asume cuando el llamador no manda ninguno. Es Llano (00401) por
+ * compatibilidad: antes de Machado esta tabla era solo de Llano, y el front o los
+ * scripts viejos no mandan `destino`. Las filas previas a la migración 042 quedaron
+ * con este mismo valor.
+ */
+export const DESTINO_DEFECTO = "00401";
+
+/** Normaliza el destino recibido; vacío/ausente → Llano. */
+export const normDestino = (d) => String(d ?? "").trim() || DESTINO_DEFECTO;
+
+// Clave de conflicto del upsert: coincide con la clave primaria de la migración 042.
+const CONFLICTO = "destino,codigo_item,unidad";
 
 // El Excel suele traer el código con ceros a la izquierda ("0000019"), pero el
 // codigo_item del snapshot es numérico sin ceros ("19"). Normalizamos sacando
@@ -20,8 +39,9 @@ export const normCodigo = (c) => {
   return s.replace(/^0+/, "") || s;
 };
 
-/** Lista completa de capacidades (para el módulo de gestión). */
-export async function listar() {
+/** Lista completa de capacidades de UN destino (para el módulo de gestión). */
+export async function listar(destino) {
+  const dest = normDestino(destino);
   const PAGE = 1000;
   const todas = [];
   let desde = 0;
@@ -29,6 +49,7 @@ export async function listar() {
     const { data, error } = await supabase
       .from(TABLE)
       .select("*")
+      .eq("destino", dest)
       .order("codigo_item")
       .range(desde, desde + PAGE - 1);
     if (error) throw new Error(`Error al listar capacidades: ${error.message}`);
@@ -45,8 +66,8 @@ export async function listar() {
  * Un ítem puede tener VARIAS filas (una por UM). La fila "sin UM" (base) usa
  * unidad "". Si tiene UM, la `capacidad` está EN esa unidad (base = cap × factor).
  */
-export async function mapaCapacidades() {
-  const filas = await listar();
+export async function mapaCapacidades(destino) {
+  const filas = await listar(destino);
   const mapa = new Map();
   // Normalizamos la clave (sin ceros a la izquierda) para que matchee el
   // codigo_item del snapshot, incluso con filas viejas guardadas con ceros.
@@ -76,12 +97,13 @@ export async function mapaCapacidades() {
  * @param {string} codigoItem
  * @returns {Promise<Map<string, number>>} unidad → factor (solo filas con UM y factor)
  */
-export async function factoresDeItem(codigoItem) {
+export async function factoresDeItem(codigoItem, destino) {
   const codigo = normCodigo(codigoItem);
   if (!codigo) return new Map();
   const { data, error } = await supabase
     .from(TABLE)
     .select("unidad, factor")
+    .eq("destino", normDestino(destino))
     .eq("codigo_item", codigo);
   if (error) throw new Error(`Error al leer factores del ítem: ${error.message}`);
 
@@ -96,11 +118,15 @@ export async function factoresDeItem(codigoItem) {
 
 /**
  * Upsert masivo desde el Excel. Reemplaza/actualiza la capacidad de cada ítem.
+ * Solo toca las filas del `destino` indicado (Llano si no se manda): subir el Excel
+ * de Machado no puede alterar la capacidad de Llano.
  * @param {Array<{item?, codigo_item?, capacidad}>} items
+ * @param {string} [destino] bodega destino dueña de la capacidad
  * @returns {number} cantidad de filas afectadas
  */
-export async function upsertBulk(items) {
+export async function upsertBulk(items, destino) {
   const ts = new Date().toISOString();
+  const dest = normDestino(destino);
 
   // POR QUÉ UNA CARGA MASIVA NO PUEDE TOCAR UN ÍTEM PROTEGIDO
   // `fijo` marca los ítems cuya capacidad NO sale de una fuente automática: alguien
@@ -111,6 +137,7 @@ export async function upsertBulk(items) {
   const { data: protegidas, error: errProt } = await supabase
     .from(TABLE)
     .select("codigo_item")
+    .eq("destino", dest)
     .eq("fijo", true);
   if (errProt) throw new Error(`No se pudo leer qué ítems están protegidos: ${errProt.message}`);
   const itemsProtegidos = new Set((protegidas || []).map((f) => normCodigo(f.codigo_item)));
@@ -132,7 +159,7 @@ export async function upsertBulk(items) {
     }
     const unidad = String(i.unidad ?? i.um ?? "").trim(); // "" = fila base
     const factor = unidad ? (Number(i.factor) > 0 ? Number(i.factor) : 1) : null;
-    const fila = { codigo_item, unidad, capacidad: num(i.capacidad), factor, updated_at: ts };
+    const fila = { destino: dest, codigo_item, unidad, capacidad: num(i.capacidad), factor, updated_at: ts };
     const desc = i.descripcion != null ? String(i.descripcion).trim() : "";
     if (desc) fila.descripcion = desc; // solo si viene, para no pisar la existente
     porClave.set(`${codigo_item}|${unidad}`, fila);
@@ -152,7 +179,7 @@ export async function upsertBulk(items) {
       const chunk = arr.slice(i, i + CHUNK);
       const { error } = await supabase
         .from(TABLE)
-        .upsert(chunk, { onConflict: "codigo_item,unidad" });
+        .upsert(chunk, { onConflict: CONFLICTO });
       if (error) throw new Error(`Error al guardar capacidades: ${error.message}`);
     }
   };
@@ -167,9 +194,10 @@ export async function upsertBulk(items) {
  * "" es la fila base (capacidad en unidades), un valor es una fila de esa UM
  * (capacidad en esa UM). Así el mismo ítem puede tener CAJA + BULTO sin pisarse.
  */
-export async function actualizar(codigoItem, capacidad, descripcion, unidad, factor) {
+export async function actualizar(codigoItem, capacidad, descripcion, unidad, factor, destino) {
   const um = String(unidad || "").trim(); // "" = fila base
   const fila = {
+    destino: normDestino(destino),
     codigo_item: normCodigo(codigoItem),
     unidad: um,
     capacidad: num(capacidad),
@@ -180,7 +208,7 @@ export async function actualizar(codigoItem, capacidad, descripcion, unidad, fac
 
   const { data, error } = await supabase
     .from(TABLE)
-    .upsert(fila, { onConflict: "codigo_item,unidad" })
+    .upsert(fila, { onConflict: CONFLICTO })
     .select()
     .single();
   if (error) throw new Error(`Error al actualizar capacidad: ${error.message}`);
@@ -207,16 +235,19 @@ export async function actualizar(codigoItem, capacidad, descripcion, unidad, fac
  * orquesta pueda frenar y reportar con exactitud.
  *
  * @param {Array<{codigo_item:string, unidad:string, capacidad:number}>} filas
+ * @param {string} [destino] bodega destino dueña de las filas (Llano si no se manda)
  * @returns {Promise<{escritas: Array<object>, fallidas: Array<object>}>}
  */
-export async function actualizarCapacidadLote(filas) {
+export async function actualizarCapacidadLote(filas, destino) {
   const ts = new Date().toISOString();
+  const dest = normDestino(destino);
   const resultados = await Promise.all(
     filas.map(async (f) => {
       try {
         const { data, error } = await supabase
           .from(TABLE)
           .update({ capacidad: f.capacidad, updated_at: ts })
+          .eq("destino", dest)
           .eq("codigo_item", f.codigo_item)
           .eq("unidad", f.unidad)
           .select("codigo_item");
@@ -259,11 +290,14 @@ export async function actualizarCapacidadLote(filas) {
  * Nunca lanza por un fallo de la base: devuelve qué se escribió y qué falló.
  *
  * @param {Array<{codigo_item:string, capacidad:number, descripcion?:string}>} filas
+ * @param {string} [destino] bodega destino dueña de las filas (Llano si no se manda)
  * @returns {Promise<{escritos: Array<object>, fallidos: Array<{codigo_item:string, unidad:string, capacidad:number, motivo:string}>, no_intentados: number}>}
  */
-export async function crearCapacidadLote(filas) {
+export async function crearCapacidadLote(filas, destino) {
   const ts = new Date().toISOString();
+  const dest = normDestino(destino);
   const aInsertar = (filas || []).map((f) => ({
+    destino: dest,
     codigo_item: normCodigo(f.codigo_item),
     unidad: "",
     capacidad: num(f.capacidad),
@@ -312,13 +346,15 @@ export async function crearCapacidadLote(filas) {
  *
  * @param {string} codigoItem
  * @param {boolean} permitido
+ * @param {string} [destino] solo se marcan las filas de este destino
  * @returns {Promise<{codigo_item:string, multi_um:boolean, filas:number}>}
  */
-export async function setMultiUm(codigoItem, permitido) {
+export async function setMultiUm(codigoItem, permitido, destino) {
   const codigo = normCodigo(codigoItem);
   const { data, error } = await supabase
     .from(TABLE)
     .update({ multi_um: !!permitido, updated_at: new Date().toISOString() })
+    .eq("destino", normDestino(destino))
     .eq("codigo_item", codigo)
     .select("codigo_item");
 
@@ -326,11 +362,12 @@ export async function setMultiUm(codigoItem, permitido) {
   return { codigo_item: codigo, multi_um: !!permitido, filas: data?.length || 0 };
 }
 
-/** Elimina una fila (ítem + UM). `unidad` "" = la fila base. */
-export async function eliminar(codigoItem, unidad = "") {
+/** Elimina una fila (destino + ítem + UM). `unidad` "" = la fila base. */
+export async function eliminar(codigoItem, unidad = "", destino) {
   const { error } = await supabase
     .from(TABLE)
     .delete()
+    .eq("destino", normDestino(destino))
     .eq("codigo_item", normCodigo(codigoItem))
     .eq("unidad", String(unidad || "").trim());
   if (error) throw new Error(`Error al eliminar capacidad: ${error.message}`);

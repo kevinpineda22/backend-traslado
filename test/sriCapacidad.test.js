@@ -436,8 +436,8 @@ test("una respuesta con otra forma falla fuerte en lugar de dar un reporte vací
 test("compararConSri lee fijo de la tabla y no hace ninguna escritura", async () => {
   process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
   bd.tablas.traslados_capacidad = [
-    { codigo_item: "0000019", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "A" },
-    { codigo_item: "21", unidad: "", capacidad: 5, factor: null, fijo: true, descripcion: "B" },
+    { destino: "00401", codigo_item: "0000019", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "A" },
+    { destino: "00401", codigo_item: "21", unidad: "", capacidad: 5, factor: null, fijo: true, descripcion: "B" },
   ];
   bd.log.length = 0;
 
@@ -468,14 +468,14 @@ function escenarioAplicar(n) {
   const items = [];
   for (let i = 1; i <= n; i += 1) {
     const codigo = String(1000 + i);
-    filas.push({ codigo_item: codigo, unidad: "", capacidad: 10, factor: null, fijo: false, descripcion: `D${codigo}`, updated_at: "viejo" });
+    filas.push({ destino: "00401", codigo_item: codigo, unidad: "", capacidad: 10, factor: null, fijo: false, descripcion: `D${codigo}`, updated_at: "viejo" });
     items.push(itemSri(codigo, [entrada("UND", 20, 1)]));
   }
-  filas.push({ codigo_item: "5001", unidad: "", capacidad: 7, factor: null, fijo: false, descripcion: "IGUAL", updated_at: "viejo" });
+  filas.push({ destino: "00401", codigo_item: "5001", unidad: "", capacidad: 7, factor: null, fijo: false, descripcion: "IGUAL", updated_at: "viejo" });
   items.push(itemSri("5001", [entrada("UND", 7, 1)]));
-  filas.push({ codigo_item: "5002", unidad: "", capacidad: 3, factor: null, fijo: true, descripcion: "FIJO", updated_at: "viejo" });
+  filas.push({ destino: "00401", codigo_item: "5002", unidad: "", capacidad: 3, factor: null, fijo: true, descripcion: "FIJO", updated_at: "viejo" });
   items.push(itemSri("5002", [entrada("UND", 99, 1)]));
-  filas.push({ codigo_item: "5003", unidad: "", capacidad: 4, factor: null, fijo: false, descripcion: "SOLO NUESTRO", updated_at: "viejo" });
+  filas.push({ destino: "00401", codigo_item: "5003", unidad: "", capacidad: 4, factor: null, fijo: false, descripcion: "SOLO NUESTRO", updated_at: "viejo" });
   bd.tablas.traslados_capacidad = filas;
   bd.log.length = 0;
   bd.hooks.antesDe = null;
@@ -829,8 +829,8 @@ test("faltantes: redondea igual que la comparación", () => {
 
 function escenarioCrear() {
   bd.tablas.traslados_capacidad = [
-    { codigo_item: "0000019", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "EXISTE", updated_at: "viejo" },
-    { codigo_item: "25588", unidad: "P15", capacidad: 40, factor: 15, fijo: false, descripcion: "SOLO UM", updated_at: "viejo" },
+    { destino: "00401", codigo_item: "0000019", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "EXISTE", updated_at: "viejo" },
+    { destino: "00401", codigo_item: "25588", unidad: "P15", capacidad: 40, factor: 15, fijo: false, descripcion: "SOLO UM", updated_at: "viejo" },
   ];
   bd.log.length = 0;
   bd.hooks.antesDe = null;
@@ -979,4 +979,70 @@ test("crear vía controlador: 200 al crear y 500 con el detalle si el insert fal
   } finally {
     globalThis.fetch = original;
   }
+});
+
+/* ---------------------------------------------------------------------------
+   Destinos sin tienda en SRI (Machado, 01201): la comparación NO está disponible
+   --------------------------------------------------------------------------- */
+
+test("un destino sin tienda de SRI (Machado) responde 400 y nunca llama a SRI ni a la tabla", async () => {
+  process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
+  let llamadas = 0;
+  const fetchImpl = async () => {
+    llamadas += 1;
+    return pagina([], 1);
+  };
+  bd.log.length = 0;
+
+  const casos = [
+    () => compararConSri({ destino: "01201", fetchImpl }),
+    // Aunque el cliente mande una tienda a mano: no se compara Machado contra otra tienda.
+    () => compararConSri({ destino: "01201", tienda: "GIRARDOTA LLANO", fetchImpl }),
+    () => faltantesConSri({ destino: "01201", fetchImpl }),
+    () => aplicarConSri({ destino: "01201", esperados: 0, fetchImpl }),
+    () => crearFaltantesConSri({ destino: "01201", esperados: 0, fetchImpl }),
+  ];
+  for (const caso of casos) {
+    await assert.rejects(caso(), (e) => {
+      assert.equal(e.statusCode, 400);
+      assert.match(e.message, /no está disponible para el destino 01201/);
+      return true;
+    });
+  }
+
+  assert.equal(llamadas, 0, "no se hizo ninguna llamada a SRI");
+  assert.equal(bd.log.length, 0, "ni una lectura de la tabla");
+});
+
+test("el controlador de /comparar pasa el destino: Machado → 400 por next(), Llano sigue andando", async () => {
+  process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
+  const { comparar } = await import("../src/controllers/sriCapacidad.controller.js");
+
+  let error;
+  await comparar({ query: { destino: "01201" } }, { json: () => assert.fail("no debía responder") }, (e) => (error = e));
+  assert.equal(error.statusCode, 400);
+
+  const { fetchImpl } = escenarioAplicar(1);
+  const original = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    let cuerpo;
+    await comparar({ query: { destino: "00401" } }, { json: (b) => (cuerpo = b) }, (e) => assert.fail(e.message));
+    assert.equal(cuerpo.tienda, "GIRARDOTA LLANO");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("compararConSri filtra las filas por destino: solo compara contra las de Llano", async () => {
+  process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
+  bd.tablas.traslados_capacidad = [
+    { destino: "00401", codigo_item: "19", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "LLANO" },
+    { destino: "01201", codigo_item: "19", unidad: "", capacidad: 5, factor: null, fijo: false, descripcion: "MACHADO" },
+  ];
+  const fetchImpl = async () => pagina([itemSri("19", [entrada("UND", 300, 1)])], 1);
+
+  const r = await compararConSri({ fetchImpl });
+
+  assert.deepEqual(r.cambios.map((c) => c.capacidad_actual), [100], "la fila de Machado no entra");
 });

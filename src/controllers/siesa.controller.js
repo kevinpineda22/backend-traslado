@@ -16,7 +16,7 @@ import {
   RefreshEnCursoError,
   PullIncompletoError,
 } from "../services/snapshot.service.js";
-import { listarFlujos, getFlujoPorDestino } from "../config/flujos.js";
+import { listarFlujos, getFlujoPorDestino, esDestinoAbc } from "../config/flujos.js";
 
 // Cooldown del refresh manual: si el snapshot es muy reciente, no dispares otra corrida.
 const COOLDOWN_MANUAL_MS = 60 * 1000;
@@ -323,7 +323,7 @@ export async function listarSedes(_req, res, next) {
 }
 
 /**
- * GET /api/siesa/codigos-barras/:codigo
+ * GET /api/siesa/codigos-barras/:codigo[?destino=01201]
  * Resuelve un código de barras a su f120_id, unidad de medida y descripción.
  *
  * La DESCRIPCIÓN se suma sin quitar nada del contrato viejo (los consumidores
@@ -337,7 +337,16 @@ export async function resolverCodigoBarrasCtrl(req, res, next) {
     if (!codigo) {
       return res.status(400).json({ ok: false, error: "El código es requerido" });
     }
-    const data = await SiesaService.resolverCodigoBarras(codigo);
+    // `?destino=` opcional: de qué tienda se leen los factores de UM. Ausente =
+    // comportamiento anterior (Llano). Presente debe ser un destino A/B/C, que son los
+    // únicos con capacidad propia; otro valor es un error del cliente, no se ignora.
+    const destino = typeof req.query.destino === "string" ? req.query.destino.trim() : "";
+    if (destino && !esDestinoAbc(destino)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: `El destino ${destino} no tiene capacidad propia (no es un flujo A/B/C)` });
+    }
+    const data = await SiesaService.resolverCodigoBarras(codigo, destino || undefined);
     const ficha = await SiesaService.fichaDeItem(data?.f120_id || codigo);
     res.json({ ok: true, data: { ...data, descripcion: ficha.descripcion } });
   } catch (error) {

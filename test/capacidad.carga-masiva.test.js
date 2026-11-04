@@ -31,7 +31,8 @@ before(async () => {
   ({ upsertBulk } = Modelo);
 });
 
-const fila = (codigo_item, unidad, capacidad, fijo = false) => ({
+const fila = (codigo_item, unidad, capacidad, fijo = false, destino = "00401") => ({
+  destino,
   codigo_item,
   unidad,
   capacidad,
@@ -119,4 +120,76 @@ test("ya no existe `eliminarTodos`: vaciar la tabla no es una operación disponi
     undefined,
     "para borrar una fila puntual está `eliminar(codigoItem, unidad)`",
   );
+});
+
+/* ─── Capacidad por destino (migración 042): Llano y Machado no se pisan ─── */
+
+test("subir capacidad para Machado (01201) NO toca ninguna fila de Llano (00401)", async () => {
+  const llanoAntes = structuredClone(bd.tablas.traslados_capacidad);
+
+  // El MISMO ítem 600 existe en Llano con 12; en Machado se carga con 77.
+  const r = await upsertBulk(
+    [
+      { item: "600", capacidad: 77 },
+      { item: "999", capacidad: 5 },
+    ],
+    "01201",
+  );
+
+  assert.equal(r.guardadas, 2);
+  const t = bd.tablas.traslados_capacidad;
+  assert.deepEqual(
+    t.filter((f) => f.destino === "00401"),
+    llanoAntes,
+    "las filas de Llano quedaron idénticas",
+  );
+  const machado = t.filter((f) => f.destino === "01201");
+  assert.equal(machado.length, 2);
+  assert.equal(machado.find((f) => f.codigo_item === "600").capacidad, 77);
+  assert.equal(t.find((f) => f.destino === "00401" && f.codigo_item === "600").capacidad, 12);
+});
+
+test("sin destino, la carga va a Llano (compatibilidad con el front anterior)", async () => {
+  await upsertBulk([{ item: "999", capacidad: 5 }]);
+
+  const nueva = bd.tablas.traslados_capacidad.find((f) => f.codigo_item === "999");
+  assert.equal(nueva.destino, "00401");
+});
+
+test("un ítem protegido en Llano NO queda protegido en Machado, y viceversa", async () => {
+  // `fijo` es una decisión por tienda: lo medido a mano en Llano no dice nada de Machado.
+  const r = await upsertBulk([{ item: "1455", capacidad: 321 }], "01201");
+
+  assert.deepEqual(r.saltadas, []);
+  assert.equal(r.guardadas, 1);
+  assert.equal(
+    bd.tablas.traslados_capacidad.find((f) => f.destino === "00401" && f.codigo_item === "1455").capacidad,
+    200,
+  );
+  assert.equal(
+    bd.tablas.traslados_capacidad.find((f) => f.destino === "01201" && f.codigo_item === "1455").capacidad,
+    321,
+  );
+});
+
+test("listar, mapaCapacidades y eliminar trabajan solo sobre el destino pedido", async () => {
+  await upsertBulk([{ item: "600", capacidad: 77 }], "01201");
+
+  assert.equal((await Modelo.listar("01201")).length, 1);
+  assert.equal((await Modelo.listar()).length, 4, "sin destino = Llano");
+  assert.equal((await Modelo.mapaCapacidades("01201")).get("600")[0].capacidad, 77);
+  assert.equal((await Modelo.mapaCapacidades("00401")).get("600")[0].capacidad, 12);
+
+  await Modelo.eliminar("600", "", "01201");
+
+  assert.equal((await Modelo.listar("01201")).length, 0);
+  assert.equal((await Modelo.listar("00401")).length, 4, "borrar en Machado no toca Llano");
+});
+
+test("actualizar (alta manual) escribe en el destino indicado sin pisar al otro", async () => {
+  await Modelo.actualizar("600", 55, "X", "", null, "01201");
+
+  const t = bd.tablas.traslados_capacidad;
+  assert.equal(t.find((f) => f.destino === "01201" && f.codigo_item === "600").capacidad, 55);
+  assert.equal(t.find((f) => f.destino === "00401" && f.codigo_item === "600").capacidad, 12);
 });

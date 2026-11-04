@@ -249,6 +249,40 @@ Cosas del proceso de Johon que **no existen** todavía en código:
 
 ---
 
+## 10.1 Flujo Machado y cómo agregar una sede A/B/C
+
+**Machado** (bodega `01201`, C.O. `012`, Copacabana) es un flujo `machado`: `PV001 → 01201`,
+lógica `abc`. Se comporta EXACTAMENTE como Llano (sugerido A/B/C con capacidad por Excel,
+auto-clasificación de pendientes, "enviar por partes"); solo cambian origen y destino.
+
+Qué es propio de cada flujo A/B/C (no se comparte):
+- **Capacidad:** `traslados_capacidad` tiene clave `(destino, codigo_item, unidad)` desde la migración
+  `042`. La API de capacidad acepta `destino` (query o body) y asume `00401` si no llega.
+- **Cadencias A/B/C:** la config de reposición guarda una clave por flujo (`llano`, `machado`).
+- **Motivo de salida SIESA:** sigue siendo `02` (el `50` es solo del par Parque → Llano).
+- **SRI:** `sriCapacidad.service.js` tiene un mapa destino → tienda. Machado NO está: la comparación
+  con SRI responde 400 "no disponible" para él hasta que se agregue su línea.
+
+Pendientes de Machado: dirección real (`direccion: ""` en el front, `utils/sedesInfo.js`) y nombre de la
+tienda en SRI. La cuenta de recibo se crea desde la app (no hay migración).
+
+### Checklist: agregar una sede A/B/C nueva
+1. `src/config/flujos.js`: sumar la sede a `SEDES`, su C.O. a `CENTROS_OPERACION` y un flujo nuevo en
+   `FLUJOS` con `logica: "abc"`. El `id` del flujo es la clave de sus cadencias.
+2. `src/models/Config.model.js` y `validators.js` (`configSchema`): sumar la clave del flujo con los defaults
+   A=1, B=3, C=5.
+3. Front: `utils/sedesInfo.js`, `FlotaAdmin.jsx` (lista de sedes), `Dias.jsx`/`useConfig.js` (cadencias) y el
+   selector de destino de `CapacidadLlano.jsx`.
+4. Cargar la capacidad de la sede desde Capacidad (eligiendo el destino); no se comparte con otras sedes.
+5. Si va a usar SRI: agregar `destino → nombre exacto de la tienda` en `TIENDA_POR_DESTINO`.
+6. **PASO EXTERNO:** el query de Connekta `merkahorro_traslados_dev` debe incluir la bodega nueva en su
+   filtro (ver `CONSULTA_SNAPSHOT_CONNEKTA.md`). Sin eso el snapshot no trae datos de la sede y el panel
+   responde "Sin datos de inventario para la bodega ...".
+7. Correr la migración de capacidad si es la primera vez (`042`) y redesplegar backend y front.
+
+Nada del código compara contra el nombre `"llano"` para decidir el comportamiento A/B/C: se usa
+`esFlujoAbc(flujoId)` / `getFlujoPorDestino(d)?.logica === "abc"`.
+
 ## 11. Bitácora / dónde retomar
 
 > Append-only. Lo más reciente arriba. Al retomar, leer esto primero.
