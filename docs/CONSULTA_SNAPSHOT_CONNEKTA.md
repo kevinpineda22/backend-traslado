@@ -297,6 +297,7 @@ WHERE dbo.t150_mc_bodegas.f150_id_cia = 1
     OR dbo.t150_mc_bodegas.f150_id = '00801'
     OR dbo.t150_mc_bodegas.f150_id = '00601'
     OR dbo.t150_mc_bodegas.f150_id = '00401'
+    OR dbo.t150_mc_bodegas.f150_id = '01201'
   )
 ORDER BY dbo.t150_mc_bodegas.f150_id,
          dbo.v121a.v121a_id_item,
