@@ -86,7 +86,10 @@ export async function obtener(id, { conClase = false } = {}) {
  * seguir el traslado. Ver `clasesLlanoDeItems` para por qué se deriva.
  */
 async function conClaseLlano(despacho) {
-  if (getFlujoPorDestino(despacho.destino)?.logica !== "abc") return despacho;
+  const flujo = getFlujoPorDestino(despacho.destino);
+  // Sin clasificación (Machado) el monitor no tiene columna de clase: se deja `clase`
+  // sin definir para que no aparezca una columna vacía.
+  if (flujo?.logica !== "abc" || !flujo.clasificacion) return despacho;
   const items = despacho.traslados_items || [];
   if (items.length === 0) return despacho;
 

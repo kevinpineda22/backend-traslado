@@ -70,18 +70,50 @@ export const FLUJOS = {
     nombre: "Traslado Llano",
     origen: "00301",
     destinos: ["00401"],
-    logica: "abc", // clasificación A/B/C con capacidad desde Excel
+    logica: "abc", // capacidad desde Excel; sugerido por clase A/B/C
+    // Qué ítems muestra el flujo (ver `pasaPortafolio` en siesa.service.js):
+    //   plan:  criterio del snapshot que define el portafolio ("CAT", "CAM"…). Un ítem
+    //          sin valor en ese criterio NO se muestra.
+    //   valor: (opcional) el valor EXACTO que debe tener (se compara sin tildes ni
+    //          mayúsculas). Sin `valor`, cualquier valor no vacío sirve.
+    //   excluir: (opcional) valores que sacan al ítem del portafolio.
+    //   requiereCapacidad: (opcional) si es true, solo se muestran ítems con capacidad > 0.
+    //   requiereOrigen: (opcional) si es true, solo ítems que existen en la bodega origen.
+    //   exigirPlanEnSnapshot: (opcional) si es true y el snapshot no trae el plan en
+    //          NINGUNA fila, el flujo responde un error explícito en vez de una lista vacía.
+    // Llano: cualquier ítem con CAT, salvo los DESCODIFICADOS (que se dejan de manejar).
+    portafolio: { plan: "CAT", excluir: ["DESCODIFICADOS"] },
+    // Cómo se clasifica el ítem para el sugerido: `{ plan }` = la clase A/B/C sale de ese
+    // criterio ("CATEGORIA TIPO A" → A) y el sugerido usa las cadencias del flujo;
+    // `null` = sin clasificación (sugerido = capacidad − inventario).
+    clasificacion: { plan: "CAT" },
   },
-  // Machado se comporta EXACTAMENTE como Llano (misma lógica A/B/C, misma
-  // auto-clasificación, mismo "enviar por partes"); solo cambian origen y destino.
-  // Su capacidad vive en `traslados_capacidad` bajo destino "01201" (migración 042)
-  // y sus cadencias A/B/C en la clave `machado` de la config de reposición.
+  // Machado: misma pantalla y flujo que Llano (capacidad por Excel, auto-clasificación
+  // de pendientes, "enviar por partes"), pero con SU portafolio y SIN clasificación A/B/C
+  // todavía. Su capacidad vive en `traslados_capacidad` bajo destino "01201" (migración
+  // 042).
+  //
+  // El plan CAT ("CLASIFICACIÓN ABC LLANO") es EXCLUSIVO de Llano: Machado nunca lo lee.
+  // Su portafolio es el plan CAM ("PORTAFOLIO MACHADO"), con valor "PORTAFOLIO ACTIVO
+  // MACHADO"; un ítem sin CAM activo no se muestra aunque tenga capacidad cargada.
+  //
+  // Para agregarle A/B/C más adelante (sobre OTRO plan de SIESA): poner
+  // `clasificacion: { plan: "<plan>" }` y la clase se lee de ahí; las cadencias ya
+  // existen en la config (clave `machado`).
   machado: {
     id: "machado",
     nombre: "Traslado Machado",
     origen: "PV001",
     destinos: ["01201"],
-    logica: "abc", // clasificación A/B/C con capacidad desde Excel
+    logica: "abc",
+    portafolio: {
+      plan: "CAM",
+      valor: "PORTAFOLIO ACTIVO MACHADO",
+      requiereCapacidad: true,
+      requiereOrigen: true,
+      exigirPlanEnSnapshot: true,
+    },
+    clasificacion: null,
   },
 };
 
@@ -136,6 +168,8 @@ export function listarFlujos() {
     id: f.id,
     nombre: f.nombre,
     logica: f.logica,
+    // El front decide con esto si el flujo muestra clase A/B/C.
+    clasifica: Boolean(f.clasificacion),
     origen: { codigo: f.origen, nombre: nombreSede(f.origen) },
     destinos: f.destinos.map((d) => ({ codigo: d, nombre: nombreSede(d) })),
   }));

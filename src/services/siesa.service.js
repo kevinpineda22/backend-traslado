@@ -1,9 +1,13 @@
-import { calcularSugeridoGeneral, calcularSugeridoABC } from "./sugerido.service.js";
+import {
+  calcularSugeridoGeneral,
+  calcularSugeridoABC,
+  calcularSugeridoCapacidad,
+} from "./sugerido.service.js";
 import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
 import { mapaCapacidades, factoresDeItem } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
 import { supabase } from "../config/supabase.js";
-import { SEDES, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
+import { SEDES, FLUJOS, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
 import {
   unidadForzadaDe,
   unidadesSeleccionablesDe,
@@ -314,12 +318,85 @@ function claseDeCategoria(cat) {
  *   snapshot quedan fuera del mapa (el llamador decide cómo mostrarlos)
  */
 export async function clasesLlanoDeItems(destino, codigos) {
+  const flujo = reglasDe(destino);
+  // Un flujo sin clasificación (Machado) no tiene clases: ni se lee el snapshot ni se
+  // toca el CAT, que es exclusivo de Llano.
+  if (!flujo.clasificacion) return new Map();
   const filas = await leerBodegasItems([destino], codigos);
   const clases = new Map();
   for (const r of filas) {
-    clases.set(String(r.codigo_item).trim(), claseDeCategoria(r.criterios?.CAT));
+    clases.set(String(r.codigo_item).trim(), claseSegunFlujo(flujo, r, null));
   }
   return clases;
+}
+
+/**
+ * Regla del flujo de un destino (portafolio y clasificación, ver config/flujos.js).
+ * Un destino sin flujo cae en las de Llano, el comportamiento histórico de esta función.
+ */
+function reglasDe(destino) {
+  return getFlujoPorDestino(destino) || FLUJOS.llano;
+}
+
+/**
+ * Criterios que se devuelven con cada producto. En un flujo que NO clasifica (Machado) se
+ * quita el CAT: es la clasificación de Llano, y dejarlo a la vista invita a que algún
+ * consumidor lea la clase de Llano para Machado. Llano y General reciben el objeto tal cual.
+ */
+function criteriosVisibles(flujo, criterios) {
+  const c = criterios || {};
+  if (flujo.clasificacion) return c;
+  const { CAT: _cat, ...resto } = c; // eslint-disable-line no-unused-vars
+  return resto;
+}
+
+/**
+ * Clase A/B/C de un ítem según la regla de clasificación del flujo.
+ * `null` si el flujo no clasifica (Machado): NO se lee ningún criterio.
+ * Mismo origen del dato que siempre: el registro del destino y, sin él, el del origen.
+ */
+function claseSegunFlujo(flujo, d, o) {
+  const plan = flujo.clasificacion?.plan;
+  if (!plan) return null;
+  return claseDeCategoria(d ? d.criterios?.[plan] : o?.criterios?.[plan]);
+}
+
+/**
+ * ¿El ítem pertenece al portafolio del flujo? Reemplaza al filtro fijo de CAT que tenía
+ * Llano: la regla ahora es configuración (`flujo.portafolio`). El criterio es del ÍTEM
+ * (no de la bodega), así que da igual leerlo del destino o del origen.
+ *
+ * Con la regla de Llano (`plan: "CAT"`, excluir DESCODIFICADOS) el resultado es el mismo
+ * de antes: sin CAT → fuera; DESCODIFICADOS → fuera; cualquier otro valor → dentro.
+ */
+function pasaPortafolio(flujo, d, o, capRows) {
+  const reglas = flujo.portafolio;
+  if (!reglas) return true;
+  // Machado solo muestra lo que se le puede mandar desde el origen: un ítem con fila en
+  // la tienda pero sin fila en PV001 no tiene de dónde salir (Llano, en cambio, muestra
+  // lo que "se puede mandar desde otra sede").
+  if (reglas.requiereOrigen && !o) return false;
+  const valor = trim(d?.criterios?.[reglas.plan] || o?.criterios?.[reglas.plan]);
+  if (!valor) return false;
+  const norm = normalizarCriterio(valor);
+  if (reglas.valor && norm !== normalizarCriterio(reglas.valor)) return false;
+  if ((reglas.excluir || []).some((x) => norm === normalizarCriterio(x))) return false;
+  if (reglas.requiereCapacidad && !(capRows || []).some((r) => num(r.capacidad) > 0)) return false;
+  return true;
+}
+
+/**
+ * Normaliza un valor de criterio para compararlo: sin tildes, sin espacios en los
+ * bordes y en mayúsculas. El valor viene de una descripción escrita a mano en el
+ * maestro del ERP, y una caja o tilde distinta dejaría pasar (o esconder) todo en
+ * silencio.
+ */
+function normalizarCriterio(v) {
+  return String(v ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .trim()
+    .toUpperCase();
 }
 
 /**
@@ -340,11 +417,7 @@ export async function clasesLlanoDeItems(destino, codigos) {
  * otra caja dejaría pasar todo sin que nadie lo note.
  */
 function esDescodificado(cat) {
-  return String(cat ?? "")
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .trim()
-    .toUpperCase() === "DESCODIFICADOS";
+  return normalizarCriterio(cat) === "DESCODIFICADOS";
 }
 
 /**
@@ -374,8 +447,8 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     // Cadencias del flujo que se está calculando (config.llano, config.machado…),
     // no las de Llano a ciegas: cada flujo A/B/C las edita por separado. El respaldo
     // a Llano cubre un flujo A/B/C nuevo al que todavía no se le sumó clave en la config.
-    const flujoId = getFlujoPorDestino(destino)?.id;
-    const cadenciasEfectivas = cadencias || config[flujoId] || config.llano;
+    const flujo = reglasDe(destino);
+    const cadenciasEfectivas = cadencias || config[flujo.id] || config.llano;
 
     const oMap = new Map();
     const dMap = new Map();
@@ -404,6 +477,25 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     //
     // Lo que Llano tiene y el origen no se sigue mostrando si Llano lo necesita
     // (necesidad > 0): se puede mandar desde otra sede.
+    // Si el flujo exige un plan de criterios (Machado: CAM) y NINGUNA fila del snapshot
+    // trae esa clave, la consulta de Connekta registrada no devuelve el plan (o el
+    // snapshot es anterior a registrarla): el portafolio saldría vacío y parecería "no
+    // hay productos". Se distingue de "este ítem no tiene CAM": `aRegistro` guarda la
+    // clave (aunque sea "") cuando la consulta trae la columna, y la omite si no la trae.
+    const planObligatorio = flujo.portafolio?.exigirPlanEnSnapshot ? flujo.portafolio.plan : null;
+    if (
+      planObligatorio &&
+      rows.length > 0 &&
+      !rows.some((r) => Object.hasOwn(r.criterios || {}, planObligatorio))
+    ) {
+      return {
+        error:
+          `El snapshot no trae el plan ${planObligatorio}: registrá la consulta con ` +
+          `${planObligatorio} en Connekta y refrescá el snapshot, o ningún ítem de ` +
+          `estas bodegas tiene el criterio ${planObligatorio} cargado en SIESA.`,
+      };
+    }
+
     const codigos = new Set(dMap.keys());
 
     // Y ADEMÁS los ítems con capacidad cargada que el destino todavía no registra.
@@ -460,18 +552,17 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
       // Sin fila en el destino se lee la del origen, que es la misma: el CAT es
       // del maestro del ítem, no de la bodega (ver el punto 2 de la misma doc).
-      const clase = claseDeCategoria(d ? d.criterios?.CAT : o?.criterios?.CAT);
-      // Solo Llano: mostramos únicamente ítems clasificados en el CAT (A/B/C o
-      // "SIN CLASIFICACION" = Ninguno). Los que no tienen NINGUNA clasificación
-      // (CAT vacío) no son de Llano → quedan fuera. El CAT es a nivel de ítem,
-      // así que da igual leerlo del destino o del origen.
-      const catLlano = trim(d?.criterios?.CAT || o?.criterios?.CAT);
-      if (!catLlano) continue;
-      // Descodificados fuera, PERO SOLO ACÁ: reponer Llano con algo que sale del
-      // surtido no tiene sentido. En General sí se muestran, que es donde hay que
-      // sacar ese inventario del CEDI antes de que quede muerto. Ver
-      // `esDescodificado` para por qué el filtro dejó de estar en el query.
-      if (esDescodificado(catLlano)) continue;
+      // `null` si el flujo no clasifica (Machado): ahí no se lee ningún criterio.
+      const clase = claseSegunFlujo(flujo, d, o);
+      // Portafolio del flujo (config/flujos.js). En Llano: solo ítems clasificados en el
+      // CAT (A/B/C o "SIN CLASIFICACION" = Ninguno); los que no tienen NINGUNA
+      // clasificación (CAT vacío) no son de Llano → quedan fuera, y los DESCODIFICADOS
+      // también: reponer Llano con algo que sale del surtido no tiene sentido (en General
+      // sí se muestran, que es donde hay que sacar ese inventario del CEDI antes de que
+      // quede muerto; ver `esDescodificado`). En Machado: solo ítems con CAM
+      // "PORTAFOLIO ACTIVO MACHADO" y capacidad > 0 — un ítem del Excel sin CAM activo
+      // se esconde igual que Llano esconde los que no tienen CAT.
+      if (!pasaPortafolio(flujo, d, o, capacidades.get(codigo))) continue;
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
       // Ojo: CantidadDisponible puede venir NEGATIVA (cuando cant_pos_1 > existencia).
@@ -501,13 +592,17 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         // columna "Días inv." y es al que se le aplica el filtro de exclusión.
         const diasInventario = consumoDestino > 0 ? inventarioDestino / consumoDestino : null;
         // `necesidad` = sugerido = máximo a mandar (SIN topear por el origen).
-        const necesidad = calcularSugeridoABC({
-          clase,
-          capacidad: capacidadBase,
-          consumoDiario: consumoDestino,
-          inventario: inventarioDestino,
-          cadencias: cadenciasEfectivas,
-        });
+        // Con clasificación: sugerido A/B/C. Sin ella (Machado): llenar la góndola,
+        // capacidad − inventario. El tope por el origen lo expresa `faltante`.
+        const necesidad = flujo.clasificacion
+          ? calcularSugeridoABC({
+              clase,
+              capacidad: capacidadBase,
+              consumoDiario: consumoDestino,
+              inventario: inventarioDestino,
+              cadencias: cadenciasEfectivas,
+            })
+          : calcularSugeridoCapacidad({ capacidad: capacidadBase, inventario: inventarioDestino });
         const sugerido = necesidad;
         const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
@@ -537,7 +632,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           unidadesDetalle,
           // Volumen de UNA UNIDAD BASE (ver volumenBase).
           volumen: volumenBase(fuente),
-          criterios: fuente.criterios || {},
+          criterios: criteriosVisibles(flujo, fuente.criterios),
           inventario_origen: inventarioOrigen,
           disponible_origen: disponibleOrigen,
           inventario_destino: inventarioDestino,
@@ -594,18 +689,21 @@ export async function getDisponibilidadItem({ codigo, destino }) {
     // Necesidad (sin tope de origen) según el flujo del destino.
     let necesidad;
     if (flujo.logica === "abc") {
-      const clase = claseDeCategoria(d?.criterios?.CAT);
+      // Misma regla de clasificación que el panel: Machado no clasifica y NO lee CAT.
+      const clase = claseSegunFlujo(flujo, d, null);
       const capRows = capacidades.get(String(codigo)) || [];
       const umRows = capRows.filter((r) => r.unidad && r.factor);
       const cr = umRows[0] || capRows.find((r) => !r.unidad) || null;
       const capacidad = (cr?.capacidad || 0) * (cr?.factor || 1); // en base
-      necesidad = calcularSugeridoABC({
-        clase,
-        capacidad,
-        consumoDiario: consumoDestino,
-        inventario: inventarioDestino,
-        cadencias: config[flujo.id] || config.llano,
-      });
+      necesidad = flujo.clasificacion
+        ? calcularSugeridoABC({
+            clase,
+            capacidad,
+            consumoDiario: consumoDestino,
+            inventario: inventarioDestino,
+            cadencias: config[flujo.id] || config.llano,
+          })
+        : calcularSugeridoCapacidad({ capacidad, inventario: inventarioDestino });
     } else {
       const periodo =
         config.general.periodoCubrimiento != null

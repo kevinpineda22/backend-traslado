@@ -252,13 +252,26 @@ Cosas del proceso de Johon que **no existen** todavía en código:
 ## 10.1 Flujo Machado y cómo agregar una sede A/B/C
 
 **Machado** (bodega `01201`, C.O. `012`, Copacabana) es un flujo `machado`: `PV001 → 01201`,
-lógica `abc`. Se comporta EXACTAMENTE como Llano (sugerido A/B/C con capacidad por Excel,
-auto-clasificación de pendientes, "enviar por partes"); solo cambian origen y destino.
+lógica `abc`. Usa la misma pantalla y el mismo ciclo que Llano (capacidad por Excel,
+auto-clasificación de pendientes, "enviar por partes"), pero con reglas propias:
+
+- **Portafolio por el plan `CAM`** ("PORTAFOLIO MACHADO"). Un ítem se muestra solo si su CAM
+  vale `PORTAFOLIO ACTIVO MACHADO` (se compara sin tildes ni mayúsculas), tiene capacidad
+  mayor a 0 cargada para `01201` y existe en el origen. Los ítems del Excel sin CAM activo
+  quedan escondidos, igual que Llano esconde los que no tienen CAT.
+- **Sin clasificación A/B/C todavía.** El plan `CAT` es exclusivo de Llano: Machado NUNCA lo
+  lee (ni para la clase, ni para el portafolio, ni en la disponibilidad por sede).
+- **Sugerido = capacidad − inventario del destino** (mínimo 0): llenar la góndola, topeado por
+  lo disponible en el origen. No hay clase ni cadencias, y el consumo no interviene.
+- Las reglas viven en `FLUJOS.machado` (`portafolio`, `clasificacion`) en `src/config/flujos.js`.
+  Para sumarle A/B/C más adelante sobre otro plan de SIESA: `clasificacion: { plan: "<plan>" }`
+  (las cadencias ya existen en la config de reposición, clave `machado`).
 
 Qué es propio de cada flujo A/B/C (no se comparte):
 - **Capacidad:** `traslados_capacidad` tiene clave `(destino, codigo_item, unidad)` desde la migración
   `042`. La API de capacidad acepta `destino` (query o body) y asume `00401` si no llega.
 - **Cadencias A/B/C:** la config de reposición guarda una clave por flujo (`llano`, `machado`).
+  Machado no las usa mientras no tenga clasificación.
 - **Motivo de salida SIESA:** sigue siendo `02` (el `50` es solo del par Parque → Llano).
 - **SRI:** `sriCapacidad.service.js` tiene un mapa destino → tienda. Machado NO está: la comparación
   con SRI responde 400 "no disponible" para él hasta que se agregue su línea.
@@ -269,8 +282,9 @@ tienda en SRI. La cuenta de recibo se crea desde la app (no hay migración).
 ### Checklist: agregar una sede A/B/C nueva
 1. `src/config/flujos.js`: sumar la sede a `SEDES`, su C.O. a `CENTROS_OPERACION` y un flujo nuevo en
    `FLUJOS` con `logica: "abc"`. El `id` del flujo es la clave de sus cadencias.
-2. `src/models/Config.model.js` y `validators.js` (`configSchema`): sumar la clave del flujo con los defaults
-   A=1, B=3, C=5.
+2. En el mismo `FLUJOS[...]`: `portafolio` (qué plan/valor define los ítems del flujo) y
+   `clasificacion` (`{ plan }` para A/B/C, `null` si no clasifica). Si clasifica, sumar la clave del flujo en
+   `src/models/Config.model.js` y `validators.js` (`configSchema`) con los defaults A=1, B=3, C=5.
 3. Front: `utils/sedesInfo.js`, `FlotaAdmin.jsx` (lista de sedes), `Dias.jsx`/`useConfig.js` (cadencias) y el
    selector de destino de `CapacidadLlano.jsx`.
 4. Cargar la capacidad de la sede desde Capacidad (eligiendo el destino); no se comparte con otras sedes.

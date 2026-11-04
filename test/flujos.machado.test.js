@@ -24,7 +24,18 @@ test("Machado está definido como flujo A/B/C con origen PV001 y destino 01201",
     origen: "PV001",
     destinos: ["01201"],
     logica: "abc",
+    // Portafolio por el plan CAM, sin clasificación A/B/C (el CAT es solo de Llano).
+    portafolio: {
+      plan: "CAM",
+      valor: "PORTAFOLIO ACTIVO MACHADO",
+      requiereCapacidad: true,
+      requiereOrigen: true,
+      exigirPlanEnSnapshot: true,
+    },
+    clasificacion: null,
   });
+  assert.deepEqual(FLUJOS.llano.portafolio, { plan: "CAT", excluir: ["DESCODIFICADOS"] });
+  assert.deepEqual(FLUJOS.llano.clasificacion, { plan: "CAT" });
   assert.equal(centroOperacionDeSede("01201"), "012");
 });
 
@@ -53,5 +64,7 @@ test("esFlujoAbc / esDestinoAbc preguntan por la lógica, no por el nombre", () 
 test("listarFlujos expone la lógica de Machado para que el front no la adivine", () => {
   const m = listarFlujos().find((f) => f.id === "machado");
   assert.equal(m.logica, "abc");
+  assert.equal(m.clasifica, false, "el front sabe que Machado no muestra clase");
+  assert.equal(listarFlujos().find((f) => f.id === "llano").clasifica, true);
   assert.deepEqual(m.destinos, [{ codigo: "01201", nombre: "Machado" }]);
 });

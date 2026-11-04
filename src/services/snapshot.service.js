@@ -145,7 +145,7 @@ async function traerDeConnekta() {
  *   1. Dedup por (bodega|item|instalación) → no doblar el mismo stock.
  *   2. Sumar inventario/disponible/comprometido/consumo entre instalaciones.
  */
-function agregarPorBodegaItem(rows) {
+export function agregarPorBodegaItem(rows) {
   const porInstalacion = new Map();
   for (const r of rows) {
     const key = `${trim(r.IdBodega)}|${String(r.CodigoItem)}|${trim(r.IdInstalacion)}`;
@@ -177,7 +177,7 @@ function agregarPorBodegaItem(rows) {
 }
 
 /** Convierte una fila agregada al shape de la tabla snapshot. */
-function aRegistro(o, ts) {
+export function aRegistro(o, ts) {
   return {
     bodega: trim(o.IdBodega),
     codigo_item: String(o.CodigoItem),
@@ -210,6 +210,15 @@ function aRegistro(o, ts) {
       // Plan "CAT" = "CLASIFICACIÓN ABC LLANO". DescMayorCAT = "CATEGORIA TIPO A/B/C".
       // De acá sale la clase A/B/C del flujo Llano (ya NO del campo Referencia).
       CAT: trim(o.DescMayorCAT),
+      // Plan "CAM" = "PORTAFOLIO MACHADO" (criterio 001). DescMayorCAM = "PORTAFOLIO
+      // ACTIVO MACHADO" para lo que Machado maneja. De acá sale el PORTAFOLIO del flujo
+      // Machado (ver `portafolio` en config/flujos.js). Es exclusivo de Machado: el flujo
+      // Llano sigue leyendo CAT y Machado nunca lee CAT.
+      // OJO: si la consulta registrada en Connekta NO devuelve la columna, la clave se
+      // OMITE (undefined no se serializa) en vez de guardarse como "". Así el backend
+      // distingue "la consulta no trae CAM" (error explícito en el flujo Machado) de
+      // "este ítem no tiene CAM" (cadena vacía).
+      CAM: o.DescMayorCAM === undefined ? undefined : trim(o.DescMayorCAM),
       // Plan "TIP" = "TIPO" (ej: "ABARROTES"). Facet filter de criterios.
       TIP: trim(o.DescMayorTIP),
     },

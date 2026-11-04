@@ -21,7 +21,11 @@ let getDisponibilidadItem;
 let filas = [];
 let capacidades = new Map();
 
-const fila = (bodega, codigo, { disponible = 10, consumo = 0, cat = "CATEGORIA TIPO A" } = {}) => ({
+const fila = (
+  bodega,
+  codigo,
+  { disponible = 10, consumo = 0, cat = "CATEGORIA TIPO A", cam = "PORTAFOLIO ACTIVO MACHADO" } = {},
+) => ({
   bodega,
   codigo_item: codigo,
   descripcion: `ITEM ${codigo}`,
@@ -34,7 +38,7 @@ const fila = (bodega, codigo, { disponible = 10, consumo = 0, cat = "CATEGORIA T
   consumo_promedio: consumo,
   periodo_cubrimiento: 0,
   rotacion: "",
-  criterios: { CAT: cat },
+  criterios: { CAT: cat, CAM: cam },
 });
 
 const conCapacidad = (codigo, capacidad) =>
@@ -86,7 +90,7 @@ test("sede nueva sin filas en el snapshot + capacidad cargada: el ítem del orig
   assert.equal(p.necesidad, 50);
   assert.equal(p.disponible_origen, 30);
   assert.equal(p.faltante, 20, "lo que el origen no alcanza a cubrir");
-  assert.equal(p.clase, "A", "la clase sale del CAT del origen (es del ítem)");
+  assert.equal(p.clase, null, "Machado no clasifica A/B/C");
   assert.equal(p.dias_capacidad, null);
   assert.equal(p.dias_inventario, null);
   assert.equal(p.descripcion, "ITEM 7");

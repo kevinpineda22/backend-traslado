@@ -81,6 +81,7 @@ before(async () => {
         return consumoDiario;
       },
       calcularSugeridoGeneral: () => ({ stockSeguridad: 0, necesidad: 0 }),
+      calcularSugeridoCapacidad: () => 0, // Llano no lo usa; el mock debe declarar el export
     },
   });
 
@@ -238,19 +239,7 @@ test("un ítem que no está en el snapshot queda FUERA del mapa (no 'ninguno')",
   assert.equal(clases.has("99"), false);
 });
 
-/* ─── Machado (PV001 → 01201): mismo comportamiento A/B/C, datos propios ─── */
-
-test("Machado lee la capacidad de SU destino y usa SUS cadencias, no las de Llano", async () => {
-  filas = [fila("PV001", "7"), fila("01201", "7", { consumo: 4 })];
-  conCapacidad("7", 40);
-
-  const { data, error } = await getProductosLlano({ origen: "PV001", destino: "01201" });
-
-  assert.equal(error, undefined);
-  assert.deepEqual(data.map((p) => p.codigo_item), ["7"]);
-  assert.equal(destinoCapacidadLeido, "01201", "la capacidad se pide filtrada por el destino");
-  assert.deepEqual(ultimasCadencias, { A: 2, B: 4, C: 6 }, "cadencias de config.machado");
-});
+/* ─── Cadencias de Llano (Machado no usa A/B/C: ver siesa.productos-machado.test.js) ─── */
 
 test("Llano sigue usando config.llano y la capacidad de 00401", async () => {
   filas = [fila(ORIGEN, "7"), fila(DESTINO, "7", { consumo: 4 })];
@@ -263,10 +252,10 @@ test("Llano sigue usando config.llano y la capacidad de 00401", async () => {
 });
 
 test("las cadencias explícitas siguen pisando las de la config", async () => {
-  filas = [fila("PV001", "7"), fila("01201", "7", { consumo: 4 })];
+  filas = [fila(ORIGEN, "7"), fila(DESTINO, "7", { consumo: 4 })];
   conCapacidad("7", 40);
 
-  await getProductosLlano({ origen: "PV001", destino: "01201", cadencias: { A: 9, B: 9, C: 9 } });
+  await getProductosLlano({ origen: ORIGEN, destino: DESTINO, cadencias: { A: 9, B: 9, C: 9 } });
 
   assert.deepEqual(ultimasCadencias, { A: 9, B: 9, C: 9 });
 });

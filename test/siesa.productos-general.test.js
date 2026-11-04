@@ -64,6 +64,7 @@ before(async () => {
         necesidad: consumoDestino,
       }),
       calcularSugeridoABC: () => 0,
+      calcularSugeridoCapacidad: () => 0, // General no lo usa; el mock debe declarar el export
     },
   });
 

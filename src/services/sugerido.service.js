@@ -103,3 +103,20 @@ export function calcularSugeridoABC({
 
   return redondear(objetivo - inv);
 }
+
+/**
+ * Sugerido de un flujo SIN clasificación A/B/C (Machado): llenar la góndola.
+ *
+ *   sugerido = max(0, capacidad − inventario)
+ *
+ * No hay clase ni cadencias, y el consumo no interviene. Se acota en 0: con la
+ * góndola ya llena (o pasada de capacidad) no se sugiere nada, en vez de un negativo.
+ * El tope por lo disponible en el origen lo aplica quien arma la fila (`faltante`).
+ *
+ * @param {object} opts
+ * @param {number} opts.capacidad  - Capacidad de góndola (desde Excel), en unidad base
+ * @param {number} opts.inventario - Inventario actual del destino
+ */
+export function calcularSugeridoCapacidad({ capacidad = 0, inventario = 0 }) {
+  return Math.max(0, redondear(num(capacidad) - num(inventario)));
+}
