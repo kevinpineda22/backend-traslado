@@ -404,15 +404,6 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     //
     // Lo que Llano tiene y el origen no se sigue mostrando si Llano lo necesita
     // (necesidad > 0): se puede mandar desde otra sede.
-    // Sin filas del destino no hay nada que mostrar, y una lista vacía con ok:true
-    // se lee como "no hay productos". Casi siempre es otra cosa: una bodega que
-    // está en flujos.js pero no en el WHERE de la consulta de Connekta (ver
-    // docs/CONSULTA_SNAPSHOT_CONNEKTA.md), o una sede nueva. Se dice con todas las
-    // letras; el controlador lo responde como 502.
-    if (dMap.size === 0) {
-      return { error: `Sin datos de inventario para la bodega ${destino} en el snapshot` };
-    }
-
     const codigos = new Set(dMap.keys());
 
     // Y ADEMÁS los ítems con capacidad cargada que el destino todavía no registra.
@@ -437,6 +428,27 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       if (dMap.has(codigo) || !oMap.has(codigo)) continue;
       if (!capRows.some((r) => num(r.capacidad) > 0)) continue;
       codigos.add(codigo);
+    }
+
+    // Sin NADA que mostrar: ni filas del destino en el snapshot ni capacidad cargada
+    // de un ítem que exista en el origen. Una lista vacía con ok:true se lee como "no
+    // hay productos", y casi siempre es otra cosa: una bodega que está en flujos.js
+    // pero no en el WHERE de la consulta de Connekta (ver
+    // docs/CONSULTA_SNAPSHOT_CONNEKTA.md) — la causa más común —, o una sede nueva sin
+    // capacidad. Se dice con todas las letras; el controlador lo responde como 502.
+    //
+    // Este chequeo va DESPUÉS del bucle de capacidad y no antes: una sede NUEVA (Machado)
+    // no tiene filas en t400 hasta que se mueva su primer ítem, y con el error antes del
+    // bucle nunca podía mostrar productos ni siquiera con la capacidad ya cargada. Con
+    // capacidad, el ítem sale con inventario 0 y consumo 0 (sugerido = capacidad, o sea
+    // "llenar la góndola"), limitado por lo disponible en el origen.
+    if (codigos.size === 0) {
+      return {
+        error:
+          `Sin datos de inventario para la bodega ${destino} en el snapshot. ` +
+          "Revisá que la bodega esté en el filtro de la consulta de Connekta; si es una sede " +
+          "nueva, cargá su capacidad en el módulo Capacidad y sus productos aparecerán.",
+      };
     }
 
     for (const codigo of codigos) {
