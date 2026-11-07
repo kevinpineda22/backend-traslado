@@ -982,10 +982,10 @@ test("crear vía controlador: 200 al crear y 500 con el detalle si el insert fal
 });
 
 /* ---------------------------------------------------------------------------
-   Destinos sin tienda en SRI (Machado, 01201): la comparación NO está disponible
+   Destinos sin tienda en SRI (ej. Villahermosa, 00201): la comparación NO está disponible
    --------------------------------------------------------------------------- */
 
-test("un destino sin tienda de SRI (Machado) responde 400 y nunca llama a SRI ni a la tabla", async () => {
+test("un destino sin tienda de SRI responde 400 y nunca llama a SRI ni a la tabla", async () => {
   process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
   let llamadas = 0;
   const fetchImpl = async () => {
@@ -995,17 +995,17 @@ test("un destino sin tienda de SRI (Machado) responde 400 y nunca llama a SRI ni
   bd.log.length = 0;
 
   const casos = [
-    () => compararConSri({ destino: "01201", fetchImpl }),
-    // Aunque el cliente mande una tienda a mano: no se compara Machado contra otra tienda.
-    () => compararConSri({ destino: "01201", tienda: "GIRARDOTA LLANO", fetchImpl }),
-    () => faltantesConSri({ destino: "01201", fetchImpl }),
-    () => aplicarConSri({ destino: "01201", esperados: 0, fetchImpl }),
-    () => crearFaltantesConSri({ destino: "01201", esperados: 0, fetchImpl }),
+    () => compararConSri({ destino: "00201", fetchImpl }),
+    // Aunque el cliente mande una tienda a mano: no se compara un destino contra otra tienda.
+    () => compararConSri({ destino: "00201", tienda: "GIRARDOTA LLANO", fetchImpl }),
+    () => faltantesConSri({ destino: "00201", fetchImpl }),
+    () => aplicarConSri({ destino: "00201", esperados: 0, fetchImpl }),
+    () => crearFaltantesConSri({ destino: "00201", esperados: 0, fetchImpl }),
   ];
   for (const caso of casos) {
     await assert.rejects(caso(), (e) => {
       assert.equal(e.statusCode, 400);
-      assert.match(e.message, /no está disponible para el destino 01201/);
+      assert.match(e.message, /no está disponible para el destino 00201/);
       return true;
     });
   }
@@ -1014,12 +1014,12 @@ test("un destino sin tienda de SRI (Machado) responde 400 y nunca llama a SRI ni
   assert.equal(bd.log.length, 0, "ni una lectura de la tabla");
 });
 
-test("el controlador de /comparar pasa el destino: Machado → 400 por next(), Llano sigue andando", async () => {
+test("el controlador de /comparar pasa el destino: sin tienda → 400 por next(), Llano sigue andando", async () => {
   process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
   const { comparar } = await import("../src/controllers/sriCapacidad.controller.js");
 
   let error;
-  await comparar({ query: { destino: "01201" } }, { json: () => assert.fail("no debía responder") }, (e) => (error = e));
+  await comparar({ query: { destino: "00201" } }, { json: () => assert.fail("no debía responder") }, (e) => (error = e));
   assert.equal(error.statusCode, 400);
 
   const { fetchImpl } = escenarioAplicar(1);
@@ -1045,4 +1045,29 @@ test("compararConSri filtra las filas por destino: solo compara contra las de Ll
   const r = await compararConSri({ fetchImpl });
 
   assert.deepEqual(r.cambios.map((c) => c.capacidad_actual), [100], "la fila de Machado no entra");
+});
+
+test("Machado (01201) se compara contra la tienda MACHADO de SRI y solo con sus filas", async () => {
+  process.env.SRI_CAPACIDAD_TOKEN = "token-secreto-de-prueba";
+  // La variable vieja solo pisa la tienda de Llano: no debe desviar a Machado.
+  process.env.SRI_CAPACIDAD_TIENDA = "OTRA TIENDA";
+  try {
+    bd.tablas.traslados_capacidad = [
+      { destino: "00401", codigo_item: "19", unidad: "", capacidad: 100, factor: null, fijo: false, descripcion: "LLANO" },
+      { destino: "01201", codigo_item: "19", unidad: "", capacidad: 5, factor: null, fijo: false, descripcion: "MACHADO" },
+    ];
+    const tiendasPedidas = [];
+    const fetchImpl = async (url) => {
+      tiendasPedidas.push(new URL(url).searchParams.get("tienda"));
+      return pagina([itemSri("19", [entrada("UND", 300, 1)])], 1);
+    };
+
+    const r = await compararConSri({ destino: "01201", fetchImpl });
+
+    assert.deepEqual(tiendasPedidas, ["MACHADO"]);
+    assert.equal(r.tienda, "MACHADO");
+    assert.deepEqual(r.cambios.map((c) => c.capacidad_actual), [5], "solo entra la fila de Machado");
+  } finally {
+    delete process.env.SRI_CAPACIDAD_TIENDA;
+  }
 });

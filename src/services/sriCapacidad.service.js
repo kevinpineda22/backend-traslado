@@ -44,13 +44,14 @@ const URL_BASE_DEFECTO =
 // `traslados_capacidad` se comparan: pedirle a SRI una tienda y comparar contra las
 // filas de otra generaría "cambios" falsos sobre la capacidad equivocada.
 //
-// AGREGAR UN DESTINO AQUÍ HABILITA LA COMPARACIÓN CON SRI PARA ÉL. Machado (01201)
-// NO está a propósito: todavía no consume SRI y no se inventa su nombre. Sin
-// entrada, la comparación responde 400 "no disponible" en vez de consultar SRI con
-// un nombre equivocado (reporte vacío o 422). Cuando SRI mida Machado, se confirma
-// el nombre exacto con SRI y se suma una línea acá.
+// AGREGAR UN DESTINO AQUÍ HABILITA LA COMPARACIÓN CON SRI PARA ÉL. El nombre debe ser
+// EXACTO al de SRI (`?recurso=tiendas`, que sale de `vestido_pgc.nombre_tienda`): uno
+// que no coincida da un reporte vacío o un 422. Un destino sin entrada responde 400
+// "no disponible" en vez de consultar SRI con un nombre inventado.
+// "MACHADO" se confirmó con `?recurso=tiendas` el 2026-11-07, una vez cargadas sus góndolas.
 const TIENDA_POR_DESTINO = {
   "00401": "GIRARDOTA LLANO",
+  "01201": "MACHADO",
 };
 
 /** ¿Este destino puede compararse con SRI? (tiene tienda mapeada) */
