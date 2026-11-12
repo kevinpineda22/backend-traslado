@@ -85,6 +85,12 @@ before(async () => {
     },
   });
   mock.module("../src/config/supabase.js", { exports: { supabase: {} } });
+  // Portafolio extra (migración 043): estos tests no tienen productos agregados a mano,
+  // así que el modelo devuelve vacío y el comportamiento es el de siempre.
+  mock.module("../src/models/PortafolioExtra.model.js", {
+    exports: { codigosDe: async () => new Set() },
+  });
+  mock.module("../src/models/Catalogo.model.js", { exports: { porCodigos: async () => new Map() } });
 
   ({ getProductosLlano, getDisponibilidadItem, clasesLlanoDeItems } = await import(
     "../src/services/siesa.service.js"

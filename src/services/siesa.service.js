@@ -6,6 +6,8 @@ import {
 import { leerBodegas, leerBodegasItems } from "./snapshot.service.js";
 import { mapaCapacidades, factoresDeItem } from "../models/Capacidad.model.js";
 import { obtener as obtenerConfig } from "../models/Config.model.js";
+import { codigosDe as extrasDe } from "../models/PortafolioExtra.model.js";
+import { porCodigos as catalogoPorCodigos } from "../models/Catalogo.model.js";
 import { supabase } from "../config/supabase.js";
 import { SEDES, FLUJOS, nombreSede, getFlujoPorDestino } from "../config/flujos.js";
 import {
@@ -23,6 +25,61 @@ import {
 
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(v ?? "").trim();
+
+/* ─── Portafolio EXTRA (productos agregados a mano a una sede) ─────────
+   Un administrador agrega un producto al portafolio de UNA sede (tabla
+   `traslados_portafolio_extra`, migración 043). Ese producto tiene que aparecer en
+   la lista de esa sede en TODOS los flujos aunque:
+     - no tenga capacidad (en los flujos A/B/C sale con sugerido 0),
+     - la sede nunca lo haya movido (sin fila en el snapshot del destino),
+     - no cumpla el portafolio del flujo (CAT / CAM / requiereCapacidad / requiereOrigen),
+     - no exista en el origen (sale con disponible 0).
+   Las reglas de "se esconde si no hay origen y no hay necesidad" tampoco le aplican.
+   Vive SOLO en Supabase: nada de esto escribe en SIESA. */
+
+/**
+ * Fila con la forma del snapshot para un extra que NO tiene fila en ningún lado
+ * (ni en el origen ni en el destino). Sale del catálogo: identidad del ítem y nada
+ * más. Todo lo demás lleva un valor seguro — factor 1, volumen null ("sin dato", no
+ * "ocupa cero"), existencias y consumo en 0 — porque el constructor de filas del
+ * producto lee de acá descripción, UM, factor, volumen, criterios y rotación.
+ *
+ * Los criterios 001 (Grupo) y 002 (Subgrupo) vienen del catálogo para que el ítem
+ * también responda a los filtros de la barra de criterios.
+ */
+function filaDesdeCatalogo(c, bodega) {
+  return {
+    bodega,
+    codigo_item: trim(c.codigo_item),
+    descripcion: trim(c.descripcion),
+    um: trim(c.um),
+    um_orden: trim(c.um_orden) || trim(c.um),
+    factor: 1,
+    volumen: null,
+    inventario: 0,
+    disponible: 0,
+    comprometido: 0,
+    consumo_promedio: 0,
+    periodo_cubrimiento: 0,
+    rotacion: "",
+    referencia: trim(c.referencia),
+    criterios: { "001": trim(c.grupo), "002": trim(c.subgrupo) },
+  };
+}
+
+/**
+ * Filas del catálogo de los extras que no tienen fila en el origen ni en el destino,
+ * ya con forma de snapshot (`Map<codigo, fila>`). Si el catálogo no los tiene tampoco
+ * (el ítem salió de SIESA), no entran al mapa y el llamador los salta con un aviso.
+ */
+async function filasDeExtrasSinRegistro(extras, oMap, dMap, destino) {
+  const sinFila = [...extras].filter((c) => !oMap.has(c) && !dMap.has(c));
+  const filas = new Map();
+  if (sinFila.length === 0) return filas;
+  const catalogo = await catalogoPorCodigos(sinFila);
+  for (const [codigo, c] of catalogo) filas.set(codigo, filaDesdeCatalogo(c, destino));
+  return filas;
+}
 
 /**
  * Volumen de UNA UNIDAD BASE del ítem.
@@ -132,7 +189,7 @@ export async function getCriterios(origen = "PV001") {
  */
 export async function getProductosTraslado({ origen, destino }) {
   try {
-    const [rows, capacidades, config] = await Promise.all([
+    const [rows, capacidades, config, extras] = await Promise.all([
       leerBodegas([origen, destino]),
       // Las UM cargadas en Capacidad·Llano se usan TAMBIÉN acá para partir el ítem
       // en una fila por unidad. Lo que NO cruza es la `capacidad` en sí: ese número
@@ -140,6 +197,8 @@ export async function getProductosTraslado({ origen, destino }) {
       // stock de seguridad. De esa tabla solo se toman `unidad` y `factor`.
       mapaCapacidades(),
       obtenerConfig(),
+      // Productos agregados a mano al portafolio de este destino (ver extrasDe).
+      extrasDe(destino),
     ]);
     // Override global del período de cubrimiento (si se configuró en el admin);
     // si es null, se usa el PeriodoCubrimiento que trae cada ítem de SIESA.
@@ -181,15 +240,30 @@ export async function getProductosTraslado({ origen, destino }) {
     // está en flujos.js pero no en el WHERE de la consulta de Connekta (ver
     // docs/CONSULTA_SNAPSHOT_CONNEKTA.md), o una sede nueva. Se dice con todas las
     // letras; el controlador lo responde como 502.
-    if (dMap.size === 0) {
+    //
+    // Los extras (portafolio agregado a mano) cuentan como "algo que mostrar": una sede
+    // sin filas en el snapshot pero con extras NO es un error. Por eso el chequeo va
+    // DESPUÉS de sumarlos.
+    const codigos = new Set(dMap.keys());
+    for (const extra of extras) codigos.add(extra);
+    if (codigos.size === 0) {
       return { error: `Sin datos de inventario para la bodega ${destino} en el snapshot` };
     }
+    const filasCatalogo = await filasDeExtrasSinRegistro(extras, oMap, dMap, destino);
 
-    const codigos = new Set(dMap.keys());
     for (const codigo of codigos) {
       const o = oMap.get(codigo);
       const d = dMap.get(codigo);
-      const fuente = o || d; // descripción/UM/criterios: preferimos el origen
+      const esExtra = extras.has(codigo);
+      // descripción/UM/criterios: preferimos el origen; un extra sin fila en ninguna
+      // bodega usa la del catálogo.
+      const fuente = o || d || (esExtra ? filasCatalogo.get(codigo) : undefined);
+      if (!fuente) {
+        console.warn(
+          `[portafolio-extra] ${codigo} está agregado a ${destino} pero no está en el snapshot ni en el catálogo: no se muestra.`,
+        );
+        continue;
+      }
 
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
@@ -223,7 +297,8 @@ export async function getProductosTraslado({ origen, destino }) {
       const diasInventario = consumoDestino > 0 ? inventarioDestino / consumoDestino : null;
 
       // Ítem que no está en el origen: solo tiene sentido si el destino lo necesita.
-      if (!o && necesidad <= 0) continue;
+      // Un extra se muestra SIEMPRE: el administrador lo agregó a propósito.
+      if (!o && necesidad <= 0 && !esExtra) continue;
 
       // Variantes a emitir — mismo criterio que Llano: si el ítem tiene UM
       // asignadas en Capacidad, va UNA FILA POR UM; si no, la fila base.
@@ -275,6 +350,10 @@ export async function getProductosTraslado({ origen, destino }) {
           necesidad,
           faltante,
           sugerido,
+          // Agregado a mano al portafolio de este destino (ver "Portafolio EXTRA").
+          portafolio_extra: esExtra,
+          // El origen no tiene fila del ítem: su disponible 0 no es un agotado medido.
+          sin_registro_origen: !o,
         });
       }
     }
@@ -350,7 +429,7 @@ function reglasDe(destino) {
  *
  * @returns {Promise<Array<{codigo_item, descripcion, capacidad, unidad, sedes: Array<{codigo, nombre, disponible}>}>>}
  */
-async function ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidades }) {
+async function ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidades, extras = new Set() }) {
   const reglasSinOrigen = { ...flujo, portafolio: { ...flujo.portafolio, requiereOrigen: false } };
   const plan = flujo.portafolio.plan;
 
@@ -359,6 +438,8 @@ async function ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidade
   const candidatos = [];
   for (const [codigo, capRows] of capacidades) {
     if (oMap.has(codigo)) continue;
+    // Un extra SÍ se muestra (sin origen y todo): no está "oculto", así que no se avisa.
+    if (extras.has(codigo)) continue;
     if (!capRows.some((r) => num(r.capacidad) > 0)) continue;
     const d = dMap.get(codigo);
     if (d && !pasaPortafolio(reglasSinOrigen, d, undefined, capRows)) continue;
@@ -507,11 +588,13 @@ function esDescodificado(cat) {
  */
 export async function getProductosLlano({ origen, destino, cadencias }) {
   try {
-    const [rows, capacidades, config] = await Promise.all([
+    const [rows, capacidades, config, extras] = await Promise.all([
       leerBodegas([origen, destino]),
       // Capacidad DEL DESTINO: Llano y Machado tienen filas separadas (migración 042).
       mapaCapacidades(destino),
       obtenerConfig(),
+      // Productos agregados a mano al portafolio de este destino (ver extrasDe).
+      extrasDe(destino),
     ]);
     // Cadencias del flujo que se está calculando (config.llano, config.machado…),
     // no las de Llano a ciegas: cada flujo A/B/C las edita por separado. El respaldo
@@ -591,6 +674,13 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       codigos.add(codigo);
     }
 
+    // Y los extras: el portafolio agregado a mano. Van DESPUÉS del bucle de capacidad y
+    // ANTES del chequeo de "sin nada que mostrar", así una sede con solo extras (sin
+    // snapshot ni capacidad) tampoco da error. No exigen capacidad ni fila en el origen
+    // ni en el destino (ver "Portafolio EXTRA" arriba).
+    for (const extra of extras) codigos.add(extra);
+    const filasCatalogo = await filasDeExtrasSinRegistro(extras, oMap, dMap, destino);
+
     // Sin NADA que mostrar: ni filas del destino en el snapshot ni capacidad cargada
     // de un ítem que exista en el origen. Una lista vacía con ok:true se lee como "no
     // hay productos", y casi siempre es otra cosa: una bodega que está en flujos.js
@@ -615,7 +705,15 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     for (const codigo of codigos) {
       const o = oMap.get(codigo);
       const d = dMap.get(codigo);
-      const fuente = o || d;
+      const esExtra = extras.has(codigo);
+      // Un extra sin fila en el origen ni en el destino se arma desde el catálogo.
+      const fuente = o || d || (esExtra ? filasCatalogo.get(codigo) : undefined);
+      if (!fuente) {
+        console.warn(
+          `[portafolio-extra] ${codigo} está agregado a ${destino} pero no está en el snapshot ni en el catálogo: no se muestra.`,
+        );
+        continue;
+      }
 
       // La clase A/B/C debe ser la de Girardota Llano (destino, 00401), no la
       // del origen (Girardota Parque). Por eso se lee el CAT del registro `d`.
@@ -631,7 +729,9 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
       // quede muerto; ver `esDescodificado`). En Machado: solo ítems con CAM
       // "PORTAFOLIO ACTIVO MACHADO" y capacidad > 0 — un ítem del Excel sin CAM activo
       // se esconde igual que Llano esconde los que no tienen CAT.
-      if (!pasaPortafolio(flujo, d, o, capacidades.get(codigo))) continue;
+      // Un extra se salta el portafolio completo (CAT/CAM, requiereCapacidad,
+      // requiereOrigen): lo agregó un administrador, no lo decide la clasificación.
+      if (!esExtra && !pasaPortafolio(flujo, d, o, capacidades.get(codigo))) continue;
       // "Inventario" = CantidadDisponible (existencia − comprometida): lo realmente
       // disponible para trasladar / para cubrir la demanda, NO la existencia total.
       // Ojo: CantidadDisponible puede venir NEGATIVA (cuando cant_pos_1 > existencia).
@@ -676,7 +776,8 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
         const faltante = Math.max(0, necesidad - Math.max(0, Math.floor(disponibleOrigen)));
 
         // Ítem que no está en el origen: solo tiene sentido si Llano lo necesita.
-        if (!o && necesidad <= 0) continue;
+        // Un extra se muestra SIEMPRE, aun con sugerido 0 y sin origen.
+        if (!o && necesidad <= 0 && !esExtra) continue;
 
         // Con UM asignada, la fila va fija en esa UM (sin selector). Si no, la base.
         // `unidadesDetalle` trae objetos {unidad, factor}; `unidades` es solo strings
@@ -710,6 +811,11 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
           // todavía no maneja el ítem. Se marca para que nadie lea ese 0 como un
           // agotado y para poder explicar por qué apareció.
           sin_registro_destino: !d,
+          // Agregado a mano al portafolio de este destino (ver "Portafolio EXTRA").
+          portafolio_extra: esExtra,
+          // El origen no tiene fila del ítem: su disponible 0 no es un agotado medido,
+          // y NO hay de dónde sacar mercancía para despachar.
+          sin_registro_origen: !o,
           consumo_destino: consumoDestino,
           dias_inventario: diasInventario,
           necesidad,
@@ -723,7 +829,7 @@ export async function getProductosLlano({ origen, destino, cadencias }) {
     // despachables, pero el usuario tiene que saber que existen). Solo en flujos que
     // exigen origen; Llano y General no reciben el campo.
     if (flujo.portafolio?.requiereOrigen) {
-      const ocultos = await ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidades });
+      const ocultos = await ocultosSinOrigen({ flujo, origen, destino, oMap, dMap, capacidades, extras });
       return { data: productos, ocultos_sin_origen: ocultos };
     }
 
