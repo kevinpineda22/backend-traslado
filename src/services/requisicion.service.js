@@ -1,5 +1,6 @@
 import { supabase } from "../config/supabase.js";
 import * as DespachoModel from "../models/Despacho.model.js";
+import { extrasSinOrigen } from "../models/PortafolioExtra.model.js";
 import { FLUJOS } from "../config/flujos.js";
 import { tomarLock, liberarLock } from "./lock.service.js";
 import {
@@ -299,6 +300,53 @@ function conSiesaData(errNuevo, errOriginal) {
 }
 
 /**
+ * GUARDIA DEL AJUSTE: los faltantes que son "portafolio extra" SIN fila en el origen.
+ *
+ * POR QUÉ EXISTE
+ * El ajuste automático CREA inventario en SIESA de producción para que la salida pase.
+ * Está pensado para el desfase normal entre lo que el snapshot cree y lo que SIESA
+ * valida (existencia vs. posicionado, caché de 60s) sobre un ítem que el origen SÍ
+ * maneja. Un producto agregado a mano al portafolio de la sede (traslados_portafolio_extra)
+ * que el origen nunca registró es otra cosa: su disponible allí es 0 porque NO EXISTE,
+ * no por un desfase, y "ajustarlo" inventaría mercancía que no hay.
+ *
+ * QUÉ CUBRE Y QUÉ NO
+ * Solo bloquea el faltante que cumple las DOS condiciones: ser extra del DESTINO del
+ * despacho y no tener fila en el snapshot del ORIGEN. Un ítem normal —tenga o no fila
+ * en el origen— y un extra que el origen sí maneja siguen el camino de siempre.
+ *
+ * FALLA CERRADA: si no se puede verificar (error de Supabase) NO se ajusta. Un ajuste
+ * de más es dinero y inventario fantasma en el ERP; un despacho que queda pendiente
+ * por un fallo transitorio se reintenta solo en el próximo ciclo.
+ *
+ * @param {object} despacho - cabecera del despacho (origen y destino)
+ * @param {{item:string, cantidad:number}[]} faltantes - lo que SIESA dice que falta
+ * @param {Error} err - el rechazo de SIESA que originó el ajuste. Si la verificación falla
+ *   se le traslada su `httpStatus`: sin él, un mensaje que casualmente diga "timeout" se
+ *   leería como "SIESA no respondió" (incierto) cuando en realidad SIESA SÍ contestó, con
+ *   un rechazo, y la salida NO entró.
+ * @returns {Promise<string[]>} códigos bloqueados ([] = se puede ajustar)
+ */
+async function faltantesExtraSinOrigen(despacho, faltantes, err) {
+  // SIESA devuelve el ítem con ceros a la izquierda ("0003851") y el snapshot, el
+  // portafolio extra y el catálogo lo guardan sin ellos ("3851"). Sin normalizar, el
+  // guardia no encontraría nunca al extra y dejaría pasar el ajuste: falla abierta.
+  // Es la misma regla que `normItem` en siesaAjuste.service.js.
+  const codigos = faltantes.map((f) => String(f.item ?? "").trim().replace(/^0+/, "") || "0");
+  try {
+    return await extrasSinOrigen(despacho.destino, despacho.origen, codigos);
+  } catch (e) {
+    throw conSiesaData(
+      new Error(
+        `No se pudo verificar si los faltantes son productos extra sin existencia en el origen, ` +
+          `así que NO se hizo el ajuste automático de inventario: ${e.message}`,
+      ),
+      err,
+    );
+  }
+}
+
+/**
  * Importa la SALIDA en tránsito y, si SIESA la rechaza por FALTANTE DE STOCK y el
  * ajuste automático está habilitado, inserta las unidades faltantes con un ajuste
  * de entrada y reintenta la salida UNA vez.
@@ -344,6 +392,22 @@ async function enviarSalidaConAjuste(despacho) {
         new Error(
           `El traslado sigue sin stock tras un ajuste ya hecho: ${err.message}. ` +
             "No se re-ajusta para no duplicar inventario — revisar manualmente.",
+        ),
+        err,
+      );
+    }
+
+    // Guardia: un producto extra que el origen no tiene NO se ajusta (ver
+    // faltantesExtraSinOrigen). Se corta ANTES de tocar SIESA y sin marcar el ajuste
+    // como fallido: no es un fallo del ajuste, es que nunca debió intentarse.
+    const bloqueados = await faltantesExtraSinOrigen(despacho, faltantes, err);
+    if (bloqueados.length > 0) {
+      throw conSiesaData(
+        new Error(
+          `No se hizo el ajuste automático de inventario: el/los ítem(s) ${bloqueados.join(", ")} ` +
+            `son productos agregados al portafolio de la sede que NO existen en la bodega origen ` +
+            `${despacho.origen}. Ajustar crearía inventario en SIESA que no hay. ` +
+            `Quitá esos ítems del despacho o cargá primero el ítem en el origen.`,
         ),
         err,
       );

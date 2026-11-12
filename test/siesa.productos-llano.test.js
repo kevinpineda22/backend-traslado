@@ -77,7 +77,7 @@ before(async () => {
   // Portafolio extra (migración 043): estos tests no tienen productos agregados a mano,
   // así que el modelo devuelve vacío y el comportamiento es el de siempre.
   mock.module("../src/models/PortafolioExtra.model.js", {
-    exports: { codigosDe: async () => new Set() },
+    exports: { codigosDe: async () => new Set(), extrasSinOrigen: async () => [] },
   });
   mock.module("../src/models/Catalogo.model.js", { exports: { porCodigos: async () => new Map() } });
   mock.module("../src/services/sugerido.service.js", {

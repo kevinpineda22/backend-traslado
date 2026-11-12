@@ -23,7 +23,7 @@ let row;
 // Comportamiento configurable por test.
 const impl = {};
 // Contadores de llamadas al ERP.
-const calls = { salida: 0, entrada: 0, ajuste: 0 };
+const calls = { salida: 0, entrada: 0, ajuste: 0, extras: [] };
 
 // ── BD simulada: un query builder encadenable y a la vez "awaitable" ──
 // `marcar` hace .update(patch).eq(...) y await → resuelve {error:null} y aplica el
@@ -97,6 +97,16 @@ before(async () => {
     },
   });
 
+  // Guardia del ajuste: lista los faltantes que son "portafolio extra" sin fila en el origen.
+  mock.module("../src/models/PortafolioExtra.model.js", {
+    exports: {
+      extrasSinOrigen: async (destino, origen, codigos) => {
+        calls.extras.push({ destino, origen, codigos });
+        return impl.extrasSinOrigen(destino, origen, codigos);
+      },
+    },
+  });
+
   ({ enviarRequisicion } = await import("../src/services/requisicion.service.js"));
 });
 
@@ -104,6 +114,7 @@ beforeEach(() => {
   calls.salida = 0;
   calls.entrada = 0;
   calls.ajuste = 0;
+  calls.extras = [];
   row = {
     id: "D1",
     origen: "PV001",
@@ -129,6 +140,8 @@ beforeEach(() => {
   impl.ajusteAuto = false;
   impl.detectarFaltantes = () => [];
   impl.importarAjuste = async () => ({ ok: true, docto: "AJ1", payload: {} });
+  // Por defecto ningún faltante es un extra sin origen: el ajuste sigue como siempre.
+  impl.extrasSinOrigen = async () => [];
 });
 
 test("EL BUG: salida aceptada con consecutivo vacío NO se re-manda en el reintento", async () => {
@@ -215,4 +228,115 @@ test("HISTORIAL: se guarda una entrada por cada intento (no solo el último)", a
     row.siesa_intentos_log.every((e) => e.at && e.estado),
     "cada intento guarda cuándo y cómo terminó",
   );
+});
+
+/* ─── Guardia: un producto extra SIN fila en el origen no dispara el ajuste ───
+   El ajuste automático crea inventario en SIESA de producción. Un extra que el origen
+   nunca registró tiene disponible 0 porque no existe, no por un desfase del snapshot. */
+
+/** Salida rechazada por faltante (470) en el primer intento; pasa si se ajustó. */
+function salidaConFaltante() {
+  let n = 0;
+  impl.importarSalida = async () => {
+    n += 1;
+    if (n === 1) {
+      const e = new Error("SIESA rechazó la salida [HTTP 400]: sin cantidad disponible");
+      e.siesaData = [{ f_tipo_reg: "470" }];
+      e.httpStatus = 400;
+      throw e;
+    }
+    return { ok: true, docto: "S1", respuesta: { codigo: 0 }, payload: { s: 1 } };
+  };
+}
+
+test("GUARDIA: un faltante que es extra sin origen NO dispara el ajuste y el despacho queda sin enviar", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [{ item: "500", bodega: "PV001", cantidad: 5 }];
+  impl.extrasSinOrigen = async () => ["500"];
+  salidaConFaltante();
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(calls.ajuste, 0, "NO se creó inventario en SIESA");
+  assert.equal(calls.salida, 1, "no se reintentó la salida: no había nada que ajustar");
+  assert.notEqual(r.estado, "enviado");
+  assert.notEqual(row.siesa_estado, "enviado");
+  assert.equal(row.siesa_ajuste_estado, null, "no se marcó ni como hecho ni como fallido");
+  assert.match(String(row.siesa_error), /500/);
+  assert.match(String(row.siesa_error), /NO existen en la bodega origen/);
+});
+
+test("GUARDIA: se consulta con el destino y el origen del despacho y los códigos SIN ceros a la izquierda", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [
+    { item: "0003851", bodega: "PV001", cantidad: 48 },
+    { item: "77", bodega: "PV001", cantidad: 1 },
+  ];
+  salidaConFaltante();
+
+  await enviarRequisicion("D1");
+
+  assert.deepEqual(calls.extras, [{ destino: "PV002", origen: "PV001", codigos: ["3851", "77"] }]);
+});
+
+test("GUARDIA: un ítem normal (o un extra que el origen sí maneja) ajusta igual que siempre", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [{ item: "0003851", bodega: "PV001", cantidad: 48 }];
+  impl.extrasSinOrigen = async () => []; // no hay extras sin origen entre los faltantes
+  salidaConFaltante();
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(r.estado, "enviado");
+  assert.equal(calls.ajuste, 1, "el comportamiento para ítems normales no cambió");
+  assert.equal(row.siesa_ajuste_estado, "hecho");
+});
+
+test("GUARDIA: si UNO de varios faltantes es un extra sin origen, no se ajusta ninguno", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [
+    { item: "0003851", bodega: "PV001", cantidad: 48 },
+    { item: "500", bodega: "PV001", cantidad: 5 },
+  ];
+  impl.extrasSinOrigen = async () => ["500"];
+  salidaConFaltante();
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.ajuste, 0, "un ajuste parcial dejaría el despacho a medias: se frena todo");
+  assert.notEqual(row.siesa_estado, "enviado");
+});
+
+test("GUARDIA: si no se puede verificar, FALLA CERRADO: no se ajusta", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [{ item: "0003851", bodega: "PV001", cantidad: 48 }];
+  impl.extrasSinOrigen = async () => {
+    throw new Error("Error al leer el portafolio extra: timeout");
+  };
+  salidaConFaltante();
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.ajuste, 0, "ante la duda no se crea inventario");
+  assert.notEqual(row.siesa_estado, "enviado");
+  // SIESA SÍ contestó (rechazo 470): no es "no respondió", aunque el mensaje diga timeout.
+  assert.notEqual(row.siesa_estado, "incierto");
+  assert.match(String(row.siesa_error), /No se pudo verificar/);
+});
+
+test("GUARDIA: con el ajuste automático apagado ni siquiera se consulta (nada cambia)", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = false;
+  impl.detectarFaltantes = () => [{ item: "500", bodega: "PV001", cantidad: 5 }];
+  salidaConFaltante();
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.extras.length, 0);
+  assert.equal(calls.ajuste, 0);
 });

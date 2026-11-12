@@ -81,7 +81,7 @@ before(async () => {
   });
   mock.module("../src/config/supabase.js", { exports: { supabase: {} } });
   mock.module("../src/models/PortafolioExtra.model.js", {
-    exports: { codigosDe: async () => new Set(extras) },
+    exports: { codigosDe: async () => new Set(extras), extrasSinOrigen: async () => [] },
   });
   mock.module("../src/models/Catalogo.model.js", {
     exports: {
