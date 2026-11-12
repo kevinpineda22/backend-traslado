@@ -1,0 +1,43 @@
+name: Refrescar catalogo SIESA
+
+# Trae el catálogo de ítems activos de SIESA (~23.000 filas, ~24 páginas) y lo guarda
+# en `traslados_catalogo`. Cambia poco (altas y bajas de ítems), así que corre una
+# vez al día; el botón "Actualizar catálogo" lo dispara a mano (workflow_dispatch).
+on:
+  schedule:
+    # 07:30 UTC = 02:30 hora de Colombia: fuera del horario de operación.
+    - cron: "30 7 * * *"
+  workflow_dispatch: {} # permite dispararlo a mano desde la pestaña Actions
+
+# Nunca dos corridas a la vez (además el lock en Supabase ya lo protege).
+concurrency:
+  group: catalogo-refresh
+  cancel-in-progress: false
+
+jobs:
+  refrescar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22: trae WebSocket nativo, que @supabase/supabase-js (realtime)
+          # necesita al crear el cliente (ver snapshot-refresh.yml).
+          node-version: 22
+
+      - name: Instalar dependencias
+        run: npm ci || npm install
+
+      - name: Refrescar catalogo
+        run: node scripts/refresh-catalogo.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CONNEKTA_BASE_URL: ${{ secrets.CONNEKTA_BASE_URL }}
+          CONNEKTA_ID_COMPANIA: ${{ secrets.CONNEKTA_ID_COMPANIA }}
+          CONNI_KEY: ${{ secrets.CONNI_KEY }}
+          CONNI_TOKEN: ${{ secrets.CONNI_TOKEN }}
+          # Nombre de la consulta registrada en Connekta (si en prod no es el default).
+          CONNEKTA_QUERY_CATALOGO: ${{ secrets.CONNEKTA_QUERY_CATALOGO }}

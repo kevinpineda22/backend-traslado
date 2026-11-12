@@ -264,6 +264,19 @@ const capacidadUnoSchema = z.object({
   ),
 });
 
+// Portafolio extra — alta de un ítem al portafolio de una sede. Solo valida la FORMA;
+// que el destino sea una sede y que el ítem exista y esté activo en el catálogo lo
+// decide el controlador (necesita config y base). `codigo_item` acepta número o
+// texto: el front a veces lo manda como número y se guarda siempre como texto.
+const textoObligatorio = (mensaje) =>
+  z.preprocess((v) => String(v ?? "").trim(), z.string().min(1, mensaje));
+
+const portafolioExtraSchema = z.object({
+  destino: textoObligatorio("destino es requerido"),
+  codigo_item: textoObligatorio("codigo_item es requerido"),
+  agregado_por: textoObligatorio("agregado_por es requerido"),
+});
+
 // Config de reposición — días editables (cadencias Llano y Machado + cubrimiento General)
 const diaPos = z.preprocess((v) => Number(v), z.number().positive("debe ser mayor a 0"));
 const cadenciasSchema = z.object({
@@ -458,5 +471,6 @@ export const validators = {
   accionContenedor: validate(accionContenedorSchema),
   capacidadBulk: validate(capacidadBulkSchema),
   capacidadUno: validate(capacidadUnoSchema),
+  portafolioExtra: validate(portafolioExtraSchema),
   config: validate(configSchema),
 };

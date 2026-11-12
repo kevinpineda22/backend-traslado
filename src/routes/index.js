@@ -8,6 +8,8 @@ import alertasRoutes from "./alertas.routes.js";
 import flotaRoutes from "./flota.routes.js";
 import integracionesRoutes from "./integraciones.routes.js";
 import sriCapacidadRoutes from "./sriCapacidad.routes.js";
+import catalogoRoutes from "./catalogo.routes.js";
+import portafolioExtraRoutes from "./portafolioExtra.routes.js";
 import { verificarEmail } from "../services/email.service.js";
 import { sandboxOn } from "../config/sandbox.js";
 
@@ -20,6 +22,11 @@ router.use("/capacidad", capacidadRoutes);
 router.use("/config", configRoutes);
 router.use("/alertas", alertasRoutes);
 router.use("/flota", flotaRoutes);
+
+// Catálogo de ítems activos de SIESA (para buscar qué agregar) y portafolio extra por
+// sede (productos agregados a mano que aparecen siempre en la lista de esa sede).
+router.use("/catalogo", catalogoRoutes);
+router.use("/portafolio-extra", portafolioExtraRoutes);
 
 // Capacidad de góndola medida por SRI. Hoy solo expone el dry-run (lectura y
 // reporte); no hay ruta que escriba en `traslados_capacidad`.

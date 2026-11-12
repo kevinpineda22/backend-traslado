@@ -412,10 +412,12 @@ export function refreshEnProgreso() {
  * pull corre por afuera. Si no está configurado (sin token/repo), devuelve
  * { disponible: false } para que el llamador corra el pull inline como respaldo.
  */
-export async function dispararRefreshRemoto() {
+export async function dispararRefreshRemoto(workflowPropio) {
   const token = process.env.GITHUB_DISPATCH_TOKEN;
   const repo = process.env.GITHUB_REPO; // "owner/repo"
-  const workflow = process.env.GITHUB_WORKFLOW || "snapshot-refresh.yml";
+  // `workflowPropio` lo manda otro job que comparte token y repo (el refresco del
+  // catálogo, ver catalogo.service.js). Sin él, el de siempre: el del snapshot.
+  const workflow = workflowPropio || process.env.GITHUB_WORKFLOW || "snapshot-refresh.yml";
   const ref = process.env.GITHUB_REF_SNAPSHOT || "main";
   if (!token || !repo) return { disponible: false };
 
