@@ -197,3 +197,77 @@ test("porCodigos: trocea los códigos para no exceder la URL", async () => {
   const lotes = consultas.map((q) => paso(q, "in")[2].length);
   assert.deepEqual(lotes, [300, 300, 50]);
 });
+
+/* ─── Normalizador único y guardia estricta ─────────────────────────── */
+
+test("normalizador único: quita ceros a la izquierda y deja '0' si todo eran ceros", async () => {
+  const { normCodigoItem } = await import("../src/config/codigoItem.js");
+  assert.equal(normCodigoItem(" 0003851 "), "3851");
+  assert.equal(normCodigoItem("000"), "0");
+  assert.equal(normCodigoItem("3851"), "3851");
+  assert.equal(normCodigoItem(""), "");
+  assert.equal(normCodigoItem(null), "");
+  assert.equal(Catalogo.normCodigoCatalogo("003851"), "3851", "el catálogo y el extra usan el mismo");
+});
+
+test("extrasSinOrigen: el extra guardado como '3851' bloquea un faltante '0003851', y el snapshot se prueba en forma cruda Y normalizada", async () => {
+  respuestas.traslados_portafolio_extra = { data: [{ codigo_item: "3851" }], error: null };
+  respuestas.traslados_snapshot = { data: [], error: null };
+
+  const r = await PortafolioExtra.extrasSinOrigen("00401", "00301", ["0003851"]);
+
+  assert.deepEqual(r, ["3851"]);
+  const extra = consultas.find((q) => q.tabla === "traslados_portafolio_extra");
+  const snap = consultas.find((q) => q.tabla === "traslados_snapshot");
+  assert.deepEqual(paso(extra, "in"), ["in", "codigo_item", ["3851"]], "los extras se buscan normalizados");
+  assert.deepEqual(paso(snap, "in"), ["in", "codigo_item", ["3851", "0003851"]]);
+});
+
+test("extrasSinOrigen: si el snapshot lo guardó CON ceros, igual cuenta como que el origen lo tiene", async () => {
+  respuestas.traslados_portafolio_extra = { data: [{ codigo_item: "3851" }], error: null };
+  respuestas.traslados_snapshot = { data: [{ codigo_item: "0003851" }], error: null };
+
+  assert.deepEqual(await PortafolioExtra.extrasSinOrigen("00401", "00301", ["0003851"]), []);
+});
+
+test("extrasSinOrigen: un extra guardado con ceros en la base (filas viejas) también se normaliza al compararlo", async () => {
+  respuestas.traslados_portafolio_extra = { data: [{ codigo_item: "003851" }], error: null };
+  respuestas.traslados_snapshot = { data: [], error: null };
+
+  assert.deepEqual(await PortafolioExtra.extrasSinOrigen("00401", "00301", ["3851"]), ["3851"]);
+});
+
+test("extrasSinOrigen: noParseables + la sede tiene extras → lanza (falla cerrado)", async () => {
+  respuestas.traslados_portafolio_extra = { data: null, error: null, count: 2 };
+
+  await assert.rejects(
+    PortafolioExtra.extrasSinOrigen("00401", "00301", ["77"], { noParseables: true }),
+    /no se pudieron interpretar/,
+  );
+});
+
+test("extrasSinOrigen: noParseables pero la sede SIN extras → no lanza", async () => {
+  respuestas.traslados_portafolio_extra = { data: [], error: null, count: 0 };
+
+  assert.deepEqual(await PortafolioExtra.extrasSinOrigen("00401", "00301", ["77"], { noParseables: true }), []);
+});
+
+test("extrasSinOrigen: SOLO 42P01/PGRST205 son 'tabla inexistente'; un mensaje 'does not exist' con otro código lanza", async () => {
+  respuestas.traslados_portafolio_extra = {
+    data: null,
+    error: { code: "42703", message: 'column "x" does not exist' },
+  };
+  await assert.rejects(PortafolioExtra.extrasSinOrigen("00401", "00301", ["1"]), /does not exist/);
+
+  respuestas.traslados_portafolio_extra = { data: null, error: { message: "Could not find the table" } };
+  await assert.rejects(PortafolioExtra.extrasSinOrigen("00401", "00301", ["1"]), /Could not find/);
+
+  respuestas.traslados_portafolio_extra = { data: null, error: { code: "42P01", message: "x" } };
+  assert.deepEqual(await PortafolioExtra.extrasSinOrigen("00401", "00301", ["1"]), []);
+});
+
+test("codigosDe (listas de productos) sigue tolerante: el mensaje 'does not exist' sin código también da vacío", async () => {
+  respuestas.traslados_portafolio_extra = { data: null, error: { message: 'relation "x" does not exist' } };
+
+  assert.equal((await PortafolioExtra.codigosDe("00401")).size, 0);
+});

@@ -66,8 +66,9 @@ before(async () => {
   });
   mock.module("../src/services/lock.service.js", {
     exports: {
-      tomarLock: async () => {
+      tomarLock: async (_nombre, ttl) => {
         llamadas.lock += 1;
+        llamadas.ttl = ttl;
         return impl.lock;
       },
       liberarLock: async () => {
@@ -82,6 +83,8 @@ before(async () => {
   mock.module("../src/models/Catalogo.model.js", {
     exports: {
       contar: async () => previos,
+      // Relectura previa a la poda: por defecto, lo que el upsert dejó escrito.
+      contarDesde: async () => impl.escritas ?? llamadas.upserts.flat().length,
       upsertar: async (filas) => {
         if (impl.upsertFalla) throw new Error("Error al guardar el catálogo: boom");
         llamadas.upserts.push(filas);
@@ -113,6 +116,7 @@ beforeEach(() => {
   impl.lock = true;
   impl.retrasoPagina = {};
   impl.upsertFalla = false;
+  impl.escritas = undefined;
   Object.assign(llamadas, {
     consultas: [],
     upserts: [],
@@ -273,4 +277,66 @@ test("el lock se libera aunque el refresco aborte por una guarda", async () => {
 
   assert.equal(llamadas.lock, 1);
   assert.equal(llamadas.liberado, 1);
+});
+
+test("el lock cubre el refresco completo: TTL de al menos 15 min", async () => {
+  paginas = pull(10);
+  declarado = 10;
+
+  await refrescarCatalogoUnico("test");
+
+  assert.ok(llamadas.ttl >= 900, `TTL ${llamadas.ttl}s`);
+});
+
+test("poda: si al releer la base lo escrito no llega al 95% del pull, NO se poda (el upsert queda)", async () => {
+  paginas = pull(1000);
+  declarado = 1000;
+  previos = 0;
+  impl.escritas = 900; // otro refresco pisó el estado o parte del upsert no aterrizó
+
+  const r = await refrescarCatalogo();
+
+  assert.equal(llamadas.upserts.flat().length, 1000, "el upsert sí se hizo");
+  assert.equal(llamadas.podas.length, 0, "sin poda");
+  assert.match(r.poda_omitida, /900 de 1000/);
+  assert.match(llamadas.logs.at(-1).detalle, /Poda omitida/);
+});
+
+test("poda: si lo escrito no llega al 80% de lo que había antes, NO se poda", async () => {
+  paginas = pull(1000);
+  declarado = 1000;
+  previos = 1500; // 1000 >= 80% de 1500? sí (1200 no): 1000 < 1200
+  impl.escritas = 1000;
+
+  await assert.rejects(refrescarCatalogo(), /Regresión sospechosa/, "la guarda previa ya lo frena");
+  assert.equal(llamadas.podas.length, 0);
+});
+
+test("poda: la relectura exige el 80% de las filas previas aunque el pull la pasara", async () => {
+  paginas = pull(1000);
+  declarado = 1000;
+  previos = 1200; // el pull (1000) pasa la guarda: 1000 >= 960
+  impl.escritas = 950; // pero en la base quedaron 950 < 960 (y 950 >= 95% de 1000)
+
+  const r = await refrescarCatalogo();
+
+  assert.equal(llamadas.podas.length, 0);
+  assert.match(r.poda_omitida, /vs 1200 previas/);
+});
+
+test("total declarado 0 con filas traídas es sospechoso: upsert sí, poda NO", async () => {
+  paginas = pull(50);
+  declarado = 0;
+  previos = 0;
+
+  const r = await refrescarCatalogo();
+
+  assert.equal(llamadas.upserts.flat().length, 50);
+  assert.equal(llamadas.podas.length, 0);
+  assert.match(r.poda_omitida, /no declaró el total/);
+});
+
+test("el catálogo guarda el código sin ceros a la izquierda (normalizador único)", () => {
+  const regs = dedupePorCodigo([fila("003851"), fila("003851", { DescItem: "DUP" }), fila("000")], "ts");
+  assert.deepEqual(regs.map((r) => r.codigo_item), ["3851", "0"]);
 });

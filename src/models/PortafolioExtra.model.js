@@ -28,12 +28,13 @@ const LOTE = 300;
  * funcionando; cualquier otro error (red, permisos) sí se propaga: un extra que
  * desaparece en silencio por un fallo transitorio sería un producto que "se esfumó".
  */
-function tablaInexistente(error) {
-  return (
-    error?.code === "42P01" ||
-    error?.code === "PGRST205" ||
-    /does not exist|could not find the table/i.test(String(error?.message ?? ""))
-  );
+function tablaInexistente(error, { estricto = false } = {}) {
+  const porCodigo = error?.code === "42P01" || error?.code === "PGRST205";
+  // Modo estricto (la guardia del ajuste): SOLO los códigos. Un mensaje que casualmente diga
+  // "does not exist" (una columna, una función, un permiso) NO prueba que no haya extras, y
+  // tomarlo por "no hay extras" deja pasar un ajuste de inventario.
+  if (estricto) return porCodigo;
+  return porCodigo || /does not exist|could not find the table/i.test(String(error?.message ?? ""));
 }
 
 function avisarSinTabla() {
@@ -73,22 +74,62 @@ export async function codigosDe(destino) {
  * (requisicion.service.js): un extra sin fila en el origen tiene disponible 0 allí, y
  * despacharlo dispararía un ajuste que CREA inventario en SIESA de producción.
  *
- * Sin la tabla de extras (migración 043 pendiente) devuelve [] (no hay extras). Cualquier
- * otro error se propaga: el guardia tiene que fallar cerrado, no adivinar.
+ * Sin la tabla de extras (SOLO por código 42P01 / PGRST205) devuelve [] (no hay extras).
+ * Cualquier otro error se propaga: el guardia tiene que fallar cerrado, no adivinar.
+ *
+ * `codigos` llegan crudos (tal como los dio SIESA): acá se normalizan con el normalizador
+ * único. `noParseables` avisa que algún faltante no tenía un código interpretable.
  *
  * @returns {Promise<string[]>} códigos
  */
-export async function extrasSinOrigen(destino, origen, codigos) {
-  const unicos = [...new Set((codigos || []).map(normCodigoCatalogo).filter(Boolean))];
+export async function extrasSinOrigen(destino, origen, codigos, { noParseables = false } = {}) {
+  const ESTRICTO = { estricto: true };
+  const dest = normDestino(destino);
+
+  // Un faltante cuyo código no se pudo interpretar no se puede cruzar con nada. Si la sede
+  // no tiene extras da igual; si tiene alguno, no hay forma de descartar que sea uno de
+  // ellos → se corta (falla cerrado) en vez de dejar pasar el ajuste.
+  if (noParseables) {
+    const { count, error } = await supabase
+      .from(TABLE)
+      .select("*", { count: "exact", head: true })
+      .eq("destino", dest);
+    if (error) {
+      if (tablaInexistente(error, ESTRICTO)) {
+        avisarSinTabla();
+        return [];
+      }
+      throw new Error(`Error al leer el portafolio extra: ${error.message}`);
+    }
+    if ((count || 0) > 0) {
+      throw new Error(
+        "Hay códigos de faltante que no se pudieron interpretar y la sede tiene productos extra: " +
+          "no se puede descartar que alguno lo sea.",
+      );
+    }
+  }
+
+  // Formas crudas de cada código (tal como llegó de SIESA), agrupadas por su forma normalizada.
+  // El snapshot guarda el código tal cual lo dio SIESA, así que contra él se prueban las dos.
+  const crudasDe = new Map();
+  for (const c of codigos || []) {
+    const crudo = String(c ?? "").trim();
+    const norm = normCodigoCatalogo(crudo);
+    if (!norm) continue;
+    if (!crudasDe.has(norm)) crudasDe.set(norm, new Set());
+    crudasDe.get(norm).add(crudo);
+  }
+  const unicos = [...crudasDe.keys()];
+
   const extras = [];
   for (let i = 0; i < unicos.length; i += LOTE) {
     const { data, error } = await supabase
       .from(TABLE)
       .select("codigo_item")
-      .eq("destino", normDestino(destino))
+      .eq("destino", dest)
       .in("codigo_item", unicos.slice(i, i + LOTE));
     if (error) {
-      if (tablaInexistente(error)) {
+      if (tablaInexistente(error, ESTRICTO)) {
         avisarSinTabla();
         return [];
       }
@@ -100,11 +141,14 @@ export async function extrasSinOrigen(destino, origen, codigos) {
 
   const conOrigen = new Set();
   for (let i = 0; i < extras.length; i += LOTE) {
+    const lote = extras.slice(i, i + LOTE);
+    // Forma normalizada Y formas crudas: si el snapshot lo guardó con ceros, también lo ve.
+    const variantes = [...new Set(lote.flatMap((c) => [c, ...(crudasDe.get(c) || [])]))];
     const { data, error } = await supabase
       .from("traslados_snapshot")
       .select("codigo_item")
       .eq("bodega", normDestino(origen))
-      .in("codigo_item", extras.slice(i, i + LOTE));
+      .in("codigo_item", variantes);
     if (error) throw new Error(`Error al leer el snapshot del origen: ${error.message}`);
     for (const r of data || []) conOrigen.add(normCodigoCatalogo(r.codigo_item));
   }

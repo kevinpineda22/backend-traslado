@@ -42,9 +42,11 @@ multiplican filas si un ítem tiene más de un valor en el mismo plan. El catál
 páginas se guardan en su posición y no en orden de llegada: el "primero" tiene que ser
 el mismo en cada refresco).
 
-El código se guarda como `String(CodigoItem).trim()`, la misma forma que
-`traslados_snapshot.codigo_item`, para que catálogo, snapshot y portafolio extra crucen
-por clave sin conversiones.
+El código se guarda con el normalizador único (`src/config/codigoItem.js`): texto, sin
+espacios y SIN ceros a la izquierda (`"0003851"` → `"3851"`; solo ceros → `"0"`). Lo
+comparten el catálogo, el portafolio extra y la guardia del ajuste de inventario; contra
+`traslados_snapshot` (que guarda el código tal cual lo da SIESA) la guardia prueba la forma
+cruda y la normalizada.
 
 ### 3. `ORDER BY … OFFSET 0 ROWS` al final
 

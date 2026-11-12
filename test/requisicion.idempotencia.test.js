@@ -100,9 +100,10 @@ before(async () => {
   // Guardia del ajuste: lista los faltantes que son "portafolio extra" sin fila en el origen.
   mock.module("../src/models/PortafolioExtra.model.js", {
     exports: {
-      extrasSinOrigen: async (destino, origen, codigos) => {
+      extrasSinOrigen: async (destino, origen, codigos, opciones) => {
         calls.extras.push({ destino, origen, codigos });
-        return impl.extrasSinOrigen(destino, origen, codigos);
+        calls.opciones = opciones;
+        return impl.extrasSinOrigen(destino, origen, codigos, opciones);
       },
     },
   });
@@ -267,7 +268,7 @@ test("GUARDIA: un faltante que es extra sin origen NO dispara el ajuste y el des
   assert.match(String(row.siesa_error), /NO existen en la bodega origen/);
 });
 
-test("GUARDIA: se consulta con el destino y el origen del despacho y los códigos SIN ceros a la izquierda", async () => {
+test("GUARDIA: se consulta con el destino y el origen del despacho y los códigos tal como llegaron (el modelo los normaliza)", async () => {
   process.env.SIESA_SOLO_SALIDA = "1";
   impl.ajusteAuto = true;
   impl.detectarFaltantes = () => [
@@ -278,7 +279,8 @@ test("GUARDIA: se consulta con el destino y el origen del despacho y los código
 
   await enviarRequisicion("D1");
 
-  assert.deepEqual(calls.extras, [{ destino: "PV002", origen: "PV001", codigos: ["3851", "77"] }]);
+  assert.deepEqual(calls.extras, [{ destino: "PV002", origen: "PV001", codigos: ["0003851", "77"] }]);
+  assert.equal(calls.opciones.noParseables, false);
 });
 
 test("GUARDIA: un ítem normal (o un extra que el origen sí maneja) ajusta igual que siempre", async () => {
@@ -339,4 +341,38 @@ test("GUARDIA: con el ajuste automático apagado ni siquiera se consulta (nada c
 
   assert.equal(calls.extras.length, 0);
   assert.equal(calls.ajuste, 0);
+});
+
+test("GUARDIA: un faltante con código no interpretable se marca noParseables (el modelo corta si hay extras)", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [
+    { item: "0003851", bodega: "PV001", cantidad: 1 },
+    { item: "AB-12 X", bodega: "PV001", cantidad: 1 },
+  ];
+  // Simula al modelo: con noParseables y extras en la sede lanza.
+  impl.extrasSinOrigen = async (_d, _o, _c, op) => {
+    if (op.noParseables) throw new Error("Hay códigos de faltante que no se pudieron interpretar y la sede tiene productos extra");
+    return [];
+  };
+  salidaConFaltante();
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.opciones.noParseables, true);
+  assert.equal(calls.ajuste, 0, "falla cerrado: no se ajusta");
+  assert.notEqual(row.siesa_estado, "enviado");
+});
+
+test("GUARDIA: un faltante con texto raro pero la sede SIN extras sigue ajustando como siempre", async () => {
+  process.env.SIESA_SOLO_SALIDA = "1";
+  impl.ajusteAuto = true;
+  impl.detectarFaltantes = () => [{ item: "AB-12 X", bodega: "PV001", cantidad: 1 }];
+  impl.extrasSinOrigen = async () => []; // el modelo no ve extras en la sede
+  salidaConFaltante();
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(r.estado, "enviado");
+  assert.equal(calls.ajuste, 1);
 });

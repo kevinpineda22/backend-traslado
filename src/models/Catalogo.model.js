@@ -1,4 +1,5 @@
 import { supabase } from "../config/supabase.js";
+import { normCodigoItem } from "../config/codigoItem.js";
 
 /* =============================================
    Catálogo de ítems activos de SIESA (tabla `traslados_catalogo`, migración 043)
@@ -29,8 +30,12 @@ export const LIMITE_BUSQUEDA_DEFECTO = 50;
 /** Texto mínimo para buscar: con 1 carácter el `ILIKE` devolvería medio catálogo. */
 export const MINIMO_BUSQUEDA = 2;
 
-/** Código de ítem en la misma forma en que se guarda (texto, sin espacios). */
-export const normCodigoCatalogo = (c) => String(c ?? "").trim();
+/**
+ * Código de ítem en la misma forma en que se guarda: texto, sin espacios y SIN ceros a la
+ * izquierda. Es el normalizador único de config/codigoItem.js (lo comparten el catálogo,
+ * el portafolio extra y la guardia del ajuste).
+ */
+export const normCodigoCatalogo = normCodigoItem;
 
 /**
  * Quita del texto de búsqueda lo que rompería el filtro `.or()` de PostgREST
@@ -59,7 +64,12 @@ export async function buscar(q, limit = LIMITE_BUSQUEDA_DEFECTO) {
   const tope = Math.min(Math.max(Math.floor(Number(limit)) || LIMITE_BUSQUEDA_DEFECTO, 1), LIMITE_BUSQUEDA_MAX);
 
   const [exacto, parcial] = await Promise.all([
-    supabase.from(TABLE).select("*").eq("codigo_item", texto).limit(1),
+    // Un texto solo de dígitos puede ser un código ("003851" → "3851").
+    supabase
+      .from(TABLE)
+      .select("*")
+      .eq("codigo_item", /^\d+$/.test(texto) ? normCodigoItem(texto) : texto)
+      .limit(1),
     supabase
       .from(TABLE)
       .select("*")
@@ -110,6 +120,16 @@ export async function porCodigos(codigos) {
 /** Cuántas filas tiene el catálogo ahora mismo. Lanza si no se pudo contar. */
 export async function contar() {
   const { count, error } = await supabase.from(TABLE).select("*", { count: "exact", head: true });
+  if (error) throw new Error(`Error al contar el catálogo: ${error.message}`);
+  return count || 0;
+}
+
+/** Filas con `sincronizado_at` >= `inicioIso`: lo que el refresco vigente dejó escrito. */
+export async function contarDesde(inicioIso) {
+  const { count, error } = await supabase
+    .from(TABLE)
+    .select("*", { count: "exact", head: true })
+    .gte("sincronizado_at", inicioIso);
   if (error) throw new Error(`Error al contar el catálogo: ${error.message}`);
   return count || 0;
 }

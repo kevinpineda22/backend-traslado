@@ -328,13 +328,23 @@ function conSiesaData(errNuevo, errOriginal) {
  * @returns {Promise<string[]>} códigos bloqueados ([] = se puede ajustar)
  */
 async function faltantesExtraSinOrigen(despacho, faltantes, err) {
-  // SIESA devuelve el ítem con ceros a la izquierda ("0003851") y el snapshot, el
-  // portafolio extra y el catálogo lo guardan sin ellos ("3851"). Sin normalizar, el
-  // guardia no encontraría nunca al extra y dejaría pasar el ajuste: falla abierta.
-  // Es la misma regla que `normItem` en siesaAjuste.service.js.
-  const codigos = faltantes.map((f) => String(f.item ?? "").trim().replace(/^0+/, "") || "0");
+  // SIESA devuelve el ítem con ceros a la izquierda ("0003851") y el portafolio extra y el
+  // catálogo lo guardan sin ellos; el modelo normaliza con el normalizador único. Acá solo se
+  // EXTRAE el código del texto del faltante (/^\s*0*(\d+)/). Si el texto no es un código
+  // plano ("ABC-12", "3851 X") no se puede cruzar con confianza: se marca `noParseables` y
+  // el modelo corta si la sede tiene algún extra (falla cerrado, no abierto).
+  let noParseables = false;
+  const codigos = faltantes.map((f) => {
+    const crudo = String(f.item ?? "");
+    const plano = /^\s*\d+\s*$/.test(crudo);
+    if (!plano) noParseables = true;
+    const m = /^\s*0*(\d+)/.exec(crudo);
+    // Un código plano viaja CRUDO (con sus ceros): el modelo prueba contra el snapshot la forma
+    // cruda y la normalizada. Uno no plano solo aporta el prefijo numérico que se pudo extraer.
+    return plano ? crudo.trim() : m ? m[1] : "";
+  });
   try {
-    return await extrasSinOrigen(despacho.destino, despacho.origen, codigos);
+    return await extrasSinOrigen(despacho.destino, despacho.origen, codigos, { noParseables });
   } catch (e) {
     throw conSiesaData(
       new Error(

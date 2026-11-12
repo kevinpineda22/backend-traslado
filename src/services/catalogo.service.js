@@ -2,6 +2,7 @@ import { ejecutarConsulta } from "../config/connekta.js";
 import { tomarLock, liberarLock, lockTomado } from "./lock.service.js";
 import { dispararRefreshRemoto } from "./snapshot.service.js";
 import * as CatalogoModel from "../models/Catalogo.model.js";
+import { normCodigoItem } from "../config/codigoItem.js";
 
 /* =============================================
    Catálogo de ítems activos de SIESA en Supabase
@@ -92,14 +93,14 @@ async function traerDeConnekta() {
 
 /**
  * Convierte una fila de la consulta al shape de `traslados_catalogo`.
- * El código se guarda como texto sin espacios: la misma forma de
- * `traslados_snapshot.codigo_item`, para que ambas tablas crucen por clave.
+ * El código se guarda con el normalizador único (texto, sin espacios y sin ceros a la
+ * izquierda): el mismo que usan el portafolio extra y la guardia del ajuste.
  */
 export function aRegistroCatalogo(r, ts) {
   const estado = r.Estado == null || r.Estado === "" ? null : Number(r.Estado);
   const rowid = r.RowidItemExt == null || r.RowidItemExt === "" ? null : Number(r.RowidItemExt);
   return {
-    codigo_item: String(r.CodigoItem).trim(),
+    codigo_item: normCodigoItem(r.CodigoItem),
     rowid_item_ext: Number.isFinite(rowid) ? rowid : null,
     descripcion: trim(r.DescItem),
     referencia: trim(r.Referencia),
@@ -123,7 +124,7 @@ export function dedupePorCodigo(filas, ts) {
   const porCodigo = new Map();
   for (const r of filas) {
     if (r?.CodigoItem == null || trim(r.CodigoItem) === "") continue;
-    const codigo = String(r.CodigoItem).trim();
+    const codigo = normCodigoItem(r.CodigoItem);
     if (!porCodigo.has(codigo)) porCodigo.set(codigo, aRegistroCatalogo(r, ts));
   }
   return Array.from(porCodigo.values());
@@ -183,9 +184,29 @@ export async function refrescarCatalogo() {
       await CatalogoModel.upsertar(registros.slice(i, i + CHUNK));
     }
 
-    // 2. Prune: lo que este refresco no vio. Solo se llega acá con las dos guardas
-    //    superadas y TODO el upsert escrito.
-    bitacora.borradas = await CatalogoModel.podarAnterioresA(inicio);
+    // 2. Prune: lo que este refresco no vio. Se salta (el upsert ya quedó) si:
+    //    a) Connekta no declaró total (0 o ausente) con filas traídas: la guarda de
+    //       completitud no tuvo contra qué medir, no se puede afirmar que el pull es completo.
+    //    b) al RELEER la tabla, lo que quedó escrito por ESTE refresco no alcanza los
+    //       umbrales (upsert que no aterrizó, o un refresco paralelo que pisó el estado).
+    let podaOmitida = null;
+    if (!(totalDeclarado > 0)) {
+      podaOmitida = `Connekta no declaró el total de filas (${totalDeclarado}) con ${crudas} filas traídas: no se puede verificar la completitud.`;
+    } else {
+      const escritas = await CatalogoModel.contarDesde(inicio);
+      if (escritas < registros.length * UMBRAL_COMPLETITUD) {
+        podaOmitida = `En la base quedaron ${escritas} de ${registros.length} filas de este refresco.`;
+      } else if (previos > 0 && escritas < previos * UMBRAL_REGRESION) {
+        podaOmitida = `En la base quedaron ${escritas} filas de este refresco vs ${previos} previas.`;
+      }
+    }
+
+    if (podaOmitida) {
+      console.warn(`[catalogo] poda omitida: ${podaOmitida}`);
+      bitacora.detalle = `Poda omitida: ${podaOmitida}`;
+    } else {
+      bitacora.borradas = await CatalogoModel.podarAnterioresA(inicio);
+    }
 
     await registrarRefresh({ ...bitacora, resultado: "ok", duracion_ms: Date.now() - t0 });
 
@@ -194,6 +215,7 @@ export async function refrescarCatalogo() {
       crudas,
       totalDeclarado,
       borradas: bitacora.borradas,
+      ...(podaOmitida && { poda_omitida: podaOmitida }),
       sincronizado_at: inicio,
     };
   } catch (error) {
@@ -221,7 +243,10 @@ async function registrarRefresh(fila) {
    invocación puede caer en una instancia distinta. */
 
 const LOCK_REFRESH = "catalogo:refresh";
-const LOCK_TTL_S = 300;
+// 15 min, igual que el timeout del workflow: el pull (~24 páginas a concurrencia 3) más el
+// upsert tienen que caber COMPLETOS dentro del lock. Con un TTL corto el lock vence a mitad
+// de camino y un segundo refresco arranca en paralelo y pisa el estado del primero.
+const LOCK_TTL_S = 900;
 const WORKFLOW_CATALOGO = process.env.GITHUB_WORKFLOW_CATALOGO || "catalogo-refresh.yml";
 
 /** Refresca tomando el lock. Si otro ya lo tiene lanza CatalogoRefreshEnCursoError. */
