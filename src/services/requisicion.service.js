@@ -1119,7 +1119,10 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
       return { estado: "enviado", entradaExterna: Boolean(r.entradaExterna) };
     } catch (err) {
       const esConfig = err instanceof ConfigSiesaError;
-      const agotado = intentos + 1 >= MAX_INTENTOS;
+      // Un plano que no se puede armar (PayloadSiesaError: ej. UND con decimales)
+      // da lo mismo en cada pasada del cron: va a `fallido` de una, con el motivo
+      // a la vista, en vez de quemar los reintentos esperando que se arregle solo.
+      const agotado = intentos + 1 >= MAX_INTENTOS || err?.noReintentable === true;
       // SIN RESPUESTA ⇒ "incierto", y ahí se FRENA. El cron solo levanta
       // "pendiente", así que este no se reintenta solo: espera a que alguien mire
       // en SIESA y decida (ver sql/033). Es la política que este módulo ya

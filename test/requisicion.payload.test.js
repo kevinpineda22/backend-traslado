@@ -95,8 +95,8 @@ test("la cantidad respeta los 4 decimales de f470_cant_base, sin basura de punto
   const pesable = {
     ...despacho,
     traslados_items: [
-      { codigo_item: "0007777", cantidad_despachador: 0.1, factor: 1 },
-      { codigo_item: "0007777", cantidad_despachador: 0.2, factor: 1 },
+      { codigo_item: "0007777", unidad_medida: "KL", cantidad_despachador: 0.1, factor: 1 },
+      { codigo_item: "0007777", unidad_medida: "KL", cantidad_despachador: 0.2, factor: 1 },
     ],
   };
 
@@ -118,6 +118,7 @@ test("se redondea al final, no renglón por renglón — el total no arrastra el
     ...despacho,
     traslados_items: Array.from({ length: 3 }, () => ({
       codigo_item: "0006666",
+      unidad_medida: "KL",
       cantidad_despachador: 0.00005,
       factor: 1,
     })),
@@ -175,4 +176,92 @@ test("Machado: el C.O. resuelve 001 para el origen (PV001) y 012 para el destino
   assert.equal(entrada.Documentos[0]["C.O DOCTO"], "012");
   assert.equal(salida.Documentos[0].BODEGA_ENTRADA, "01201");
   assert.ok(entrada.Movimientos.every((m) => m.MOTIVO === "01" && m["C.O MOVIMIENTO"] === "012"));
+});
+
+/* =============================================================================
+   CADA ÍTEM VIAJA EN SU UNIDAD DE SIESA (2026-11-13).
+
+   Todo viajaba con UNIDAD_MEDIDA "UND" fijo. Los pesables existen en SIESA solo
+   en KL, y el primero que se despachó con peso (70751 PECHUGA BUCANERO, PV001 →
+   Machado) trabó el documento entero seis veces:
+
+     [HTTP 400] f_tipo_reg 470 — "Movto Inventario: La unidad de medida en el
+     registro no existe." (f_valor "UND")
+
+   Regla: UND y empaques → UND, en enteros. Pesables → KL, con sus decimales.
+   ============================================================================= */
+
+import { PayloadSiesaError, unidadSiesa } from "../src/services/siesaRequisicion.service.js";
+
+test("un pesable viaja en KL con los decimales que se pesaron, en las dos caras", () => {
+  const conPesable = {
+    ...despacho,
+    traslados_items: [
+      { codigo_item: "185704", unidad_medida: "UND", cantidad_despachador: 6, factor: 1 },
+      { codigo_item: "70751", unidad_medida: "KL", cantidad_despachador: 1.234, factor: 1 },
+    ],
+  };
+
+  for (const cara of [armarSalida(conPesable), armarEntrada(conPesable, "1757")]) {
+    const pechuga = cara.Movimientos.find((m) => m.ITEM === "70751");
+    assert.equal(pechuga.UNIDAD_MEDIDA, "KL");
+    assert.equal(pechuga.CANTIDAD, "1.234");
+
+    const patacon = cara.Movimientos.find((m) => m.ITEM === "185704");
+    assert.equal(patacon.UNIDAD_MEDIDA, "UND");
+    assert.equal(patacon.CANTIDAD, "6");
+  }
+});
+
+test("un empaque sigue convirtiéndose a UND con su factor", () => {
+  const conEmpaque = {
+    ...despacho,
+    traslados_items: [{ codigo_item: "25589", unidad_medida: "P30", cantidad_despachador: 7, factor: 30 }],
+  };
+  const [mov] = armarSalida(conEmpaque).Movimientos;
+  assert.equal(mov.UNIDAD_MEDIDA, "UND");
+  assert.equal(mov.CANTIDAD, "210");
+});
+
+test("unidadSiesa: UND, empaques y vacío van a UND; el resto se respeta", () => {
+  assert.equal(unidadSiesa({ unidad_medida: "UND" }), "UND");
+  assert.equal(unidadSiesa({ unidad_medida: "P6" }), "UND");
+  assert.equal(unidadSiesa({ unidad_medida: "p84" }), "UND");
+  assert.equal(unidadSiesa({}), "UND");
+  assert.equal(unidadSiesa({ unidad_medida: "KL" }), "KL");
+  assert.equal(unidadSiesa({ unidad_medida: " kl " }), "KL");
+});
+
+test("UND con decimales NO se manda: frena antes del POST nombrando el ítem", () => {
+  const mal = {
+    ...despacho,
+    traslados_items: [
+      { codigo_item: "182121", unidad_medida: "UND", cantidad_despachador: 6.9, factor: 1 },
+      { codigo_item: "70751", unidad_medida: "KL", cantidad_despachador: 1.5, factor: 1 },
+    ],
+  };
+
+  for (const armar of [() => armarSalida(mal), () => armarEntrada(mal, "1757")]) {
+    assert.throws(armar, (err) => {
+      assert.ok(err instanceof PayloadSiesaError);
+      assert.equal(err.noReintentable, true);
+      assert.match(err.message, /182121 \(6\.9 UND\)/);
+      assert.doesNotMatch(err.message, /70751/, "el pesable con decimales es válido");
+      return true;
+    });
+  }
+});
+
+test("el ruido de punto flotante al multiplicar por el factor no cuenta como decimal", () => {
+  // 0.1 × 3 = 0.30000000000000004 en float; acá: 3 renglones que suman un entero.
+  const ruido = {
+    ...despacho,
+    traslados_items: [
+      { codigo_item: "0001", unidad_medida: "P3", cantidad_despachador: 1.1, factor: 3 },
+      { codigo_item: "0001", unidad_medida: "P3", cantidad_despachador: 2.2, factor: 3 },
+      { codigo_item: "0001", unidad_medida: "P3", cantidad_despachador: 0.7, factor: 3 },
+    ],
+  };
+  const [mov] = armarSalida(ruido).Movimientos;
+  assert.equal(mov.CANTIDAD, "12");
 });

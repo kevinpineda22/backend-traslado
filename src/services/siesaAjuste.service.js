@@ -1,7 +1,7 @@
 import axios from "axios";
 import "dotenv/config";
 import { ejecutarConsulta } from "../config/connekta.js";
-import { resolverCO, fechaSiesa } from "./siesaRequisicion.service.js";
+import { resolverCO, fechaSiesa, unidadSiesa } from "./siesaRequisicion.service.js";
 import { sandboxOn } from "../config/sandbox.js";
 
 /* =============================================
@@ -614,7 +614,7 @@ export function armarPayloadAjuste({ bodega, co, fecha, lineas }) {
     nro_registro: String(i + 1),
     BODEGA: bodega,
     "C.O MOVIMIENTO": co,
-    UNIDAD_MEDIDA: cfg.unidadMedida(),
+    UNIDAD_MEDIDA: l.unidad || cfg.unidadMedida(),
     CANTIDAD: String(l.cantidad),
     COSTO_PROMEDIO: String(l.costo),
     ITEM: String(l.item),
@@ -670,6 +670,14 @@ function detalleError(data) {
  * @returns {Promise<{ok:true, docto:string, respuesta:object, payload:object}>}
  * @throws {Error} si falta config, o si SIESA rechaza / no responde
  */
+function unidadesDelDespacho(despacho) {
+  const mapa = new Map();
+  for (const it of despacho?.traslados_items || []) {
+    mapa.set(normItem(it.codigo_item), unidadSiesa(it));
+  }
+  return mapa;
+}
+
 export async function importarAjuste(despacho, faltantes) {
   const bodega = trim(despacho?.origen);
   const faltan = configAjusteFaltante(bodega);
@@ -681,8 +689,13 @@ export async function importarAjuste(despacho, faltantes) {
   }
 
   const datos = await getDatosItems(faltantes.map((f) => f.item));
+  const unidades = unidadesDelDespacho(despacho);
   const lineas = faltantes.map((f) => ({
     item: f.item,
+    // El faltante lo informa SIESA en la unidad de inventario del ítem: un
+    // pesable falta en KL. Ajustarlo en UND es el mismo rechazo que trabó la
+    // salida ("La unidad de medida en el registro no existe").
+    unidad: unidades.get(normItem(f.item)) || cfg.unidadMedida(),
     cantidad: f.cantidad,
     costo: datos[f.item]?.costo ?? 0,
     // Respaldo a la U.N. de config, no a "": una unidad de negocio vacía es un

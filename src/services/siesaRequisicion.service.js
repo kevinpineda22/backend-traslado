@@ -260,11 +260,51 @@ function notaDoc(despacho, cara) {
 }
 
 /**
- * Total en UND de UN renglón. `cantidad_despachador` vive en la unidad de ese
- * renglón, no en UND; el `factor` de esa misma fila es el que convierte.
+ * Unidad en la que el ítem existe en SIESA — la que va en `UNIDAD_MEDIDA`.
+ *
+ * POR QUÉ EXISTE (2026-11-13). Todo viajaba con `UNIDAD_MEDIDA: "UND"` fijo, y
+ * los pesables NO tienen UND en SIESA: existen solo en KL. El primer pesable que
+ * alguien despachó con peso (70751 PECHUGA BUCANERO, PV001 → Machado) trabó el
+ * documento ENTERO, seis intentos:
+ *
+ *   [HTTP 400] f_tipo_reg 470 — "Movto Inventario: La unidad de medida en el
+ *   registro no existe." (f_valor "UND")
+ *
+ * La unidad sale del propio renglón, que ya la trae bien: medido contra el
+ * snapshot de SIESA, los renglones en KL son siempre de ítems KL y los empaques
+ * (P6, P25…) siempre de ítems con base UND. Entonces:
+ *
+ *   - UND o empaque `P<n>` → UND (el empaque se convierte con su factor).
+ *   - Cualquier otra (KL)  → esa misma unidad, tal cual.
+ *   - Sin unidad           → UND (renglones viejos).
  */
-function cantidadEnUnd(it) {
-  return (Number(it.cantidad_despachador) || 0) * (Number(it.factor) || 1);
+export function unidadSiesa(it) {
+  const um = trim(it?.unidad_medida).toUpperCase();
+  if (!um || um === "UND" || /^P\d+$/.test(um)) return "UND";
+  return um;
+}
+
+/**
+ * Cantidad de UN renglón expresada en su `unidadSiesa`. `cantidad_despachador`
+ * vive en la unidad del renglón: un empaque se lleva a UND con su `factor`; un
+ * pesable ya está en su unidad (KL) y va tal cual se pesó, con decimales.
+ */
+function cantidadEnUnidadSiesa(it) {
+  const cantidad = Number(it.cantidad_despachador) || 0;
+  return unidadSiesa(it) === "UND" ? cantidad * (Number(it.factor) || 1) : cantidad;
+}
+
+/**
+ * El plano no se puede armar con estos datos. NO es un rechazo de SIESA ni una
+ * incógnita: nunca se mandó nada, y reintentar con los mismos datos da lo mismo.
+ * requisicion.service lo deja `fallido` de una, sin gastar reintentos.
+ */
+export class PayloadSiesaError extends Error {
+  constructor(mensaje) {
+    super(mensaje);
+    this.name = "PayloadSiesaError";
+    this.noReintentable = true;
+  }
 }
 
 /** Decimales que acepta `f470_cant_base` (spec del registro 470). */
@@ -292,7 +332,8 @@ function cantidadSiesa(n) {
 }
 
 /**
- * Consolida los renglones por código de ítem, sumando lo ya convertido a UND.
+ * Consolida los renglones por código de ítem, sumando lo ya convertido a su
+ * unidad de SIESA (UND para unidades y empaques, KL para pesables).
  *
  * POR QUÉ EXISTE. En traslados un ítem son VARIOS renglones: uno por unidad de
  * medida (el mismo producto contado en UND y en CAJA son dos filas, cada una con
@@ -315,14 +356,39 @@ function cantidadSiesa(n) {
 function consolidarPorItem(items) {
   const porItem = new Map();
 
+  // La llave es (ítem, unidad SIESA). Un ítem tiene una sola unidad de
+  // inventario, así que en la práctica es por ítem; pero si dos renglones del
+  // mismo código llegaran en unidades distintas (UND y KL), sumarlos sería
+  // mezclar unidades y kilos. Separados son dos movimientos DISTINGUIBLES.
   for (const it of items) {
     const codigo = String(it.codigo_item || "");
-    const acumulado = porItem.get(codigo);
-    if (acumulado) acumulado.cantidad += cantidadEnUnd(it);
-    else porItem.set(codigo, { codigo, cantidad: cantidadEnUnd(it) });
+    const unidad = unidadSiesa(it);
+    const llave = `${codigo}|${unidad}`;
+    const acumulado = porItem.get(llave);
+    if (acumulado) acumulado.cantidad += cantidadEnUnidadSiesa(it);
+    else porItem.set(llave, { codigo, unidad, cantidad: cantidadEnUnidadSiesa(it) });
   }
 
-  return [...porItem.values()];
+  const consolidados = [...porItem.values()];
+
+  // UND es un conteo: no hay media unidad. Un decimal acá es un dato mal cargado
+  // (ya pasó: 6.9 jabones y 31.98 paquetes subieron así a SIESA en sep-2026) y
+  // redondearlo en silencio movería inventario que nadie contó. Se frena ANTES
+  // de mandar, nombrando el ítem, para que lo corrijan. Se compara con la
+  // cantidad ya redondeada al formato del conector: 46.00000000001 (ruido de
+  // punto flotante al multiplicar por el factor) NO es un decimal real.
+  const conDecimales = consolidados.filter(
+    (c) => c.unidad === "UND" && !Number.isInteger(Number(cantidadSiesa(c.cantidad))),
+  );
+  if (conDecimales.length) {
+    throw new PayloadSiesaError(
+      "No se puede subir a SIESA: hay ítems en UND con decimales (UND va en " +
+        "enteros). Corregí la cantidad despachada de: " +
+        conDecimales.map((c) => `${c.codigo} (${cantidadSiesa(c.cantidad)} UND)`).join(", "),
+    );
+  }
+
+  return consolidados;
 }
 
 /**
@@ -330,10 +396,10 @@ function consolidarPorItem(items) {
  * Salida y entrada comparten estructura y difieren solo en C.O., tipo de docto,
  * bodega y motivo.
  *
- * OJO con la UNIDAD: `cantidad_despachador` está guardada en la unidad del ítem,
- * NO en UND. `cantidad_despachador × factor` da el total real en UND (el factor
- * queda sincronizado con la unidad guardada — misma canonicalización que
- * compararAuditoria). A SIESA siempre va en UND.
+ * OJO con la UNIDAD: cada ítem viaja en SU unidad de SIESA (`unidadSiesa`). Los
+ * de UND y empaque van en UND (`cantidad_despachador × factor`, entero); los
+ * pesables van en KL con los decimales que se pesaron. Mandar un KL como UND es
+ * un rechazo del documento entero (ver unidadSiesa).
  *
  * `NRO DOCTO` va en 0: el conector asigna el consecutivo (F_CONSEC_AUTO_REG = 1).
  * La entrada NO referencia a la salida por acá, sino por el CONSECUTIVO del
@@ -348,7 +414,7 @@ function construirMovimientos(items, { co, tipoDocto, bodega, motivo }) {
     BODEGA_MOVIMIENTO: bodega,
     MOTIVO: motivo,
     "C.O MOVIMIENTO": co,
-    UNIDAD_MEDIDA: "UND",
+    UNIDAD_MEDIDA: it.unidad,
     CANTIDAD: cantidadSiesa(it.cantidad),
     ITEM: it.codigo,
   }));
