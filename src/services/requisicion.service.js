@@ -922,6 +922,27 @@ export async function resolverIncierto(despachoId, resultado, quien = null, { fo
   return { estado, resultado, verificacion: verificacion.estado, docto: verificacion.doc?.nro ?? null };
 }
 
+/**
+ * ¿Este despacho solo está ESPERANDO para mandar la entrada? Salida ya arriba y
+ * anclada, nada falló: lo último que pasó fue la espera a que SIESA la deje lista.
+ *
+ * POR QUÉ EXISTE (2026-11-13). El tope de intentos protege contra insistir sobre
+ * algo que falla, pero esperar no es fallar. Un despacho que agotó sus intentos
+ * y se destrabó con `?forzar=1` (c7b5e4f4, Machado) subió la salida, entró en la
+ * espera… y quedó ahí para siempre: la espera devuelve el contador a su valor
+ * previo (7, ya por encima del tope), el cron solo levanta `intentos < tope` y
+ * `enviarRequisicion` lo habría pasado a 'fallido' igual. Mercancía en tránsito
+ * sin entrada y sin aviso a nadie.
+ *
+ * Exceptuarlo del tope no abre un bucle: la entrada se intenta UNA vez más; si
+ * SIESA la rechaza, el contador ya está agotado y va a 'fallido' con el motivo.
+ */
+export function soloFaltaEntrada(despacho) {
+  if (despacho?.siesa_estado !== "pendiente" || !despacho?.siesa_salida_at) return false;
+  const log = Array.isArray(despacho.siesa_intentos_log) ? despacho.siesa_intentos_log : [];
+  return log[log.length - 1]?.fase === "espera-entrada";
+}
+
 export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
   const id = typeof despachoOId === "string" ? despachoOId : despachoOId?.id;
   if (!id) return { estado: "omitido", motivo: "sin id" };
@@ -982,7 +1003,7 @@ export async function enviarRequisicion(despachoOId, { forzar = false } = {}) {
     }
 
     const intentos = Number(despacho.siesa_intentos) || 0;
-    if (intentos >= MAX_INTENTOS && !forzar) {
+    if (intentos >= MAX_INTENTOS && !forzar && !soloFaltaEntrada(despacho)) {
       await marcar(id, { siesa_estado: "fallido" });
       return {
         estado: "fallido",
@@ -1189,7 +1210,10 @@ export async function reintentarPendientes(limite = 20) {
     .from(TABLE)
     .select("id")
     .eq("siesa_estado", "pendiente")
-    .lt("siesa_intentos", MAX_INTENTOS)
+    // Con la salida ya anclada entra aunque haya agotado intentos: puede estar
+    // solo esperando para mandar la entrada (ver soloFaltaEntrada). Si no está
+    // esperando, `enviarRequisicion` lo frena igual por el tope.
+    .or(`siesa_intentos.lt.${MAX_INTENTOS},siesa_salida_at.not.is.null`)
     .order("updated_at", { ascending: true })
     .limit(limite);
 

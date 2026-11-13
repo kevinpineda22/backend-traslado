@@ -383,3 +383,75 @@ test("modo SOLO SALIDA sigue funcionando como freno de emergencia", async () => 
   assert.equal(calls.buscarEntrada, 0, "ni siquiera consulta: la entrada está pausada");
   assert.equal(row.siesa_estado, "enviado", "terminal, no se reintenta");
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   LA ESPERA NO CHOCA CONTRA EL TOPE DE INTENTOS (2026-11-13)
+
+   c7b5e4f4 (Machado) había agotado sus intentos por otro error. Se destrabó con
+   `?forzar=1`: la salida subió, entró en la espera, y la espera devolvió el
+   contador a 7 — por encima del tope. El cron solo levantaba `intentos < 5` y
+   `enviarRequisicion` lo habría pasado a 'fallido': salida en SIESA, entrada
+   nunca. Hubo que mandarla a mano.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+test("agotado pero solo esperando la entrada: la pasada del cron la manda igual", async () => {
+  process.env.SIESA_ENTRADA_ESPERA_MS = "300000";
+  row.siesa_estado = "pendiente";
+  row.siesa_intentos = 7;
+  row.siesa_salida_at = new Date(Date.now() - 30 * 60_000).toISOString();
+  row.siesa_salida_docto = "4878";
+  row.siesa_intentos_log = [{ n: 8, fase: "espera-entrada", estado: "pendiente" }];
+
+  const r = await enviarRequisicion("D1"); // sin forzar: como el cron
+
+  assert.equal(calls.salida, 0, "la salida ya estaba: NO se re-manda");
+  assert.equal(calls.entrada, 1, "la entrada se manda aunque el contador esté agotado");
+  assert.equal(r.estado, "enviado");
+});
+
+test("agotado y la entrada vuelve a fallar: 'fallido' de una, sin bucle", async () => {
+  process.env.SIESA_ENTRADA_ESPERA_MS = "300000";
+  row.siesa_estado = "pendiente";
+  row.siesa_intentos = 7;
+  row.siesa_salida_at = new Date(Date.now() - 30 * 60_000).toISOString();
+  row.siesa_salida_docto = "4878";
+  row.siesa_intentos_log = [{ n: 8, fase: "espera-entrada", estado: "pendiente" }];
+  impl.importarEntrada = async () => {
+    const e = new Error("SIESA rechazó la entrada en tránsito [HTTP 400]");
+    e.httpStatus = 400;
+    throw e;
+  };
+
+  await enviarRequisicion("D1");
+
+  assert.equal(calls.entrada, 1);
+  assert.equal(row.siesa_estado, "fallido", "un solo intento extra, y a la vista");
+});
+
+test("agotado por un fallo real (no esperando): el tope sigue frenando", async () => {
+  row.siesa_estado = "pendiente";
+  row.siesa_intentos = 5;
+  row.siesa_salida_at = new Date(Date.now() - 30 * 60_000).toISOString();
+  row.siesa_intentos_log = [{ n: 5, fase: "entrada", estado: "pendiente", error: "rechazo" }];
+
+  const r = await enviarRequisicion("D1");
+
+  assert.equal(calls.salida + calls.entrada, 0, "ni salida ni entrada: agotó de verdad");
+  assert.equal(r.estado, "fallido");
+});
+
+let soloFaltaEntrada;
+
+test("soloFaltaEntrada: exige salida anclada, 'pendiente' y la espera como último paso", async () => {
+  ({ soloFaltaEntrada } = await import("../src/services/requisicion.service.js"));
+  const base = {
+    siesa_estado: "pendiente",
+    siesa_salida_at: "2026-11-13T16:26:47Z",
+    siesa_intentos_log: [{ fase: "salida" }, { fase: "espera-entrada" }],
+  };
+  assert.equal(soloFaltaEntrada(base), true);
+  assert.equal(soloFaltaEntrada({ ...base, siesa_salida_at: null }), false, "sin salida arriba no hay entrada que esperar");
+  assert.equal(soloFaltaEntrada({ ...base, siesa_estado: "fallido" }), false);
+  assert.equal(soloFaltaEntrada({ ...base, siesa_intentos_log: [{ fase: "espera-entrada" }, { fase: "entrada" }] }), false, "lo último fue un intento, no la espera");
+  assert.equal(soloFaltaEntrada({ ...base, siesa_intentos_log: null }), false);
+});
