@@ -65,7 +65,8 @@ export async function obtenerDetalle(req, res, next) {
 
     // Canastillas (038): al auditor le llegan los NÚMEROS, nunca el contenido.
     // Y por producto, solo si viaja (también) suelto: es lo que arma la lista de
-    // "Sin canastilla". No revela cantidades ni en qué canastilla va cada cosa.
+    // "Sin canastilla". No revela cantidades ni en qué canastilla va cada cosa
+    // (eso solo se dice en `comparar`, para lo que hay que recontar).
     const canastillas = await ContenedorModel.listarPorDespacho(req.params.id).catch(() => []);
     const enCanastillas = new Map();
     for (const c of canastillas) {
@@ -142,7 +143,7 @@ export async function obtenerDetalle(req, res, next) {
  * Paso 1: dice SI cuadra y, si no, QUÉ hay que recontar. No firma, no cambia estado.
  *
  * Body: { items: [{ id, cantidad_auditor }] }
- * Resp: { ok, data: { match, recontar: [{ id, codigo_item, descripcion }] } }
+ * Resp: { ok, data: { match, recontar: [{ id, codigo_item, descripcion, canastillas: [{ numero, no_recibida }] }] } }
  *
  * Devuelve la lista a recontar SIN cantidades ni diferencias, a propósito. Si
  * mandáramos los números y solo los escondiéramos en la UI, cualquiera los ve
@@ -156,14 +157,25 @@ export async function comparar(req, res, next) {
       req.body.items,
     );
 
-    const recontar = differences
-      .filter((d) => Number(d.diferencia) !== 0)
-      .map((d) => ({
-        id: d.id,
-        codigo_item: d.codigo_item,
-        descripcion: d.descripcion,
-        no_recibido: d.no_recibido || false,
-      }));
+    const conDiferencia = differences.filter((d) => Number(d.diferencia) !== 0);
+
+    // En qué canastillas lo empacó el origen (solo números, nunca cantidades —
+    // ver RecepcionContenedores.canastillasPorItem). Best-effort: si falla, la
+    // lista sale igual, solo que sin el "dónde buscar".
+    const donde = conDiferencia.length
+      ? await RecepcionContenedores.dondeBuscar(req.params.id).catch((e) => {
+          console.error("[auditoría] no se pudo leer dónde buscar:", e.message);
+          return new Map();
+        })
+      : new Map();
+
+    const recontar = conDiferencia.map((d) => ({
+      id: d.id,
+      codigo_item: d.codigo_item,
+      descripcion: d.descripcion,
+      no_recibido: d.no_recibido || false,
+      canastillas: donde.get(d.id) || [],
+    }));
 
     res.json({ ok: true, data: { match, recontar } });
   } catch (error) {

@@ -288,3 +288,28 @@ test("recuento del traslado entero junta el producto de todas las zonas en una f
   assert.equal(del0[0].contenedor_id, null);
   assert.equal(del0[0].conteo_previo, 5);
 });
+
+/* ── DÓNDE BUSCAR (recontar en la comparación final) ───────────────────────── */
+
+test("dónde buscar: números de canastilla del origen por producto, nunca la cantidad", async () => {
+  // El producto 2 también va en la 15; la 22 no llegó.
+  bd.tablas.traslados_contenedor_items.push({ id: "x4", contenedor_id: C15, item_id: itemId(2), cantidad: 1 });
+  can(C22).recepcion_estado = "no_recibido";
+
+  const donde = await R.dondeBuscar(D);
+  assert.deepEqual(donde.get(itemId(0)), [{ numero: "15", no_recibida: false }]);
+  assert.deepEqual(donde.get(itemId(2)), [
+    { numero: "15", no_recibida: false },
+    { numero: "22", no_recibida: true },
+  ]);
+  assert.equal(JSON.stringify([...donde.values()]).includes("cantidad"), false);
+});
+
+test("dónde buscar: orden numérico (2 antes que 10) y sin filas en cero", () => {
+  const donde = R.canastillasPorItem([
+    { numero: "10", items: [{ item_id: "a", cantidad: 1 }] },
+    { numero: "2", items: [{ item_id: "a", cantidad: 3 }, { item_id: "b", cantidad: 0 }] },
+  ]);
+  assert.deepEqual(donde.get("a").map((c) => c.numero), ["2", "10"]);
+  assert.equal(donde.has("b"), false);
+});

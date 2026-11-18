@@ -49,6 +49,44 @@ export async function listarParaAuditor(despachoId) {
   return (await ContenedorModel.listarPorDespacho(despachoId)).map(vistaCiega);
 }
 
+/**
+ * DÓNDE BUSCAR lo que hay que recontar: por producto, los NÚMEROS de las
+ * canastillas en que el despachador lo empacó. Nunca la cantidad.
+ *
+ * Es la ÚNICA excepción a "el auditor no sabe qué trae cada canastilla", y es
+ * acotada a propósito: solo para los productos que ya NO cuadraron en la
+ * comparación final, cuando el conteo ciego ya terminó. Sin esto el auditor
+ * quedaba frente a una lista de productos y N canastillas cerradas sin saber
+ * cuál abrir. El auditor sigue sin un número que copiar: saber que el jabón va
+ * en la 15 no le dice cuántos.
+ *
+ * Por qué del ORIGEN y no de donde contó el auditor: el faltante típico son
+ * unidades en una canastilla donde no lo contó. Su propio conteo lo mandaría a
+ * buscar justo donde ya buscó.
+ *
+ * Puro (recibe `listarPorDespacho`) para testearlo sin base.
+ * @returns {Map<string, Array<{numero:string, no_recibida:boolean}>>}
+ */
+export function canastillasPorItem(contenedores = []) {
+  const porItem = new Map();
+  for (const c of contenedores) {
+    for (const f of c.items || []) {
+      if (!(Number(f.cantidad) > 0)) continue;
+      const lista = porItem.get(f.item_id) || [];
+      lista.push({ numero: String(c.numero), no_recibida: c.recepcion_estado === "no_recibido" });
+      porItem.set(f.item_id, lista);
+    }
+  }
+  for (const lista of porItem.values()) {
+    lista.sort((a, b) => a.numero.localeCompare(b.numero, "es", { numeric: true }));
+  }
+  return porItem;
+}
+
+export async function dondeBuscar(despachoId) {
+  return canastillasPorItem(await ContenedorModel.listarPorDespacho(despachoId));
+}
+
 async function canastillaDe(despachoId, contenedorId) {
   const c = await ContenedorModel.buscar(despachoId, contenedorId);
   if (!c) throw error(404, "Esa canastilla no es de este traslado.", "CANASTILLA_NO_EXISTE");
