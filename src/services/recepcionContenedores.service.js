@@ -12,9 +12,10 @@ import { despachoContable, senalarRecepcionActiva } from "./recepcion.service.js
    cierra. Al cerrarla se compara SOLO esa canastilla contra lo que el
    despachador declaró en ella.
 
-   CIEGA: el auditor nunca recibe cantidades esperadas ni el contenido. Al
-   cerrar se le devuelve qué productos recontar (los que contó y no cuadran) y
-   CUÁNTOS productos declarados no encontró, sin nombrarlos.
+   CIEGA EN CANTIDAD: el auditor sabe QUÉ productos trae cada canastilla
+   (`vistaAuditor`, desde 2026-11-20) pero nunca CUÁNTOS. Al cerrar se le
+   devuelve qué productos recontar (los que contó y no cuadran) y CUÁNTOS
+   productos declarados no encontró.
 
    El inventario se decide en la comparación FINAL del traslado (la de siempre),
    que suma todas las canastillas por producto: un producto en la canastilla
@@ -45,17 +46,35 @@ export function vistaCiega(c) {
   };
 }
 
+/**
+ * Lo que ve el auditor en la LISTA de canastillas: lo de `vistaCiega` más QUÉ
+ * productos trae cada una — solo los ids, NUNCA cuántos.
+ *
+ * Decisión de negocio (2026-11-20): el auditor necesita saber qué buscar
+ * adentro de una canastilla. La ceguera que se conserva es la de la CANTIDAD:
+ * sabe que vienen jabones en la 15, no cuántos, así que igual tiene que
+ * contarlos. Va solo en la lista (necesita `items`, que trae
+ * `listarPorDespacho`); las respuestas de entrar/cerrar/reabrir siguen con
+ * `vistaCiega`.
+ */
+export function vistaAuditor(c) {
+  const productos = [
+    ...new Set((c.items || []).filter((f) => Number(f.cantidad) > 0).map((f) => f.item_id)),
+  ];
+  return { ...vistaCiega(c), productos };
+}
+
 export async function listarParaAuditor(despachoId) {
-  return (await ContenedorModel.listarPorDespacho(despachoId)).map(vistaCiega);
+  return (await ContenedorModel.listarPorDespacho(despachoId)).map(vistaAuditor);
 }
 
 /**
  * DÓNDE BUSCAR lo que hay que recontar: por producto, los NÚMEROS de las
  * canastillas en que el despachador lo empacó. Nunca la cantidad.
  *
- * Es la ÚNICA excepción a "el auditor no sabe qué trae cada canastilla", y es
- * acotada a propósito: solo para los productos que ya NO cuadraron en la
- * comparación final, cuando el conteo ciego ya terminó. Sin esto el auditor
+ * (Desde 2026-11-20 el auditor ya ve qué productos trae cada canastilla — ver
+ * `vistaAuditor` —, pero esto sigue siendo útil: le dice, por producto, en
+ * cuáles buscar, sin tener que recorrer canastilla por canastilla.) Sin esto el auditor
  * quedaba frente a una lista de productos y N canastillas cerradas sin saber
  * cuál abrir. El auditor sigue sin un número que copiar: saber que el jabón va
  * en la 15 no le dice cuántos.

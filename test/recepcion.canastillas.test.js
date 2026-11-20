@@ -126,12 +126,16 @@ beforeEach(() => {
 
 /* ── LA CEGUERA ────────────────────────────────────────────────────────────── */
 
-test("el auditor ve números y estado, nunca el contenido", async () => {
+test("el auditor ve número, estado y QUÉ productos trae cada canastilla, nunca cuántos", async () => {
+  // Una fila en cero no es "trae": no se lista.
+  bd.tablas.traslados_contenedor_items.push({ id: "x0", contenedor_id: C22, item_id: itemId(0), cantidad: 0 });
   const lista = await R.listarParaAuditor(D);
   assert.deepEqual(lista.map((c) => c.numero), ["15", "22"]);
+  assert.deepEqual(lista[0].productos, [itemId(0), itemId(1)]);
+  assert.deepEqual(lista[1].productos, [itemId(2)]);
   for (const c of lista) {
-    assert.equal(c.items, undefined);
-    assert.equal(JSON.stringify(c).includes(itemId(0)), false);
+    assert.equal(c.items, undefined, "las filas del despachador (con cantidad) no viajan");
+    assert.equal(/cantidad/i.test(JSON.stringify(c)), false, "ninguna cantidad");
   }
 });
 

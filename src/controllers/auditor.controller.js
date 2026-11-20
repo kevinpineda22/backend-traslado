@@ -63,10 +63,9 @@ export async function obtenerDetalle(req, res, next) {
     // Auditoría ciega: ocultar cantidad_despachador y firma del despachador
     const { traslados_firmas, traslados_items, ...cabecera } = despacho;
 
-    // Canastillas (038): al auditor le llegan los NÚMEROS, nunca el contenido.
-    // Y por producto, solo si viaja (también) suelto: es lo que arma la lista de
-    // "Sin canastilla". No revela cantidades ni en qué canastilla va cada cosa
-    // (eso solo se dice en `comparar`, para lo que hay que recontar).
+    // Canastillas (038): al auditor le llegan los números y QUÉ productos trae
+    // cada una (`vistaAuditor`), nunca cuántos. Y por producto, si viaja
+    // (también) suelto: es lo que arma la lista de "Sin canastilla".
     const canastillas = await ContenedorModel.listarPorDespacho(req.params.id).catch(() => []);
     const enCanastillas = new Map();
     for (const c of canastillas) {
@@ -129,7 +128,7 @@ export async function obtenerDetalle(req, res, next) {
         traslados_items: itemsCiegos,
         // null = no se pudo leer (el panel no debe tomarlo como "no hay nada").
         recepcion_conteos: conteos,
-        canastillas: canastillas.map(RecepcionContenedores.vistaCiega),
+        canastillas: canastillas.map(RecepcionContenedores.vistaAuditor),
         // Sin firmas del despachador
       },
     });
